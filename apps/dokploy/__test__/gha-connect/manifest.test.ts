@@ -139,3 +139,38 @@ describe("parseReleaseManifest", () => {
 		});
 	});
 });
+
+describe("parseReleaseManifest: the image cap", () => {
+	const withImages = (count: number, perService = count) => {
+		const manifest = JSON.parse(read("valid/multi-service-pull.json"));
+		const services = [];
+		let n = 0;
+		while (n < count) {
+			const images = [];
+			for (let i = 0; i < perService && n < count; i += 1, n += 1) {
+				images.push({
+					name: `i${n}`,
+					composeService: `i${n}`,
+					ref: `registry.example.com/acme/shop/i${n}@sha256:${"e".repeat(64)}`,
+				});
+			}
+			services.push({ key: `s${services.length}`, images });
+		}
+		manifest.services = services;
+		manifest.release.services = services.map((s) => s.key);
+		return manifest;
+	};
+
+	it("accepts 64 images and refuses 65, in one service or spread over several", () => {
+		expect(parseReleaseManifest(withImages(64)).ok).toBe(true);
+		expect(parseReleaseManifest(withImages(64, 8)).ok).toBe(true);
+		expect(parseReleaseManifest(withImages(65))).toMatchObject({
+			ok: false,
+			code: "invalid",
+		});
+		expect(parseReleaseManifest(withImages(65, 8))).toMatchObject({
+			ok: false,
+			code: "invalid",
+		});
+	});
+});

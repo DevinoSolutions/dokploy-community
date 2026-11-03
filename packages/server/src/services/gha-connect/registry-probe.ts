@@ -10,7 +10,13 @@ import type { ApiFetch, ApiResponse } from "./actions-api";
 export type ProbeResult =
 	| { kind: "ok"; digest: string | null }
 	| { kind: "not-found" }
-	| { kind: "unreachable"; status: number };
+	| { kind: "unreachable"; status: number }
+	/**
+	 * The registry answered but would not let this Dokploy read the image (401 or 403 after the
+	 * token exchange, a Basic challenge with no saved login, a token endpoint that is not https).
+	 * Not a network problem: asking again changes nothing until a login is saved or fixed.
+	 */
+	| { kind: "denied"; status: number; reason: string };
 
 export interface RegistryProbe {
 	headDigest(input: {
@@ -81,6 +87,14 @@ export const createRegistryProbe = (deps: {
 				},
 			});
 
+		const denied = (status: number, why: string): ProbeResult => ({
+			kind: "denied",
+			status,
+			reason: access
+				? `the saved login for ${host} did not work: the registry ${why}`
+				: `Dokploy has no saved login for ${host} and the registry ${why}`,
+		});
+
 		let response: ApiResponse;
 		try {
 			response = await head(basic(access));
@@ -93,7 +107,10 @@ export const createRegistryProbe = (deps: {
 					// The token endpoint must be https (or the registry's own http base):
 					// the credential is never sent to a plain-http foreign host.
 					if (realm.protocol !== "https:" && !base.startsWith("http://")) {
-						return { kind: "unreachable", status: 401 };
+						return denied(
+							401,
+							"asked for a token over plain http, which is never used",
+						);
 					}
 					if (challenge.service)
 						realm.searchParams.set("service", challenge.service);
@@ -105,6 +122,9 @@ export const createRegistryProbe = (deps: {
 						method: "GET",
 						headers: { "User-Agent": "dokploy-community", ...basic(access) },
 					});
+					if (tokenResponse.status === 401 || tokenResponse.status === 403) {
+						return denied(tokenResponse.status, "refused the token request");
+					}
 					if (!tokenResponse.ok) {
 						return { kind: "unreachable", status: tokenResponse.status };
 					}
@@ -118,7 +138,7 @@ export const createRegistryProbe = (deps: {
 							: typeof body?.access_token === "string"
 								? body.access_token
 								: null;
-					if (!token) return { kind: "unreachable", status: 401 };
+					if (!token) return denied(401, "gave no token");
 					response = await head({ Authorization: `Bearer ${token}` });
 				}
 			}
@@ -126,6 +146,9 @@ export const createRegistryProbe = (deps: {
 			return { kind: "unreachable", status: 0 };
 		}
 		if (response.status === 404) return { kind: "not-found" };
+		if (response.status === 401 || response.status === 403) {
+			return denied(response.status, "refused the request");
+		}
 		if (!response.ok) return { kind: "unreachable", status: response.status };
 		return {
 			kind: "ok",

@@ -154,10 +154,15 @@ const run = (
 	w: ReturnType<typeof world>,
 	connection: ConnectionFacts = facts(),
 	attempt = 1,
+	extra: { hint?: { job?: string; runner?: string }; now?: number } = {},
 ) =>
 	acceptRelease(
-		{ runId: RUN_ID, runAttempt: attempt, connection },
-		{ api: w.api, probe: w.probe },
+		{ runId: RUN_ID, runAttempt: attempt, connection, hint: extra.hint },
+		{
+			api: w.api,
+			probe: w.probe,
+			now: extra.now === undefined ? undefined : () => extra.now as number,
+		},
 	);
 
 const expectRefused = (
@@ -662,11 +667,26 @@ describe("a re-run replaces the artifact", () => {
 		expect(result).toMatchObject({ kind: "superseded" });
 	});
 
-	it("still refuses a manifest that claims a lower attempt than the Deployment (a binding error)", async () => {
+	it("treats the artifact of an older attempt of this run as unavailable, not as a block", async () => {
 		const w = world();
 		w.state.run = { ...w.state.run, attempt: 2 };
 		const result = await run(w, facts(), 2);
-		expectRefused(result, "manifest-binding", true);
+		expectRefused(result, "artifact-binding", false);
+	});
+
+	it("still blocks a manifest that names another run", async () => {
+		const w = world();
+		w.state.zip = zipOf(
+			manifest({
+				source: {
+					forge: "github",
+					ref: "refs/heads/dev",
+					runId: "5",
+					runAttempt: 1,
+				},
+			}),
+		);
+		expectRefused(await run(w), "manifest-binding", true);
 	});
 });
 
@@ -681,6 +701,7 @@ describe("the manifest from the release job's log (artifact uploads blocked by t
 		status: "completed",
 		conclusion: "success",
 		headSha: SHA,
+		runnerName: "runner-1",
 		stepNames: [
 			"Set up job",
 			"Run DevinoSolutions/dokploy-release@v1",
@@ -689,7 +710,7 @@ describe("the manifest from the release job's log (artifact uploads blocked by t
 		...patch,
 	});
 	const marker = (m: unknown) =>
-		`::dokploy-release::${Buffer.from(JSON.stringify(m)).toString("base64")}`;
+		`dokploy-release/v1 ${Buffer.from(JSON.stringify(m), "utf8").toString("hex")}`;
 	const logOf = (...lines: string[]) =>
 		[
 			"2026-11-03T12:00:00.0000000Z ##[group]Run DevinoSolutions/dokploy-release@v1",
@@ -928,14 +949,13 @@ describe("the manifest from the release job's log (artifact uploads blocked by t
 		it("ignores jobs that are not the release job, did not succeed, or ran another commit or attempt", async () => {
 			const w = quotaWorld();
 			w.state.jobs = [
-				releaseJob({ id: 1, name: "build", stepNames: ["Run docker build"] }),
 				releaseJob({ id: 2, conclusion: "failure" }),
 				releaseJob({ id: 3, status: "in_progress", conclusion: null }),
 				releaseJob({ id: 4, headSha: "d".repeat(40) }),
 				releaseJob({ id: 5, runId: 12 }),
 				releaseJob({ id: 6, attempt: 2 }),
 			];
-			for (const id of [1, 2, 3, 4, 5, 6]) {
+			for (const id of [2, 3, 4, 5, 6]) {
 				w.state.logs.set(id, logOf(marker(manifest())));
 			}
 			expectRefused(await run(w), "artifact-missing", false);
@@ -953,11 +973,13 @@ describe("the manifest from the release job's log (artifact uploads blocked by t
 			expect(result.kind).toBe("accepted");
 			expect(w.state.jobCalls).toEqual([1]);
 		});
-		it("reads at most three jobs", async () => {
+		it("reads at most ten jobs", async () => {
 			const w = quotaWorld();
-			w.state.jobs = [1, 2, 3, 4, 5].map((id) => releaseJob({ id }));
+			w.state.jobs = Array.from({ length: 12 }, (_, i) =>
+				releaseJob({ id: i + 1 }),
+			);
 			await run(w);
-			expect(w.state.jobCalls).toEqual([1, 2, 3]);
+			expect(w.state.jobCalls).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 		});
 		it("skips a log that is too large or gone and uses another job's", async () => {
 			const w = quotaWorld();
@@ -997,14 +1019,14 @@ describe("the manifest from the release job's log (artifact uploads blocked by t
 			);
 			expect((await run(twice)).kind).toBe("accepted");
 		});
-		it("blocks on a marker that is not valid base64, and one that is not JSON", async () => {
+		it("blocks on a marker that is not valid hex, and one that is not JSON", async () => {
 			const bad = quotaWorld();
-			bad.state.logs.set(JOB_ID, logOf("::dokploy-release::%%%not-base64%%%"));
+			bad.state.logs.set(JOB_ID, logOf("dokploy-release/v1 zz-not-hex"));
 			expectRefused(await run(bad), "manifest-invalid", true);
 			const notJson = quotaWorld();
 			notJson.state.logs.set(
 				JOB_ID,
-				logOf(`::dokploy-release::${Buffer.from("nope").toString("base64")}`),
+				logOf(`dokploy-release/v1 ${Buffer.from("nope").toString("hex")}`),
 			);
 			expectRefused(await run(notJson), "manifest-invalid", true);
 		});
@@ -1024,6 +1046,286 @@ describe("the manifest from the release job's log (artifact uploads blocked by t
 			const w = quotaWorld();
 			w.state.logs.set(JOB_ID, `﻿runner line\r\n${marker(manifest())}\r\n`);
 			expect((await run(w)).kind).toBe("accepted");
+		});
+	});
+});
+
+describe("review fixes: masking, older attempts, log grace, hints, deleted commits, denied registries", () => {
+	type World = ReturnType<typeof world>;
+	const JOB = 6001;
+	const hexMarker = (m: unknown) =>
+		`dokploy-release/v1 ${Buffer.from(JSON.stringify(m), "utf8").toString("hex")}`;
+	const logWith = (...lines: string[]) =>
+		[
+			"2026-11-03T12:00:00.0000000Z ##[group]Run DevinoSolutions/dokploy-release@v1",
+			...lines.map((line) => `2026-11-03T12:00:02.1234567Z ${line}`),
+			"",
+		].join("\n");
+	const job = (patch: Partial<JobInfo> = {}): JobInfo => ({
+		id: JOB,
+		runId: RUN_ID,
+		attempt: 1,
+		name: "release",
+		status: "completed",
+		conclusion: "success",
+		headSha: SHA,
+		runnerName: "runner-1",
+		stepNames: ["Run DevinoSolutions/dokploy-release@v1"],
+		...patch,
+	});
+	const attemptManifest = (n: number) =>
+		manifest({
+			source: {
+				forge: "github",
+				ref: "refs/heads/dev",
+				runId: String(RUN_ID),
+				runAttempt: n,
+			},
+		});
+	/** No artifact (quota), the log of JOB carries `lines`. */
+	const logWorld = (
+		lines: string[],
+		jobPatch: Partial<JobInfo> = {},
+	): World => {
+		const w = world();
+		w.state.artifacts = [];
+		w.state.jobs = [job(jobPatch)];
+		w.state.logs.set(JOB, logWith(...lines));
+		return w;
+	};
+	const goodArtifacts = () => world().state.artifacts;
+	const FINISHED = Date.parse("2026-11-03T12:00:00Z");
+	const withUpdatedAt = (w: World) => {
+		w.state.run = { ...w.state.run, updatedAt: "2026-11-03T12:00:00Z" };
+		return w;
+	};
+
+	describe("a masked marker (the runner replaced a secret value in it)", () => {
+		it("refuses without blocking, and tells the user which secrets to move out of the manifest", async () => {
+			const w = logWorld(["dokploy-release/v1 7b22736368656d61***7d"]);
+			const result = await run(w);
+			expect(result).toMatchObject({
+				kind: "refused",
+				code: "manifest-masked",
+				block: false,
+			});
+			if (result.kind === "refused") {
+				expect(result.message).toMatch(/masked/);
+				expect(result.message).toMatch(
+					/digests, registry hosts, repository names or service keys/,
+				);
+			}
+		});
+		it("is not mistaken for a missing log even inside the grace window", async () => {
+			const w = withUpdatedAt(logWorld(["dokploy-release/v1 7b***"]));
+			const result = await run(w, facts(), 1, { now: FINISHED + 1000 });
+			expect(result).toMatchObject({
+				kind: "refused",
+				code: "manifest-masked",
+			});
+		});
+	});
+
+	describe("the artifact of an older attempt of the same run", () => {
+		const secondAttempt = (w: World) => {
+			w.state.run = { ...w.state.run, attempt: 2 };
+			w.state.jobs = [job({ attempt: 2 })];
+			return w;
+		};
+		it("falls back to the log of THIS attempt and accepts it", async () => {
+			const w = secondAttempt(logWorld([hexMarker(attemptManifest(2))]));
+			w.state.artifacts = goodArtifacts(); // holds the attempt 1 manifest
+			const result = await run(w, facts(), 2);
+			expect(result.kind === "accepted" && result.release.manifestSource).toBe(
+				"job-log",
+			);
+			expect(result.kind === "accepted" && result.release.runAttempt).toBe(2);
+		});
+		it("is not blocking when the log has nothing either", async () => {
+			const w = secondAttempt(logWorld(["nothing"]));
+			w.state.artifacts = goodArtifacts();
+			expectRefused(await run(w, facts(), 2), "artifact-binding", false);
+		});
+		it("never takes the older attempt's log marker for this attempt", async () => {
+			const w = secondAttempt(logWorld([hexMarker(attemptManifest(1))]));
+			w.state.artifacts = [];
+			expectRefused(await run(w, facts(), 2), "manifest-binding", true);
+		});
+	});
+
+	describe("a job log that is not there yet", () => {
+		it("asks again while the run finished less than ten minutes ago, for every kind of miss", async () => {
+			const young = { now: FINISHED + 9 * 60 * 1000 };
+			const noJobs = withUpdatedAt(world());
+			noJobs.state.artifacts = [];
+			expect(await run(noJobs, facts(), 1, young)).toMatchObject({
+				kind: "retry",
+			});
+			const noLog = withUpdatedAt(logWorld([]));
+			noLog.state.logs.clear();
+			expect(await run(noLog, facts(), 1, young)).toMatchObject({
+				kind: "retry",
+			});
+			const noMarker = withUpdatedAt(logWorld(["nothing"]));
+			expect(await run(noMarker, facts(), 1, young)).toMatchObject({
+				kind: "retry",
+			});
+		});
+		it("refuses without blocking after ten minutes, and keeps asking when the log could not be found", async () => {
+			const old = { now: FINISHED + 11 * 60 * 1000 };
+			const noLog = withUpdatedAt(logWorld([]));
+			noLog.state.logs.clear();
+			expect(await run(noLog, facts(), 1, old)).toMatchObject({
+				kind: "refused",
+				code: "artifact-missing",
+				block: false,
+				recheck: true,
+			});
+			const noMarker = withUpdatedAt(logWorld(["nothing"]));
+			expect(await run(noMarker, facts(), 1, old)).toMatchObject({
+				kind: "refused",
+				code: "artifact-missing",
+				block: false,
+				recheck: false,
+			});
+		});
+		it("does not wait for a log when the artifact was fine", async () => {
+			const w = withUpdatedAt(world());
+			expect((await run(w, facts(), 1, { now: FINISHED + 1000 })).kind).toBe(
+				"accepted",
+			);
+		});
+		it("accepts the log the moment it appears, however young the run", async () => {
+			const w = withUpdatedAt(logWorld([hexMarker(manifest())]));
+			expect((await run(w, facts(), 1, { now: FINISHED + 1000 })).kind).toBe(
+				"accepted",
+			);
+		});
+	});
+
+	describe("the wake-up hint (runner, job) narrows which log is read", () => {
+		const twoJobs = (hinted: string, other: string) => {
+			const w = world();
+			w.state.artifacts = [];
+			w.state.jobs = [
+				job({ id: 1, name: "build", runnerName: "runner-a" }),
+				job({ id: 2, name: "release", runnerName: "runner-b" }),
+			];
+			w.state.logs.set(1, logWith(other));
+			w.state.logs.set(2, logWith(hinted));
+			return w;
+		};
+		it("reads only the job that ran on the hinted runner", async () => {
+			const w = twoJobs(
+				hexMarker(manifest()),
+				hexMarker(manifest({ environment: "production" })),
+			);
+			const result = await run(w, facts(), 1, { hint: { runner: "runner-b" } });
+			expect(result.kind).toBe("accepted");
+			expect(w.state.jobCalls).toEqual([2]);
+		});
+		it("without a hint reads every successful job, and two different markers block as ambiguous", async () => {
+			const w = twoJobs(
+				hexMarker(manifest()),
+				hexMarker(manifest({ environment: "production" })),
+			);
+			expectRefused(await run(w), "manifest-invalid", true);
+			expect(w.state.jobCalls).toEqual([1, 2]);
+		});
+		it("falls back to the job name, then to every job, when the runner matches nothing", async () => {
+			const byName = twoJobs(
+				hexMarker(manifest()),
+				hexMarker(manifest({ environment: "production" })),
+			);
+			expect(
+				(
+					await run(byName, facts(), 1, {
+						hint: { runner: "gone", job: "release" },
+					})
+				).kind,
+			).toBe("accepted");
+			expect(byName.state.jobCalls).toEqual([2]);
+			const all = twoJobs(
+				hexMarker(manifest()),
+				hexMarker(manifest({ environment: "production" })),
+			);
+			expectRefused(
+				await run(all, facts(), 1, { hint: { runner: "gone", job: "gone" } }),
+				"manifest-invalid",
+				true,
+			);
+		});
+		it("a hint at a job with no marker never blocks (a stranger's Deployment cannot hurt the service)", async () => {
+			const w = twoJobs(hexMarker(manifest()), hexMarker(manifest()));
+			const result = await run(w, facts(), 1, {
+				hint: { runner: "runner-a" },
+				now: Date.now(),
+			});
+			expect(result.kind).toBe("accepted"); // job 1 carries the same valid manifest
+			const empty = twoJobs("nothing", "nothing");
+			const refused = await run(empty, facts(), 1, {
+				hint: { runner: "runner-a" },
+			});
+			expect(refused).toMatchObject({ kind: "refused", block: false });
+		});
+	});
+
+	describe("a deployed commit GitHub no longer has", () => {
+		const deployed = {
+			sha: OLD_SHA,
+			runId: 100,
+			attempt: 1,
+			digests: [`sha256:${"9".repeat(64)}`],
+		};
+		it("recovers onto a release that is on the tracked branch", async () => {
+			const w = world(); // the compare of deployed...candidate is a 404
+			const result = await run(w, facts({ deployed }));
+			expect(result.kind).toBe("accepted");
+		});
+		it("recovers when the branch head is ahead of the candidate too", async () => {
+			const w = world();
+			w.state.head = "f".repeat(40);
+			w.state.compare.set(`${SHA}...${"f".repeat(40)}`, "ahead");
+			expect((await run(w, facts({ deployed }))).kind).toBe("accepted");
+		});
+		it("refuses, and asks again later, when the candidate is not on the branch either", async () => {
+			const w = world();
+			w.state.head = "f".repeat(40);
+			w.state.compare.set(`${SHA}...${"f".repeat(40)}`, "diverged");
+			expect(await run(w, facts({ deployed }))).toMatchObject({
+				kind: "refused",
+				code: "not-on-branch",
+				block: false,
+				recheck: true,
+			});
+		});
+		it("retries when GitHub could not answer the compare", async () => {
+			const w = world();
+			const answer = w.api.compare;
+			w.api.compare = async (base, head) =>
+				base === OLD_SHA ? { kind: "error", status: 502 } : answer(base, head);
+			expect(await run(w, facts({ deployed }))).toMatchObject({
+				kind: "retry",
+			});
+		});
+	});
+
+	describe("a registry that will not show the image", () => {
+		it("refuses and blocks, naming the missing login, instead of retrying", async () => {
+			const w = world();
+			w.state.probe = {
+				kind: "denied",
+				status: 401,
+				reason:
+					"Dokploy has no saved login for registry.devino.ca and the registry refused the request",
+			};
+			const result = await run(w);
+			expectRefused(result, "image-unverified", true);
+			if (result.kind === "refused") {
+				expect(result.message).toContain(
+					"no saved login for registry.devino.ca",
+				);
+			}
 		});
 	});
 });

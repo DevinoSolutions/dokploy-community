@@ -4,12 +4,14 @@ import { evaluateEnvironmentPolicy } from "./environment-policy";
 import {
 	extractLogManifest,
 	JOB_LOG_MAX_BYTES,
+	type JobHint,
 	releaseJobs,
 } from "./log-manifest";
 import {
 	MANIFEST_ARTIFACT_NAME,
 	MANIFEST_MAX_BYTES,
 	type ManifestImage,
+	type ManifestParse,
 	parseReleaseManifest,
 } from "./manifest";
 import {
@@ -18,7 +20,11 @@ import {
 	checkImageRepository,
 	splitRepository,
 } from "./namespace";
-import { decideOrdering, type ReleaseStamp } from "./ordering";
+import {
+	type CompareStatus,
+	decideOrdering,
+	type ReleaseStamp,
+} from "./ordering";
 import type { RegistryProbe } from "./registry-probe";
 import { readZipEntry } from "./zip";
 
@@ -105,6 +111,7 @@ export type RefusalCode =
 	| "manifest-schema"
 	| "manifest-migrations"
 	| "manifest-binding"
+	| "manifest-masked"
 	| "image-namespace"
 	| "image-repository"
 	| "image-unverified"
@@ -162,13 +169,20 @@ const RECHECK: ReadonlySet<RefusalCode> = new Set([
 	"policy-unreadable",
 ]);
 
-const refuse = (code: RefusalCode, message: string): AcceptanceResult => ({
+const refuse = (
+	code: RefusalCode,
+	message: string,
+	recheck: boolean = RECHECK.has(code),
+): AcceptanceResult => ({
 	kind: "refused",
 	code,
 	message,
 	block: BLOCKING.has(code),
-	recheck: RECHECK.has(code),
+	recheck,
 });
+
+/** A job log can answer 404 for a short while after its job finished. */
+export const LOG_GRACE_MS = 10 * 60 * 1000;
 
 type Step<T> = { ok: true; value: T } | { ok: false; result: AcceptanceResult };
 
@@ -266,23 +280,26 @@ const readArtifactManifest = async (
 
 type LogRead =
 	| { kind: "found"; text: string }
-	| { kind: "none" }
+	/** No manifest line was found. `unreachable`: a job or its log could not be found at all. */
+	| { kind: "none"; unreachable: boolean }
 	| { kind: "result"; result: AcceptanceResult };
 
 /**
- * The same manifest from the log of the release job of THIS run attempt (jobs are listed per
- * attempt, so an older or newer attempt's log is never read). Not finding it is not a verdict;
- * a log that carries a broken or a second, different manifest is, because the run is proven to be
- * the connection's own release run.
+ * The same manifest from the logs of the successful jobs of THIS run attempt (jobs are listed per
+ * attempt, so an older or newer attempt's log is never read). The wake-up hint (runner, job) only
+ * narrows which jobs are read. Not finding the line is not a verdict (the caller decides, by the
+ * age of the run); a log that carries a masked, broken or a second, different manifest is one,
+ * because the run is proven to be the connection's own release run.
  */
 const readJobLogManifest = async (
 	api: ActionsApi,
 	run: RunInfo,
 	runAttempt: number,
 	c: ConnectionFacts,
+	hint: JobHint | null,
 ): Promise<LogRead> => {
 	const listing = await api.runJobs(run.id, runAttempt);
-	if (listing.kind === "not-found") return { kind: "none" };
+	if (listing.kind === "not-found") return { kind: "none", unreachable: true };
 	if (listing.kind !== "ok") {
 		return { kind: "result", result: { kind: "retry", cause: listing } };
 	}
@@ -292,7 +309,9 @@ const readJobLogManifest = async (
 		attempt: runAttempt,
 		headSha: run.headSha,
 		releaseJobName: c.releaseJobName,
+		hint,
 	});
+	let unreachable = jobs.length === 0;
 	const logs: string[] = [];
 	for (const job of jobs) {
 		const log = await api.jobLog(job.id, JOB_LOG_MAX_BYTES);
@@ -300,13 +319,21 @@ const readJobLogManifest = async (
 			logs.push(log.value);
 		} else if (log.kind === "error" && log.status === 413) {
 			// Too large to be the small release job: not the one.
-		} else if (log.kind !== "not-found") {
+		} else if (log.kind === "not-found") {
+			unreachable = true;
+		} else {
 			return { kind: "result", result: { kind: "retry", cause: log } };
 		}
 	}
 	const extracted = extractLogManifest(logs);
 	if (extracted.ok) return { kind: "found", text: extracted.text };
-	if (extracted.code === "none") return { kind: "none" };
+	if (extracted.code === "none") return { kind: "none", unreachable };
+	if (extracted.code === "masked") {
+		return {
+			kind: "result",
+			result: refuse("manifest-masked", extracted.message),
+		};
+	}
 	return {
 		kind: "result",
 		result: refuse("manifest-invalid", extracted.message),
@@ -318,11 +345,14 @@ export const acceptRelease = async (
 		runId: number;
 		runAttempt: number;
 		connection: ConnectionFacts;
+		/** Which job printed the manifest line, from the wake-up Deployment. A hint, never trusted. */
+		hint?: JobHint | null;
 	},
-	deps: { api: ActionsApi; probe: RegistryProbe },
+	deps: { api: ActionsApi; probe: RegistryProbe; now?: () => number },
 ): Promise<AcceptanceResult> => {
 	const { runId, runAttempt, connection: c } = input;
 	const { api, probe } = deps;
+	const now = deps.now ?? Date.now;
 
 	// Rule 1: the run.
 	const runStep = needs(
@@ -363,27 +393,59 @@ export const acceptRelease = async (
 	// first, and when it is unavailable (never uploaded, expired, unreadable, or the Actions
 	// storage quota blocked the upload) the manifest line in the release job's log.
 	const fromArtifact = await readArtifactManifest(api, runId, c);
-	let manifestText: string;
-	let manifestSource: ManifestSource;
+	let parsed: ManifestParse | null = null;
+	let manifestSource: ManifestSource = "artifact";
+	// What to answer when the job log does not have the manifest either.
+	let unavailable: AcceptanceResult | null = null;
 	if (fromArtifact.ok) {
-		manifestText = fromArtifact.text;
-		manifestSource = "artifact";
+		parsed = parseReleaseManifest(fromArtifact.text);
+		// A re-run whose artifact upload failed leaves the artifact of an OLDER attempt of this run
+		// behind. That is not this attempt's manifest: look in this attempt's job log instead.
+		if (
+			parsed.ok &&
+			parsed.manifest.source.runId === String(runId) &&
+			parsed.manifest.source.runAttempt < runAttempt
+		) {
+			unavailable = refuse(
+				"artifact-binding",
+				`The release artifact is from attempt ${parsed.manifest.source.runAttempt} of this run, not attempt ${runAttempt}`,
+			);
+			parsed = null;
+		}
 	} else if (!fromArtifact.fallback) {
 		return fromArtifact.result;
 	} else {
-		const fromLog = await readJobLogManifest(api, run, runAttempt, c);
+		unavailable = fromArtifact.result;
+	}
+	if (unavailable) {
+		const fromLog = await readJobLogManifest(
+			api,
+			run,
+			runAttempt,
+			c,
+			input.hint ?? null,
+		);
 		if (fromLog.kind === "found") {
-			manifestText = fromLog.text;
+			parsed = parseReleaseManifest(fromLog.text);
 			manifestSource = "job-log";
 		} else if (fromLog.kind === "result") {
 			return fromLog.result;
 		} else {
-			return fromArtifact.result;
+			// Job logs can 404 for a short while after the job finished: ask again then, decide later.
+			const updated = run.updatedAt ? Date.parse(run.updatedAt) : Number.NaN;
+			if (Number.isFinite(updated) && now() - updated < LOG_GRACE_MS) {
+				return { kind: "retry", cause: { kind: "error", status: 404 } };
+			}
+			if (fromLog.unreachable && unavailable.kind === "refused") {
+				// The log itself could not be found: fixing that (or GitHub catching up) can clear it.
+				return refuse(unavailable.code, unavailable.message, true);
+			}
+			return unavailable;
 		}
 	}
+	if (!parsed) return refuse("manifest-invalid", "The release has no manifest");
 
 	// Rule 3: the manifest.
-	const parsed = parseReleaseManifest(manifestText);
 	if (!parsed.ok) {
 		return refuse(
 			parsed.code === "unknown-schema"
@@ -468,6 +530,14 @@ export const acceptRelease = async (
 				cause: { kind: "error", status: head.status },
 			};
 		}
+		if (head.kind === "denied") {
+			// The registry answered but will not let Dokploy read the image: asking again changes
+			// nothing until a login is saved or fixed, so this is a refusal that names it.
+			return refuse(
+				"image-unverified",
+				`The registry would not show ${image.repository}@${image.digest.slice(0, 19)}: ${head.reason}`,
+			);
+		}
 		if (head.kind === "not-found" || head.digest !== image.digest) {
 			return refuse(
 				"image-unverified",
@@ -520,14 +590,26 @@ export const acceptRelease = async (
 		if (!toHead.ok) return toHead.result;
 		reachable = toHead.value === "ahead" || toHead.value === "identical";
 	}
-	let deployedToCandidate = null;
+	let deployedToCandidate: CompareStatus | null = null;
 	if (c.deployed && c.deployed.sha !== manifest.sha) {
-		const compared = needs(
-			await api.compare(c.deployed.sha, manifest.sha),
-			refuse("not-on-branch", "The deployed commit is unknown to GitHub"),
-		);
-		if (!compared.ok) return compared.result;
-		deployedToCandidate = compared.value;
+		const compared = await api.compare(c.deployed.sha, manifest.sha);
+		if (compared.kind === "ok") {
+			deployedToCandidate = compared.value;
+		} else if (compared.kind === "not-found") {
+			// The deployed commit is gone from GitHub (a force push, a deleted branch). If the
+			// candidate is on the tracked branch the service recovers onto it (ordering treats
+			// "diverged" so); if it is not, wait for GitHub to show it.
+			if (!reachable) {
+				return refuse(
+					"not-on-branch",
+					"The deployed commit and the release commit are both unknown to the tracked branch",
+					true,
+				);
+			}
+			deployedToCandidate = "diverged";
+		} else {
+			return { kind: "retry", cause: compared };
+		}
 	}
 	const order = decideOrdering({
 		deployed: c.deployed,

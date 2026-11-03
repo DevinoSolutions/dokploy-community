@@ -129,10 +129,7 @@ describe("registry probe", () => {
 		});
 		expect(
 			await probe.headDigest({ ...INPUT, host: "registry.devino.ca" }),
-		).toEqual({
-			kind: "unreachable",
-			status: 401,
-		});
+		).toMatchObject({ kind: "denied", status: 401 });
 		expect(calls.some((c) => c.url.includes("evil.example"))).toBe(false);
 	});
 
@@ -181,5 +178,112 @@ describe("registry probe", () => {
 			expect(await probe.headDigest(bad)).toEqual({ kind: "not-found" });
 		}
 		expect(calls).toHaveLength(0);
+	});
+});
+
+describe("registry probe: a registry that answers but will not show the image is denied, not unreachable", () => {
+	const reasonOf = (result: unknown) =>
+		(result as { reason?: string }).reason ?? "";
+
+	it("a Basic challenge with no saved login names the missing login", async () => {
+		const { fetch } = routedFetch([
+			[
+				"/v2/",
+				{ status: 401, headers: { "WWW-Authenticate": 'Basic realm="r"' } },
+			],
+		]);
+		const probe = createRegistryProbe({ fetch, loadAccess: async () => null });
+		const result = await probe.headDigest({
+			...INPUT,
+			host: "registry.devino.ca",
+		});
+		expect(result).toMatchObject({ kind: "denied", status: 401 });
+		expect(reasonOf(result)).toContain("no saved login for registry.devino.ca");
+	});
+
+	it("a 403 is denied, and says the saved login did not work when there is one", async () => {
+		const { fetch } = routedFetch([["/v2/", { status: 403 }]]);
+		const withLogin = createRegistryProbe({
+			fetch,
+			loadAccess: async () => ({
+				baseUrl: "https://registry.devino.ca",
+				username: "u",
+				password: "p",
+			}),
+		});
+		const result = await withLogin.headDigest({
+			...INPUT,
+			host: "registry.devino.ca",
+		});
+		expect(result).toMatchObject({ kind: "denied", status: 403 });
+		expect(reasonOf(result)).toContain(
+			"saved login for registry.devino.ca did not work",
+		);
+	});
+
+	it("a token endpoint that refuses, a token endpoint that gives no token, and a 401 after the token are denied", async () => {
+		const challenge = {
+			status: 401,
+			headers: {
+				"WWW-Authenticate":
+					'Bearer realm="https://auth.example/token",service="r"',
+			},
+		};
+		const tokenRefused = routedFetch([
+			["/token", { status: 401 }],
+			["/v2/", challenge],
+		]);
+		expect(
+			await createRegistryProbe({
+				fetch: tokenRefused.fetch,
+				loadAccess: async () => null,
+			}).headDigest(INPUT),
+		).toMatchObject({ kind: "denied", status: 401 });
+
+		const noToken = routedFetch([
+			["/token", { json: {} }],
+			["/v2/", challenge],
+		]);
+		expect(
+			await createRegistryProbe({
+				fetch: noToken.fetch,
+				loadAccess: async () => null,
+			}).headDigest(INPUT),
+		).toMatchObject({ kind: "denied" });
+
+		const stillRefused = routedFetch([
+			["/token", { json: { token: "t" } }],
+			["/v2/", challenge],
+		]);
+		expect(
+			await createRegistryProbe({
+				fetch: stillRefused.fetch,
+				loadAccess: async () => null,
+			}).headDigest(INPUT),
+		).toMatchObject({ kind: "denied", status: 401 });
+		expect(
+			stillRefused.calls.filter((c) => c.url.includes("/v2/")),
+		).toHaveLength(2);
+	});
+
+	it("a token endpoint that is down is still unreachable (a retry)", async () => {
+		const down = routedFetch([
+			["/token", { status: 503 }],
+			[
+				"/v2/",
+				{
+					status: 401,
+					headers: {
+						"WWW-Authenticate": 'Bearer realm="https://auth.example/token"',
+					},
+				},
+			],
+		]);
+		expect(
+			await createRegistryProbe({
+				fetch: down.fetch,
+				loadAccess: async () => null,
+			}).headDigest(INPUT),
+		).toEqual({ kind: "unreachable", status: 503 });
 	});
 });

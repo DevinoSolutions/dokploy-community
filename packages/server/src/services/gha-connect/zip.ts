@@ -78,11 +78,16 @@ export const readZipEntry = (
 		) {
 			return fail("The entry header is damaged");
 		}
+		const localNameLength = buf.readUInt16LE(localOffset + 26);
+		const localName = buf.toString(
+			"utf8",
+			localOffset + 30,
+			localOffset + 30 + localNameLength,
+		);
+		// The directory and the local header must agree on whose bytes these are.
+		if (localName !== name) return fail("The entry header names another file");
 		const dataStart =
-			localOffset +
-			30 +
-			buf.readUInt16LE(localOffset + 26) +
-			buf.readUInt16LE(localOffset + 28);
+			localOffset + 30 + localNameLength + buf.readUInt16LE(localOffset + 28);
 		if (dataStart + compressed > buf.length) {
 			return fail("The entry data is out of range");
 		}

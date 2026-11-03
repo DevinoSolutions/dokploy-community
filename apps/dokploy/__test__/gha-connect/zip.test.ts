@@ -70,3 +70,17 @@ describe("readZipEntry", () => {
 		);
 	});
 });
+
+describe("readZipEntry: the local header must agree with the directory", () => {
+	it("refuses an entry whose local header names another file", () => {
+		const zip = buildZip([{ name: NAME, data: "hello", method: 0 }]);
+		// The local header starts at 0; its name sits at offset 30. Same length, other bytes.
+		const damaged = Buffer.from(zip);
+		damaged.write("dokploy-release.jsoX", 30, "utf8");
+		const result = readZipEntry(damaged, NAME, 4096);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toMatch(/names another file/);
+		// The undamaged archive still reads.
+		expect(readZipEntry(zip, NAME, 4096).ok).toBe(true);
+	});
+});

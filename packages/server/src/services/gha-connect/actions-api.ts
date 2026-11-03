@@ -12,6 +12,46 @@ import type { CompareStatus } from "./ordering";
 
 export type ApiResponse = Awaited<ReturnType<FetchLike>> & {
 	arrayBuffer?: () => Promise<ArrayBuffer>;
+	/** The body as a stream (what fetch gives), so a download can stop at its byte cap. */
+	body?: {
+		getReader(): {
+			read(): Promise<{ done: boolean; value?: Uint8Array }>;
+			cancel(reason?: unknown): Promise<void>;
+		};
+	} | null;
+};
+
+/**
+ * The body of a response, stopped at `maxBytes`: null when it is larger. A declared
+ * content-length above the cap is refused before a byte is read; a stream is cancelled the moment
+ * it passes the cap, so an oversize or endless body is never held in memory.
+ */
+export const readCapped = async (
+	response: ApiResponse,
+	maxBytes: number,
+): Promise<Uint8Array | null> => {
+	const declared = Number(response.headers.get("content-length"));
+	if (Number.isFinite(declared) && declared > maxBytes) return null;
+	if (response.body?.getReader) {
+		const reader = response.body.getReader();
+		const chunks: Uint8Array[] = [];
+		let total = 0;
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.length;
+			if (total > maxBytes) {
+				await reader.cancel().catch(() => undefined);
+				return null;
+			}
+			chunks.push(value);
+		}
+		return new Uint8Array(Buffer.concat(chunks));
+	}
+	if (!response.arrayBuffer) return null;
+	const bytes = new Uint8Array(await response.arrayBuffer());
+	return bytes.length > maxBytes ? null : bytes;
 };
 export type ApiFetch = (
 	input: string,
@@ -353,11 +393,16 @@ export const downloadArtifactZip = async (
 			? { kind: "rate-limited", retryAt }
 			: { kind: "forbidden", message: "GitHub refused access" };
 	}
-	if (!response.ok || !response.arrayBuffer) {
+	if (!response.ok || (!response.body && !response.arrayBuffer)) {
 		return { kind: "error", status: response.status };
 	}
-	const bytes = new Uint8Array(await response.arrayBuffer());
-	if (bytes.length > maxBytes) return { kind: "error", status: 413 };
+	let bytes: Uint8Array | null;
+	try {
+		bytes = await readCapped(response, maxBytes);
+	} catch {
+		return { kind: "error", status: 0 };
+	}
+	if (!bytes) return { kind: "error", status: 413 };
 	return { kind: "ok", value: bytes, etag: null };
 };
 
@@ -370,51 +415,72 @@ export interface JobInfo {
 	status: string;
 	conclusion: string | null;
 	headSha: string | null;
+	/** `runner_name` of the runner that ran the job; null before it was assigned. */
+	runnerName: string | null;
 	/** Names of the job's steps (an action's own steps are not listed, only its `uses` step). */
 	stepNames: string[];
 }
 
-/** `GET .../actions/runs/{id}/attempts/{n}/jobs`: the jobs of that attempt (and no other). */
-export const listRunJobs = (
+const JOBS_PER_PAGE = 100;
+/** Most pages of jobs read for one attempt (1000 jobs). */
+const JOBS_MAX_PAGES = 10;
+
+const mapJobsPage = (
+	json: unknown,
+): { jobs: JobInfo[]; raw: number } | null => {
+	const list = asObject(json)?.jobs;
+	if (!Array.isArray(list)) return null;
+	const jobs: JobInfo[] = [];
+	for (const item of list) {
+		const o = asObject(item);
+		const id = int(o?.id);
+		const name = str(o?.name);
+		const status = str(o?.status);
+		if (!o || id === null || !name || !status) continue;
+		const steps = Array.isArray(o.steps) ? o.steps : [];
+		jobs.push({
+			id,
+			runId: int(o.run_id),
+			attempt: int(o.run_attempt),
+			name,
+			status,
+			conclusion: str(o.conclusion),
+			headSha: str(o.head_sha),
+			runnerName: str(o.runner_name),
+			stepNames: steps
+				.map((step) => str(asObject(step)?.name))
+				.filter((n): n is string => n !== null),
+		});
+	}
+	return { jobs, raw: list.length };
+};
+
+/**
+ * `GET .../actions/runs/{id}/attempts/{n}/jobs`: the jobs of that attempt (and no other), every
+ * page (100 per page, at most 10 pages). A page that cannot be read fails the whole listing.
+ */
+export const listRunJobs = async (
 	deps: ApiDeps,
 	token: string,
 	ref: RepoRef,
 	runId: number,
 	attempt: number,
-) => {
+): Promise<ApiResult<JobInfo[]>> => {
 	const base = repoPath(ref);
-	if (!base) return Promise.resolve(NOT_FOUND);
-	return get<JobInfo[]>(
-		deps,
-		token,
-		`${base}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`,
-		(json) => {
-			const list = asObject(json)?.jobs;
-			if (!Array.isArray(list)) return null;
-			const jobs: JobInfo[] = [];
-			for (const item of list) {
-				const o = asObject(item);
-				const id = int(o?.id);
-				const name = str(o?.name);
-				const status = str(o?.status);
-				if (!o || id === null || !name || !status) continue;
-				const steps = Array.isArray(o.steps) ? o.steps : [];
-				jobs.push({
-					id,
-					runId: int(o.run_id),
-					attempt: int(o.run_attempt),
-					name,
-					status,
-					conclusion: str(o.conclusion),
-					headSha: str(o.head_sha),
-					stepNames: steps
-						.map((step) => str(asObject(step)?.name))
-						.filter((n): n is string => n !== null),
-				});
-			}
-			return jobs;
-		},
-	);
+	if (!base) return NOT_FOUND;
+	const all: JobInfo[] = [];
+	for (let page = 1; page <= JOBS_MAX_PAGES; page += 1) {
+		const result = await get(
+			deps,
+			token,
+			`${base}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=${JOBS_PER_PAGE}&page=${page}`,
+			mapJobsPage,
+		);
+		if (result.kind !== "ok") return result;
+		all.push(...result.value.jobs);
+		if (result.value.raw < JOBS_PER_PAGE) break;
+	}
+	return { kind: "ok", value: all, etag: null };
 };
 
 /**
@@ -454,15 +520,16 @@ export const downloadJobLog = async (
 			? { kind: "rate-limited", retryAt }
 			: { kind: "forbidden", message: "GitHub refused access" };
 	}
-	if (!response.ok || !response.arrayBuffer) {
+	if (!response.ok || (!response.body && !response.arrayBuffer)) {
 		return { kind: "error", status: response.status };
 	}
-	const declared = Number(response.headers.get("content-length"));
-	if (Number.isFinite(declared) && declared > maxBytes) {
-		return { kind: "error", status: 413 };
+	let bytes: Uint8Array | null;
+	try {
+		bytes = await readCapped(response, maxBytes);
+	} catch {
+		return { kind: "error", status: 0 };
 	}
-	const bytes = new Uint8Array(await response.arrayBuffer());
-	if (bytes.length > maxBytes) return { kind: "error", status: 413 };
+	if (!bytes) return { kind: "error", status: 413 };
 	return {
 		kind: "ok",
 		value: Buffer.from(bytes).toString("utf8"),

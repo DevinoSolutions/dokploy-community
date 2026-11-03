@@ -7,6 +7,8 @@ import { readDeploymentPayload } from "../github-deployments/payload";
  *
  *   task:    "dokploy:<service key>"
  *   payload: {"schema":"dokploy.deployment/v1","run_id":<id>,"run_attempt":<n>,"artifact":"dokploy-release"}
+ *            plus the optional hints "job" (GITHUB_JOB) and "runner" (RUNNER_NAME) that say which job of the
+ *            run printed the manifest line; they only narrow which job log is read.
  */
 
 export const WAKE_SCHEMA = "dokploy.deployment/v1";
@@ -22,7 +24,15 @@ export const parseDeploymentTask = (task: unknown): string | null => {
 };
 
 export type WakePayload =
-	| { ok: true; runId: number; runAttempt: number }
+	| {
+			ok: true;
+			runId: number;
+			runAttempt: number;
+			/** `GITHUB_JOB` of the release job, when the action sent it. A hint only. */
+			job?: string;
+			/** `RUNNER_NAME` of the runner that ran it, when the action sent it. A hint only. */
+			runner?: string;
+	  }
 	| { ok: false; reason: string };
 
 const positiveInteger = (value: unknown): number | null => {
@@ -32,6 +42,10 @@ const positiveInteger = (value: unknown): number | null => {
 			: value;
 	return typeof n === "number" && Number.isSafeInteger(n) && n >= 1 ? n : null;
 };
+
+/** A job or runner name: printable ASCII, so it can only ever be compared, never interpreted. */
+const hintText = (value: unknown): string | undefined =>
+	typeof value === "string" && /^[ -~]{1,120}$/.test(value) ? value : undefined;
 
 export const parseWakePayload = (raw: unknown): WakePayload => {
 	const payload = readDeploymentPayload(raw);
@@ -51,5 +65,13 @@ export const parseWakePayload = (raw: unknown): WakePayload => {
 			reason: "run_id and run_attempt must be positive integers",
 		};
 	}
-	return { ok: true, runId, runAttempt };
+	const job = hintText(payload.job);
+	const runner = hintText(payload.runner);
+	return {
+		ok: true,
+		runId,
+		runAttempt,
+		...(job ? { job } : {}),
+		...(runner ? { runner } : {}),
+	};
 };

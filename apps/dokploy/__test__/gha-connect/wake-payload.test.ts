@@ -72,3 +72,24 @@ describe("parseWakePayload", () => {
 		expect(parseWakePayload(value).ok).toBe(false);
 	});
 });
+
+describe("parseWakePayload: the job and runner hints", () => {
+	it("reads them when they are printable text, and leaves them out otherwise", () => {
+		expect(
+			parseWakePayload(payload({ job: "release", runner: "GitHub Actions 7" })),
+		).toEqual({
+			ok: true,
+			runId: 9876543210,
+			runAttempt: 2,
+			job: "release",
+			runner: "GitHub Actions 7",
+		});
+		for (const bad of ["a\nb", "", "x".repeat(121), 5, null, { a: 1 }]) {
+			expect(parseWakePayload(payload({ job: bad, runner: bad }))).toEqual({
+				ok: true,
+				runId: 9876543210,
+				runAttempt: 2,
+			});
+		}
+	});
+});

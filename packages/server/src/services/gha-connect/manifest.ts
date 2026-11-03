@@ -13,6 +13,8 @@ import { parsePinnedImage } from "../github-deployments/payload";
  */
 
 export const MANIFEST_MAX_BYTES = 64 * 1024;
+/** Images in a whole manifest, over all its services. */
+export const MANIFEST_MAX_IMAGES = 64;
 export const MANIFEST_ARTIFACT_NAME = "dokploy-release";
 
 const SCHEMA = /^dokploy\.release\/v(\d+)(?:\.\d+)?$/;
@@ -184,6 +186,7 @@ export const parseReleaseManifest = (
 		return fail("invalid", "services must list at least one service");
 	}
 	const services: ManifestService[] = [];
+	let imageCount = 0;
 	for (const [index, entry] of root.services.entries()) {
 		const where = `services[${index}]`;
 		const service = asObject(entry);
@@ -224,6 +227,13 @@ export const parseReleaseManifest = (
 			composePath = path;
 		}
 		services.push({ key, images, composePath });
+		imageCount += images.length;
+		if (imageCount > MANIFEST_MAX_IMAGES) {
+			return fail(
+				"invalid",
+				`The manifest names more than ${MANIFEST_MAX_IMAGES} images`,
+			);
+		}
 	}
 
 	const listed = [...releaseServices].sort().join("\n");
