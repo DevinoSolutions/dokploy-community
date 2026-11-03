@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { audit } from "@/server/api/utils/audit";
 
 /**
  * The ghaConnection router with the real role statements and the real connection access rules:
@@ -27,6 +28,10 @@ const mocks = vi.hoisted(() => ({
 	listReleases: vi.fn(),
 	applyConnectionEvent: vi.fn(),
 	touchConnectionActivity: vi.fn(),
+	updateGateSettings: vi.fn(),
+	overrideGate: vi.fn(),
+	findGatedRelease: vi.fn(),
+	isCloud: false,
 	getRepositoryByName: vi.fn(),
 	getBranchHead: vi.fn(),
 	getEnvironmentPolicy: vi.fn(),
@@ -105,7 +110,9 @@ vi.mock("@dokploy/server", async () => ({
 	...(await vi.importActual<object>(
 		"@dokploy/server/services/github-deployments/connection-access",
 	)),
-	IS_CLOUD: false,
+	get IS_CLOUD() {
+		return mocks.isCloud;
+	},
 	deleteGithubWatch: mocks.deleteGithubWatch,
 	findApplicationById: mocks.findApplicationById,
 	findComposeById: mocks.findComposeById,
@@ -129,6 +136,9 @@ vi.mock("@dokploy/server/services/gha-connect", async () => ({
 	listReleases: mocks.listReleases,
 	serviceRowExists: mocks.serviceRowExists,
 	touchConnectionActivity: mocks.touchConnectionActivity,
+	updateGateSettings: mocks.updateGateSettings,
+	overrideGate: mocks.overrideGate,
+	findGatedRelease: mocks.findGatedRelease,
 }));
 
 const { ghaConnectionRouter } = await import(
@@ -880,5 +890,446 @@ describe("checkNow", () => {
 			}),
 		).rejects.toMatchObject({ code: "NOT_FOUND" });
 		expect(mocks.touchConnectionActivity).not.toHaveBeenCalled();
+	});
+});
+
+const gateStored = (overrides: Record<string, unknown> = {}) =>
+	storedRow({
+		gateMode: "checks",
+		gateWorkflows: [],
+		gateTimeoutMinutes: 60,
+		...overrides,
+	});
+
+describe("connect takes the deploy gate settings", () => {
+	it("stores the gate mode, the workflows and the timeout", async () => {
+		await callerFor("owner").connect({
+			...connectInput,
+			gateMode: "workflows",
+			gateWorkflows: ["CI", "Security"],
+			gateTimeoutMinutes: 90,
+		});
+		expect(mocks.createGhaConnection).toHaveBeenCalledWith(
+			expect.objectContaining({
+				gateMode: "workflows",
+				gateWorkflows: ["CI", "Security"],
+				gateTimeoutMinutes: 90,
+			}),
+			expect.anything(),
+		);
+	});
+
+	it("defaults to the image gate, no workflows and 60 minutes", async () => {
+		await callerFor("owner").connect(connectInput);
+		expect(mocks.createGhaConnection).toHaveBeenCalledWith(
+			expect.objectContaining({
+				gateMode: "image",
+				gateWorkflows: [],
+				gateTimeoutMinutes: 60,
+			}),
+			expect.anything(),
+		);
+	});
+
+	it.each([
+		["workflows without names", { gateMode: "workflows" }],
+		[
+			"workflows with an empty list",
+			{ gateMode: "workflows", gateWorkflows: [] },
+		],
+		[
+			"more than 20 workflows",
+			{
+				gateMode: "workflows",
+				gateWorkflows: Array.from({ length: 21 }, (_, i) => `w${i}`),
+			},
+		],
+		["an empty workflow name", { gateMode: "workflows", gateWorkflows: [""] }],
+		[
+			"a workflow name over 100 characters",
+			{ gateMode: "workflows", gateWorkflows: ["x".repeat(101)] },
+		],
+		["a timeout under 5 minutes", { gateTimeoutMinutes: 4 }],
+		["a timeout over 720 minutes", { gateTimeoutMinutes: 721 }],
+		["a fractional timeout", { gateTimeoutMinutes: 10.5 }],
+		["an unknown mode", { gateMode: "always" }],
+	])("refuses %s before anything is read", async (_label, extra) => {
+		await expect(
+			callerFor("owner").connect({ ...connectInput, ...extra } as never),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.findGithubConnectionInOrganization).not.toHaveBeenCalled();
+		nothingWritten();
+	});
+});
+
+const settings = (over: Record<string, unknown> = {}) => ({
+	gateMode: "checks",
+	gateWorkflows: [] as string[],
+	gateTimeoutMinutes: 60,
+	...over,
+});
+
+describe("update changes the deploy gate", () => {
+	const target = { serviceType: "compose" as const, serviceId: "compose-1" };
+
+	beforeEach(() => {
+		mocks.findGhaConnection.mockResolvedValue(gateStored());
+		mocks.findGatedRelease.mockResolvedValue(null);
+		mocks.updateGateSettings.mockResolvedValue({
+			before: settings(),
+			after: settings({ gateMode: "workflows", gateWorkflows: ["CI"] }),
+			restarted: true,
+		});
+	});
+
+	it("saves the change and answers the presented connection, with the gate fields", async () => {
+		mocks.findGhaConnection
+			.mockResolvedValueOnce(gateStored())
+			.mockResolvedValueOnce(
+				gateStored({
+					gateMode: "workflows",
+					gateWorkflows: ["CI"],
+					gateTimeoutMinutes: 30,
+				}),
+			);
+		const saved = await callerFor("admin").update({
+			...target,
+			gateMode: "workflows",
+			gateWorkflows: ["CI"],
+			gateTimeoutMinutes: 30,
+		});
+		expect(mocks.updateGateSettings).toHaveBeenCalledWith("gc-1", {
+			gateMode: "workflows",
+			gateWorkflows: ["CI"],
+			gateTimeoutMinutes: 30,
+		});
+		expect(saved).toMatchObject({
+			gateMode: "workflows",
+			gateWorkflows: ["CI"],
+			gateTimeoutMinutes: 30,
+		});
+		expect(saved).not.toHaveProperty("previousSource");
+	});
+
+	it("audits every change with the settings before and after", async () => {
+		await callerFor("admin").update({
+			...target,
+			gateMode: "workflows",
+			gateWorkflows: ["CI"],
+		});
+		expect(audit).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({
+				action: "update",
+				resourceId: "compose-1",
+				metadata: {
+					before: settings(),
+					after: settings({ gateMode: "workflows", gateWorkflows: ["CI"] }),
+					restarted: true,
+				},
+			}),
+		);
+	});
+
+	it("is gated like disconnect", async () => {
+		await callerFor("admin").update({ ...target, gateTimeoutMinutes: 30 });
+		expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledWith(
+			expect.anything(),
+			"compose-1",
+			{ service: ["create"], deployment: ["create"] },
+		);
+		await expect(
+			callerFor("member").update({ ...target, gateTimeoutMinutes: 30 }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+	});
+
+	it("refuses an empty change", async () => {
+		await expect(callerFor("admin").update(target)).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: "Nothing to change",
+		});
+		expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+	});
+
+	it("refuses the workflows gate with no workflows, counting the ones already saved", async () => {
+		await expect(
+			callerFor("admin").update({ ...target, gateMode: "workflows" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+		mocks.findGhaConnection.mockResolvedValue(
+			gateStored({ gateWorkflows: ["CI"] }),
+		);
+		await callerFor("admin").update({ ...target, gateMode: "workflows" });
+		expect(mocks.updateGateSettings).toHaveBeenCalled();
+	});
+
+	it("checks the bounds of every field", async () => {
+		for (const bad of [
+			{ gateTimeoutMinutes: 4 },
+			{ gateTimeoutMinutes: 721 },
+			{ gateWorkflows: ["x".repeat(101)] },
+			{ gateWorkflows: Array.from({ length: 21 }, (_, i) => `w${i}`) },
+		]) {
+			await expect(
+				callerFor("admin").update({ ...target, ...bad }),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		}
+		expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+	});
+
+	it("is not found for a service that follows nothing, or one of another organization", async () => {
+		mocks.findGhaConnection.mockResolvedValue(null);
+		await expect(
+			callerFor("admin").update({ ...target, gateTimeoutMinutes: 30 }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		mocks.findGhaConnection.mockResolvedValue(
+			gateStored({ organizationId: "org-b" }),
+		);
+		await expect(
+			callerFor("admin").update({ ...target, gateTimeoutMinutes: 30 }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+	});
+
+	it("is not available in the cloud version", async () => {
+		mocks.isCloud = true;
+		try {
+			await expect(
+				callerFor("admin").update({ ...target, gateTimeoutMinutes: 30 }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+		} finally {
+			mocks.isCloud = false;
+		}
+	});
+
+	describe("a member who may manage git providers", () => {
+		beforeEach(() => {
+			mocks.memberGitProviderActions = ["create"];
+		});
+
+		it.each([
+			["turn the gate off", { gateMode: "image" as const }],
+			[
+				"swap checks for workflows",
+				{ gateMode: "workflows" as const, gateWorkflows: ["CI"] },
+			],
+			["wait longer", { gateTimeoutMinutes: 120 }],
+		])("cannot %s", async (_label, change) => {
+			await expect(
+				callerFor("member").update({ ...target, ...change }),
+			).rejects.toMatchObject({
+				code: "FORBIDDEN",
+				message: "Only an organization owner or admin can loosen the gate",
+			});
+			expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+		});
+
+		it("cannot remove a workflow", async () => {
+			mocks.findGhaConnection.mockResolvedValue(
+				gateStored({ gateMode: "workflows", gateWorkflows: ["CI", "Lint"] }),
+			);
+			await expect(
+				callerFor("member").update({ ...target, gateWorkflows: ["CI"] }),
+			).rejects.toMatchObject({ code: "FORBIDDEN" });
+			expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+		});
+
+		it("can tighten the gate while nothing waits on it", async () => {
+			mocks.findGhaConnection.mockResolvedValue(
+				gateStored({ gateMode: "image" }),
+			);
+			await callerFor("member").update({ ...target, gateMode: "checks" });
+			expect(mocks.updateGateSettings).toHaveBeenCalled();
+			mocks.updateGateSettings.mockClear();
+			mocks.findGhaConnection.mockResolvedValue(gateStored());
+			await callerFor("member").update({ ...target, gateTimeoutMinutes: 30 });
+			expect(mocks.updateGateSettings).toHaveBeenCalled();
+		});
+
+		it("cannot change anything while an accepted release has not been looked at yet", async () => {
+			mocks.findGatedRelease.mockResolvedValue({
+				releaseId: "rel-1",
+				gateState: null,
+			});
+			await expect(
+				callerFor("member").update({ ...target, gateTimeoutMinutes: 30 }),
+			).rejects.toMatchObject({ code: "FORBIDDEN" });
+			expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+		});
+
+		it.each(["waiting", "blocked"])(
+			"cannot change anything while a release is %s",
+			async (gateState) => {
+				mocks.findGatedRelease.mockResolvedValue({
+					releaseId: "rel-1",
+					gateState,
+				});
+				await expect(
+					callerFor("member").update({ ...target, gateTimeoutMinutes: 30 }),
+				).rejects.toMatchObject({
+					code: "FORBIDDEN",
+					message: expect.stringContaining("release is waiting"),
+				});
+				expect(mocks.updateGateSettings).not.toHaveBeenCalled();
+			},
+		);
+	});
+
+	it.each(["owner", "admin"] as const)(
+		"an %s may loosen the gate, even while a release is blocked",
+		async (role) => {
+			mocks.findGatedRelease.mockResolvedValue({
+				releaseId: "rel-1",
+				gateState: "blocked",
+			});
+			await callerFor(role).update({ ...target, gateMode: "image" });
+			expect(mocks.updateGateSettings).toHaveBeenCalledWith("gc-1", {
+				gateMode: "image",
+				gateWorkflows: undefined,
+				gateTimeoutMinutes: undefined,
+			});
+		},
+	);
+});
+
+describe("deployAnyway", () => {
+	const target = {
+		serviceType: "compose" as const,
+		serviceId: "compose-1",
+		releaseId: "rel-1",
+	};
+
+	beforeEach(() => {
+		mocks.findGhaConnection.mockResolvedValue(gateStored());
+		mocks.overrideGate.mockResolvedValue({
+			kind: "ok",
+			releaseId: "rel-1",
+			sha: "c".repeat(40),
+		});
+	});
+
+	it.each(["owner", "admin"] as const)(
+		"lets an %s do it, records who and why, and answers deploy",
+		async (role) => {
+			const result = await callerFor(role).deployAnyway({
+				...target,
+				reason: "hotfix for the outage",
+			});
+			expect(result).toEqual({ decision: "deploy", sha: "c".repeat(40) });
+			expect(mocks.overrideGate).toHaveBeenCalledWith("gc-1", "rel-1", {
+				by: "u@example.com",
+				at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+				reason: "hotfix for the outage",
+			});
+			expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledWith(
+				expect.anything(),
+				"compose-1",
+				{ service: ["create"], deployment: ["create"] },
+			);
+			expect(audit).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.objectContaining({
+					action: "deploy",
+					resourceId: "compose-1",
+					metadata: { reason: "hotfix for the outage", releaseId: "rel-1" },
+				}),
+			);
+		},
+	);
+
+	it("needs the release to name", async () => {
+		await expect(
+			callerFor("owner").deployAnyway({
+				serviceType: "compose",
+				serviceId: "compose-1",
+			} as never),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.overrideGate).not.toHaveBeenCalled();
+	});
+
+	it("is a conflict when a newer release has arrived", async () => {
+		mocks.overrideGate.mockResolvedValue({
+			kind: "conflict",
+			newestReleaseId: "rel-2",
+			newestSha: "d".repeat(40),
+		});
+		await expect(callerFor("owner").deployAnyway(target)).rejects.toMatchObject(
+			{
+				code: "CONFLICT",
+				message: expect.stringContaining("ddddddd"),
+			},
+		);
+		expect(audit).not.toHaveBeenCalled();
+	});
+
+	it("refuses a member, even one with git provider access, and changes nothing", async () => {
+		mocks.memberGitProviderActions = ["create"];
+		await expect(
+			callerFor("member").deployAnyway(target),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(mocks.overrideGate).not.toHaveBeenCalled();
+	});
+
+	it("is not found for a service that follows nothing or another organization's", async () => {
+		mocks.findGhaConnection.mockResolvedValue(
+			gateStored({ organizationId: "org-b" }),
+		);
+		await expect(callerFor("owner").deployAnyway(target)).rejects.toMatchObject(
+			{ code: "NOT_FOUND" },
+		);
+		expect(mocks.overrideGate).not.toHaveBeenCalled();
+	});
+
+	it("says so when no release is waiting", async () => {
+		mocks.overrideGate.mockResolvedValue({ kind: "none" });
+		await expect(callerFor("owner").deployAnyway(target)).rejects.toMatchObject(
+			{
+				code: "BAD_REQUEST",
+				message: "No release is waiting to be deployed",
+			},
+		);
+		expect(audit).not.toHaveBeenCalled();
+	});
+
+	it("keeps the reason within 300 characters", async () => {
+		await expect(
+			callerFor("owner").deployAnyway({ ...target, reason: "x".repeat(301) }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+	});
+});
+
+describe("one shows the gate of each release", () => {
+	it("returns gateState and gateReason, not the learned set or who overrode", async () => {
+		mocks.findGhaConnection.mockResolvedValue(gateStored());
+		mocks.listReleases.mockResolvedValue([
+			{
+				releaseId: "rel-1",
+				sha: "a".repeat(40),
+				runId: 1,
+				runAttempt: 1,
+				delivery: "pull",
+				status: "accepted",
+				gateState: "blocked",
+				gateReason: "Check test failed",
+				gateExpected: { source: "required", names: ["test"] },
+				gateOverride: { by: "x@y.z", at: "now", reason: null },
+				createdAt: new Date(),
+				settledAt: null,
+			},
+		]);
+		const connection = await callerFor("admin").one({
+			serviceType: "compose",
+			serviceId: "compose-1",
+		});
+		expect(connection?.releases[0]).toMatchObject({
+			gateState: "blocked",
+			gateReason: "Check test failed",
+		});
+		expect(JSON.stringify(connection)).not.toContain("x@y.z");
+		expect(connection).toMatchObject({
+			gateMode: "checks",
+			gateTimeoutMinutes: 60,
+		});
 	});
 });

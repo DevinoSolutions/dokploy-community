@@ -1604,6 +1604,13 @@
       "when": 1793863605783,
       "tag": "0229_gha_connection",
       "breakpoints": true
+    },
+    {
+      "idx": 230,
+      "version": "7",
+      "when": 1793870000000,
+      "tag": "0230_gha_deploy_gate",
+      "breakpoints": true
     }
   ]
 }

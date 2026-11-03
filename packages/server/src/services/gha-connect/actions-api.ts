@@ -517,3 +517,6 @@ export const createActionsApi = (
 	environmentPolicy: (environment) =>
 		getEnvironmentPolicy(deps, token, ref, environment),
 });
+
+/** The shared GET and repository path, for the other read modules of the connection (the deploy gate). */
+export { get as apiGet, repoPath as apiRepoPath };
