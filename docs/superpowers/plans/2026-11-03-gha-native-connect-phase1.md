@@ -39,7 +39,7 @@ Spec: `docs/superpowers/specs/2026-11-03-gha-native-connect-design.md` (revision
 | Device flow | `GITHUB_DEVICE_SCOPE`, `startDeviceFlow`, `beginGithubConnect`, `progressGithubConnect` |
 | App wiring | `apps/dokploy/server/queues/github-deployments-poller.ts` (`startDeploy`, `inspectInflight`, `runGithubDeploymentsTick`, `createGithubDeploymentsPollDeps`, `githubDeploymentTitle`), `apps/dokploy/server/api/routers/github-deployment.ts` |
 | Canary live rows (c45, c46) | `registerExternalBuild` and `finishExternalBuild` in `packages/server/src/services/external-build.ts`, queue job field `deploymentId` in `apps/dokploy/server/queues/queue-types.ts`, `claimLiveGithubBuild`, `startGithubRunPoller` |
-| Canary source switch | `saveDockerProvider`, `disconnectGitProvider`, `updateApplication`, `resolveDockerProviderFields` |
+| Canary source switch | `updateApplication` (service function, called by the flip) and `disconnectGitProvider` (a tRPC procedure in `apps/dokploy/server/api/routers/application.ts`; the plan does not call it, it mirrors the fields it writes in `APPLICATION_GIT_RESET`, and a test pins that list to the router source field for field). `saveDockerProvider` is also a tRPC procedure and `resolveDockerProviderFields` is private to that router; the plan calls neither |
 | Canary build policy | `evaluateRequiredChecks` in `packages/server/src/services/build-policy/required-checks.ts` (the gate reuses it in phase 3) |
 
 ### Assumptions and deviations from the spec
@@ -52,11 +52,16 @@ Spec: `docs/superpowers/specs/2026-11-03-gha-native-connect-design.md` (revision
 6. **The wizard, scan, environment-secret writes and pull request creation are phase 2.** Phase 1 connect is "Copy the file".
 7. **Phase 1 token.** The #577 device flow now asks `repo_deployment public_repo` (or `repo_deployment repo` for private repositories). `read:packages` is dropped, so `loadGhcrCredentials` returns null for a connection without it and prod never holds a GHCR token for a connected service.
 8. **The `delivery: push|pull` guard.** Dokploy deploys only `pull` manifests. A `push` manifest is verified and advances the deployed commit record without deploying (spec "Migration path").
-9. **Signatures verified in a scratch tree.** The pure modules, their tests and the action scripts below were run before this plan was written: 17 vitest files, 382 tests passing with `tsc --strict` clean against the #577 head plus these edits, 20 node tests for the action, and the migration applied twice on PostgreSQL 16. The app-layer wiring (router, poller dependencies, `startDeploy` extension, UI) could not be run there and is marked "wiring" with a typecheck gate and a manual proof.
+9. **What is verified and what is only claimed.** The author ran the pure modules, their tests and the action scripts in a scratch tree: a copy of the #577 head plus the files of this plan, with `node_modules` junctioned from a normal checkout. Treat every figure from that tree as **CLAIMED, not verified**, until the executing engineer reruns it in a real checkout (each task ends with its own run line). The claimed figures after the last revision: 17 vitest files and 355 tests passing, `tsc --strict` clean over the pure modules and their tests, 20 node tests for the action, and the migration SQL written to be re-runnable (no database was available in the revision pass, so "applied twice on PostgreSQL" is **not** claimed for 0229; the idempotency gate in PR 2 is the check). The app-layer wiring (router, poller dependencies, `startDeploy` extension, UI) and `apps/dokploy/__test__/gha-connect/poller-release.test.ts` were never run anywhere: they are marked "wiring" with a typecheck gate and a manual proof, and their mock harness may need small fixes when first run.
+10. **Registry model.** A connection stores a registry **prefix** that may carry a path, `host[:port][/path]` without a trailing slash, taken from how a release names its images (the tunnel mirror's is `localhost:5000/registry.devino.ca`, so the allowed namespace of repository `voicelabs` is `localhost:5000/registry.devino.ca/voicelabs/`). It also stores `registryId`, the Dokploy registry record (Settings, Registry), and `registryProbeHost`, that record's URL host. The v2 manifest `HEAD` for a digest goes to `https://<registryProbeHost>` with the record's login. It never goes to `localhost:5000`: from inside the Dokploy container that name is the host's registry only if the host publishes the registry on its port 5000, which this plan does not assume. The deploy host pulls the image under the name written in the compose, exactly as the wrapper's API deploys already do. Only a stored (raw) compose may name a registry prefix in phase 1; an application built from git can move only to a public GHCR image.
+11. **Attempts.** Artifacts belong to a run, and `upload-artifact` fails on an existing name unless told otherwise, so the action uploads with `overwrite: true` and the artifact holds the newest attempt. A Deployment whose attempt is lower than the manifest's is `superseded`: it is remembered as handled and never blocks a connection.
+12. **Backup before the first release.** Before a connection's first release changes a service, a compose stack that has enabled backup schedules gets one fresh run of each (the Backups tab's own function) and the release waits for it. In every case the service as it was (an application's source settings without the registry password, or a compose stack's id, source type and file text) is saved in `gha_release.sourceBackup` in the same transaction as the change. The standing rule of a fresh `pg_dump` before Dokploy updates is an operator step, not code, and is part of the manual proof of PR 4 for any stack with a database.
+13. **Multi-service releases.** A release that names several services is deployed service by service. Each service waits until every other service of the release has a Deployment for the same run and attempt, and after 15 minutes without it the connection is Blocked with the names of what is missing.
+14. **Verification budget per repository.** At most 5 runs are verified per poll tick per repository, counted across all connections of that repository (voicekit has three).
 
-### The proof adopter: voicekit (web service, `dev` environment)
+### The proof adopter: voicekit web, GitHub environment `development` (branch `dev`)
 
-Pick **voicekit web on its `dev` environment** as the first adopter. Reasons from the live GitHub data: it calls the shared `dokploy-compose.yml` wrapper at a sha, so one wrapper change in the `.github` repository covers it; its `dev` environment has a custom deployment branch policy limited to one branch, which is exactly what acceptance rule 5 and the Connect check require; and `dev` is not production, so a wrong release costs nothing. The other shared-workflow adopters follow once voicekit has held for a week.
+Pick **voicekit web on its `development` environment** (the branch is `dev`) as the first adopter. Reasons from the live GitHub data: it calls the shared `dokploy-compose.yml` wrapper at a sha, so one wrapper change in the `.github` repository covers it; its `development` environment has a custom deployment branch policy limited to the one branch `dev`, which is exactly what acceptance rule 5 and the Connect check require; and it is not production, so a wrong release costs nothing. Three facts shape the proof: the repository (`DevinoSolutions/voicelabs` on GitHub today, voicekit before the rename) is **private**, so the GitHub connection needs the `repo` scope; the web service is a **raw compose**, so the proof is the raw-compose flow (the compose stays raw and a release pins digests in its stored text), not a git-to-image flip; and the release is published from the voicekit repository itself, never from a scratch repository. The other shared-workflow adopters follow once voicekit has held for a week.
 
 ---
 
@@ -68,7 +73,7 @@ Phase 1 is Task 0 plus six pull requests. Each PR is reviewable alone, passes it
 |---|---|---|---|---|
 | Task 0 | fork | Rebase and land #577 | 0228 (renumbered) | #577's own design-doc proof |
 | PR 1 | `DevinoSolutions/dokploy-release` (new) | Action, schema, fixtures, artifact upload, Deployment creation, self-test | none | Self-test run on the action repository |
-| PR 2 | fork | `gha_connection` and `gha_release` tables, scope change, connect checks, `ghaConnection` API and MCP | 0229 | Reconnect GitHub, call `ghaConnection.connect` against voicekit web `dev` |
+| PR 2 | fork | `gha_connection` and `gha_release` tables, scope change, connect checks, `ghaConnection` API and MCP | 0229 | Reconnect GitHub with private repository access (`repo` scope), call `ghaConnection.connect` against voicekit web `development` |
 | PR 3 | fork | Acceptance engine: manifest parser, zip reader, registry probe, ordering, vendored fixtures | none | None (no runtime path yet) |
 | PR 4 | fork | Poller: #577 refactor, connection poll, upkeep and stale, flip, release rows, statuses with URLs, live rows | none | Push-mode dry run, then the first pull release |
 | PR 5 | fork | Copy-the-file connect UI and status panel | none | Click-through on the service page |
@@ -159,9 +164,9 @@ In `_journal.json` keep canary's entries up to idx 227, remove #577's `0226_gith
 
 `1793777205783` is canary's last `when` (1793690805783) plus one day. It must stay above every earlier entry. In the SQL header comment change "Numbered after 0225 (PR #576, T-12149)" to "Numbered after 0227". In `docs/design/github-deployments-pull.md` change the two mentions of 0226 (lines near 131 and 147) to 0228.
 
-- [ ] **Step 5: Add the snapshot Drizzle expects for 0228**
+- [ ] **Step 5 (optional hygiene): Add a snapshot for 0228**
 
-Canary keeps one snapshot per migration (`meta/0226_snapshot.json`, `meta/0227_snapshot.json`), so 0228 needs one. Generate it, then keep only the snapshot:
+The migrator never reads snapshots: it applies the SQL files in the order and by the `when` values of `_journal.json`, and the idempotency gate reads the SQL. Canary already has migrations without a snapshot (there is no `meta/0223_snapshot.json`; 0221, 0222, 0224 to 0227 have one). A snapshot only keeps `drizzle-kit generate` honest for the next schema change. Add one if it is cheap, skip it if the generator misbehaves, and say which in the PR description.
 
 ```bash
 cd apps/dokploy
@@ -169,7 +174,7 @@ pnpm exec drizzle-kit generate --config ./server/db/drizzle.config.ts --name tmp
 # It writes drizzle/00NN_tmp_snapshot_only.sql, meta/00NN_snapshot.json and a journal entry.
 ```
 
-Then: move the new `meta/00NN_snapshot.json` to `meta/0228_snapshot.json`; delete the generated `.sql` file; remove the generated journal entry (the hand-guarded 0228 SQL and its entry from Step 4 stay). Open `0228_snapshot.json` and check its `prevId` equals the `id` of `0227_snapshot.json` (`c76aa1ca-d116-462a-9691-4b19b471edac`) and that its `tables` now include `public.github_deployment_connection` and `public.github_deployment_watch`. If the generator wants a different journal state, restore `_journal.json` from Step 4 first and rerun.
+Then: move the new `meta/00NN_snapshot.json` to `meta/0228_snapshot.json`; delete the generated `.sql` file; remove the generated journal entry (the hand-guarded 0228 SQL and its entry from Step 4 stay). Open `0228_snapshot.json` and check its `prevId` equals the `id` of `0227_snapshot.json` (`c76aa1ca-d116-462a-9691-4b19b471edac`) and that its `tables` now include `public.github_deployment_connection` and `public.github_deployment_watch`. If the generator wants a different journal state, restore `_journal.json` from Step 4 first and rerun; if it still fails, skip this step.
 
 - [ ] **Step 6: Run the gates**
 
@@ -495,6 +500,25 @@ const valid = {
 					},
 				],
 				compose: { path: "docker-compose.yml" },
+				migrations: null,
+			},
+		];
+	}),
+	// The tunnel mirror's real names: the wrapper copies ghcr.io/<owner>/<repo>/<service> to
+	// localhost:5000/registry.devino.ca/<repo>/<service> (host:port plus a path prefix).
+	"tunnel-mirror": mutate((m) => {
+		m.release.services = ["voicekit-web"];
+		m.services = [
+			{
+				key: "voicekit-web",
+				images: [
+					{
+						name: "web",
+						composeService: "web",
+						ref: `localhost:5000/registry.devino.ca/voicekit/web@${d("3")}`,
+					},
+				],
+				compose: { path: "docker-compose.prod.yml" },
 				migrations: null,
 			},
 		];
@@ -1396,6 +1420,8 @@ runs:
         path: ${{ steps.manifest.outputs.path }}
         retention-days: 7
         if-no-files-found: error
+        # A re-run attempt replaces the artifact; Dokploy treats an older attempt as superseded.
+        overwrite: true
 
     - name: Create the GitHub Deployments
       if: steps.manifest.outputs.published == 'true'
@@ -1503,7 +1529,7 @@ One review of the PR head (opus5-worker at high effort). Check specifically: eve
 
 - [ ] **Step 7: Manual proof for the lead**
 
-After merge, open the Actions tab of `DevinoSolutions/dokploy-release` and confirm the `selftest` run on `main` is green, that the run page lists the artifact `dokploy-release` (retention 7 days), and that `gh api "repos/DevinoSolutions/dokploy-release/deployments?task=dokploy:selftest&per_page=1"` returns a Deployment whose `payload.schema` is `dokploy.deployment/v1`. Then create the release tag: `git tag -a v1.0.0 -m "dokploy-release 1.0.0" && git tag -f v1 && git push origin v1.0.0 && git push -f origin v1`. The fork's PR 3 vendors fixtures from the commit tagged `v1.0.0`.
+After merge, open the Actions tab of `DevinoSolutions/dokploy-release` and confirm the `selftest` run on `main` is green, that the run page lists the artifact `dokploy-release` (retention 7 days), and that `gh api "repos/DevinoSolutions/dokploy-release/deployments?task=dokploy:selftest&per_page=1"` returns a Deployment whose `payload.schema` is `dokploy.deployment/v1`. Then create the release tag: `git tag -a v1.0.0 -m "dokploy-release 1.0.0" && git tag -f v1 && git push origin v1.0.0 && git push -f origin v1`. Re-run the failed or the whole `release` job once (attempt 2) and confirm it does not fail with an artifact-name conflict: the action uploads with `overwrite: true`, so attempt 2 replaces the artifact of the run, and Dokploy treats a Deployment of attempt 1 as superseded once the artifact holds attempt 2. The fork's PR 3 vendors fixtures from the commit tagged `v1.0.0`.
 
 ## PR 2: Connection tables, scope change, connect checks, API and MCP
 
@@ -1522,7 +1548,7 @@ What it adds, in the order the tasks build it: the pure rules Connect and accept
 
 ### Task 2.1: Image namespace, ordering and environment policy (pure)
 
-Acceptance rules 4, 5 and 6 and the Connect environment check use these. `allowedNamespaces` returns `ghcr.io/<owner>/<repo>/` and, when a registry host is set, `<registryHost>/<repo>/`. `checkImageRepository` refuses anything under `<repo>/preview/` and, after the first release, anything but the repositories the service runs now. `decideOrdering` implements rule 6. `evaluateEnvironmentPolicy` accepts exactly one policy, of type branch, named like the tracked branch.
+Acceptance rules 4, 5 and 6 and the Connect environment check use these. `allowedNamespaces` returns `ghcr.io/<owner>/<repo>/` and, when a registry prefix is set, `<registryPrefix>/<repo>/`. The prefix is stored exactly as images are written in a release, `host[:port][/path]` without a trailing slash, because the tunnel mirror names its images `localhost:5000/registry.devino.ca/<repo>/<service>`: host `localhost:5000`, path `registry.devino.ca`. A bare-host model would have refused every one of those images. `canonicalRepository` is the mapping hook from a mirrored name back to the GHCR name it was copied from (`localhost:5000/registry.devino.ca/voicekit/web` to `ghcr.io/<owner>/voicekit/web`); provenance and phase 3 retention use it and acceptance does not depend on it. `checkImageRepository` refuses anything under `<repo>/preview/` and, after the first release, anything but the repositories the service runs now. `decideOrdering` implements rule 6. `evaluateEnvironmentPolicy` accepts exactly one policy, of type branch, named like the tracked branch.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1532,6 +1558,7 @@ Acceptance rules 4, 5 and 6 and the Connect environment check use these. `allowe
 import { evaluateEnvironmentPolicy } from "@dokploy/server/services/gha-connect/environment-policy";
 import {
 	allowedNamespaces,
+	canonicalRepository,
 	checkImageRepository,
 	splitRepository,
 } from "@dokploy/server/services/gha-connect/namespace";
@@ -1546,7 +1573,7 @@ describe("image namespace", () => {
 	const namespaces = allowedNamespaces({
 		owner: "DevinoSolutions",
 		repo: "VoiceKit",
-		registryHost: "registry.devino.ca",
+		registryPrefix: "registry.devino.ca",
 	});
 
 	it("allows the owner's public GHCR path and the instance registry path, lower-cased", () => {
@@ -1558,7 +1585,7 @@ describe("image namespace", () => {
 
 	it("has no registry namespace when the connection names no registry host", () => {
 		expect(
-			allowedNamespaces({ owner: "acme", repo: "shop", registryHost: null }),
+			allowedNamespaces({ owner: "acme", repo: "shop", registryPrefix: null }),
 		).toEqual(["ghcr.io/acme/shop/"]);
 	});
 
@@ -1634,6 +1661,49 @@ describe("image namespace", () => {
 		});
 		expect(splitRepository("library/nginx")).toBeNull();
 		expect(splitRepository("nginx")).toBeNull();
+	});
+});
+
+describe("the tunnel mirror prefix (localhost:5000/registry.devino.ca)", () => {
+	const registryPrefix = "localhost:5000/registry.devino.ca";
+	const namespaces = allowedNamespaces({ owner: "DevinoSolutions", repo: "voicekit", registryPrefix });
+
+	it("builds the namespace from the prefix, with or without a trailing slash", () => {
+		expect(namespaces).toEqual([
+			"ghcr.io/devinosolutions/voicekit/",
+			"localhost:5000/registry.devino.ca/voicekit/",
+		]);
+		expect(
+			allowedNamespaces({ owner: "DevinoSolutions", repo: "voicekit", registryPrefix: `${registryPrefix}/` }),
+		).toEqual(namespaces);
+	});
+
+	it("accepts what the wrapper's mirror step writes and still refuses preview and foreign paths", () => {
+		const check = (repository: string) =>
+			checkImageRepository({ repository, namespaces, currentRepositories: [] });
+		expect(check("localhost:5000/registry.devino.ca/voicekit/web")).toEqual({ ok: true });
+		expect(check("localhost:5000/registry.devino.ca/voicekit/preview/pr-7")).toMatchObject({ ok: false, code: "image-namespace" });
+		expect(check("localhost:5000/registry.devino.ca/other/web")).toMatchObject({ ok: false, code: "image-namespace" });
+		expect(check("registry.devino.ca/voicekit/web")).toMatchObject({ ok: false, code: "image-namespace" });
+	});
+
+	it("splits the image so the registry name keeps the mirrored host segment", () => {
+		expect(splitRepository("localhost:5000/registry.devino.ca/voicekit/web")).toEqual({
+			host: "localhost:5000",
+			name: "registry.devino.ca/voicekit/web",
+		});
+	});
+
+	it("maps a mirrored image back to the GHCR image it was copied from", () => {
+		expect(
+			canonicalRepository({ repository: "localhost:5000/registry.devino.ca/voicekit/web", owner: "DevinoSolutions", registryPrefix }),
+		).toBe("ghcr.io/devinosolutions/voicekit/web");
+		expect(
+			canonicalRepository({ repository: "ghcr.io/devinosolutions/voicekit/web", owner: "DevinoSolutions", registryPrefix }),
+		).toBeNull();
+		expect(
+			canonicalRepository({ repository: "localhost:5000/registry.devino.ca/voicekit/web", owner: "x", registryPrefix: null }),
+		).toBeNull();
 	});
 });
 
@@ -1790,18 +1860,44 @@ export interface NamespaceInput {
 	owner: string;
 	/** Name of the connected repository (without the owner). */
 	repo: string;
-	/** Registry host of this Dokploy's own registry, when images are mirrored there. */
-	registryHost: string | null;
+	/**
+	 * Where mirrored images live, as written in the images of a release:
+	 * host[:port][/path]. The tunnel mirror's is `localhost:5000/registry.devino.ca`.
+	 */
+	registryPrefix: string | null;
 }
+
+/** A registry prefix without case or trailing slashes. */
+export const normalizePrefix = (prefix: string) =>
+	lower(prefix).replace(/\/+$/, "");
 
 /** Repository prefixes (always ending in "/") a release of this connection may use. */
 export const allowedNamespaces = (input: NamespaceInput): string[] => {
 	const repo = lower(input.repo);
 	const namespaces = [`ghcr.io/${lower(input.owner)}/${repo}/`];
-	if (input.registryHost) {
-		namespaces.push(`${lower(input.registryHost)}/${repo}/`);
+	if (input.registryPrefix) {
+		namespaces.push(`${normalizePrefix(input.registryPrefix)}/${repo}/`);
 	}
 	return namespaces;
+};
+
+/**
+ * The GHCR repository a mirrored image was copied from, or null when the
+ * repository is not under the prefix. The mirror step copies
+ * `ghcr.io/<owner>/<repo>/<service>` to `<prefix>/<repo>/<service>`, so the name
+ * after the prefix is the name after the owner. Provenance and, in phase 3,
+ * retention use it; acceptance does not depend on it.
+ */
+export const canonicalRepository = (input: {
+	repository: string;
+	owner: string;
+	registryPrefix: string | null;
+}): string | null => {
+	if (!input.registryPrefix) return null;
+	const prefix = `${normalizePrefix(input.registryPrefix)}/`;
+	const repository = lower(input.repository);
+	if (!repository.startsWith(prefix)) return null;
+	return `ghcr.io/${lower(input.owner)}/${repository.slice(prefix.length)}`;
 };
 
 export type RepositoryCheck =
@@ -2394,13 +2490,15 @@ git -c user.name=AminDhouib -c user.email=amin@devino.ca commit -m "feat: connec
 
 ### Task 2.3: The source flip plan (pure)
 
-At Connect an application built from git keeps a copy of its source settings (`snapshotPreviousSource`, never the registry password) and turns git autodeploy off. At the first accepted release `planApplicationFlip` returns the update that moves it to a Docker image at the release digest (the same field reset `disconnectGitProvider` writes). A service already on a Docker image is not flipped.
+At Connect an application built from git keeps a copy of its source settings (`snapshotPreviousSource`, never the registry password) and turns git autodeploy off. At the first accepted release `planApplicationFlip` returns the update that moves it to a Docker image at the release digest (the same field reset `disconnectGitProvider` writes). A service already on a Docker image is not flipped. `disconnectGitProvider` is a tRPC procedure, not a function this code can call, so `APPLICATION_GIT_RESET` copies its fields; the last test of the file reads `apps/dokploy/server/api/routers/application.ts` and compares the object field for field (only `sourceType`, which the flip sets itself, is excluded), so a field added to the procedure on canary fails this test until the list follows it.
 
 - [ ] **Step 1: Write the failing test**
 
 **`apps/dokploy/__test__/gha-connect/flip.test.ts`**
 
 ```ts
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
 	APPLICATION_GIT_RESET,
 	planApplicationFlip,
@@ -2450,6 +2548,34 @@ describe("planApplicationFlip", () => {
 
 	it("never keeps the registry password", () => {
 		expect(snapshotPreviousSource(gitApp)).not.toHaveProperty("password");
+	});
+});
+
+describe("APPLICATION_GIT_RESET", () => {
+	it("matches what the application router's disconnectGitProvider writes, field for field", () => {
+		const router = readFileSync(
+			resolve(__dirname, "../../server/api/routers/application.ts"),
+			"utf8",
+		);
+		const start = router.indexOf("disconnectGitProvider: protectedProcedure");
+		expect(start).toBeGreaterThan(-1);
+		const call = router.indexOf("await updateApplication(input.applicationId, {", start);
+		expect(call).toBeGreaterThan(-1);
+		const open = router.indexOf("{", call + "await updateApplication(input.applicationId, ".length);
+		const close = router.indexOf("\n\t\t\t});", open);
+		const body = router.slice(open + 1, close);
+
+		const written: Record<string, unknown> = {};
+		for (const line of body.split("\n")) {
+			const match = line.match(/^\s*(\w+):\s*(null|false|true|"[^"]*")\s*,/);
+			if (match) written[match[1] as string] = JSON.parse(match[2] as string);
+		}
+
+		const { sourceType, ...rest } = written;
+		// The flip sets its own source type; everything else is the router's reset.
+		expect(sourceType).toBe("github");
+		expect(Object.keys(rest).length).toBeGreaterThan(25);
+		expect(APPLICATION_GIT_RESET).toEqual(rest);
 	});
 });
 ```
@@ -3583,9 +3709,9 @@ git -c user.name=AminDhouib -c user.email=amin@devino.ca commit -m "feat: GitHub
 
 ### Task 2.5: The Connect checks
 
-`planConnect` runs, in order: protection mode (only `environment` for now), the service kind (an application from GitHub or on a Docker image; a compose stored in Dokploy), the repository named like the application's own, the repository readable, the token scopes (`repo_deployment`, plus `public_repo` for a public repository or `repo` for a private one), the branch exists, the environment exists, and its deployment branch policy allows only the tracked branch. A GitHub read error is never a pass. A passing plan carries the repository id, the branch head as the expected commit, the saved source settings and the single service change (autodeploy off).
+`planConnect` runs, in order: protection mode (only `environment` for now), the service kind (an application from GitHub or on a Docker image; a compose stored in Dokploy), the repository named like the application's own, the repository readable, the token scopes (`repo_deployment`, plus `public_repo` for a public repository or `repo` for a private one), the branch exists, the environment exists, and its deployment branch policy allows only the tracked branch. A GitHub read error is never a pass. A passing plan carries the repository id, the branch head as the expected commit, the saved source settings and the single service change (autodeploy off). An application built from git is refused when the request names a registry prefix (it can only move to a public GHCR image in phase 1); a stored (raw) compose stack may name one.
 
-`connectGhaService` wraps it with the ownership checks in the order a user meets them: service of this organization, GitHub account active, nothing already connected, no plain "Deploy from GitHub Deployments" watch on the service, token present, then the plan, then the write.
+`connectGhaService` wraps it with the ownership checks in the order a user meets them: service of this organization, GitHub account active, nothing already connected, no plain "Deploy from GitHub Deployments" watch on the service, token present, then the registry (with a prefix, the chosen Dokploy registry record must exist in this organization and its URL host becomes the connection's `registryProbeHost`: the host where digests are checked, with that record's login), then the plan, then the write.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3630,6 +3756,7 @@ const request: ConnectRequest = {
 	trackedBranch: "main",
 	environment: "production",
 	protectionMode: "environment",
+	registryPrefix: null,
 };
 
 const githubApp: ServiceFacts = {
@@ -3711,6 +3838,17 @@ describe("planConnect", () => {
 			reads(),
 		);
 		expect(plan).toMatchObject({ ok: false, code: "service" });
+	});
+
+	it("refuses a git application that wants a private registry, and lets a raw compose have one", async () => {
+		const mirror = { ...request, registryPrefix: "localhost:5000/registry.devino.ca" };
+		const gitApp = await planConnect({ scopes: SCOPES, service: githubApp, request: mirror }, reads());
+		expect(gitApp).toMatchObject({ ok: false, code: "registry" });
+		const compose = await planConnect(
+			{ scopes: SCOPES, service: { kind: "compose", sourceType: "raw" }, request: mirror },
+			reads(),
+		);
+		expect(compose).toMatchObject({ ok: true });
 	});
 
 	it("refuses repository-secret mode for now", async () => {
@@ -3799,7 +3937,8 @@ const input: ConnectServiceInput = {
 	trackedBranch: "main",
 	environment: "production",
 	serviceKey: "shop",
-	registryHost: null,
+	registryPrefix: null,
+	registryId: null,
 	protectionMode: "environment",
 	gateMode: "image",
 };
@@ -3832,6 +3971,7 @@ const deps = (over: Partial<ConnectServiceDeps<string>> = {}): ConnectServiceDep
 	service: async () => docker,
 	existing: async () => ({ connection: false, plainWatch: false }),
 	reads: () => goodReads,
+	registry: async () => ({ registryUrl: "https://Registry.Devino.CA/" }),
 	persist: async () => "saved-row",
 	isUniqueViolation: (error) => (error as { code?: string }).code === "23505",
 	...over,
@@ -3839,11 +3979,53 @@ const deps = (over: Partial<ConnectServiceDeps<string>> = {}): ConnectServiceDep
 
 describe("connectGhaService", () => {
 	it("connects a service that passes every check", async () => {
-		const persist = vi.fn(async (_plan: ConnectPlan, _input: ConnectServiceInput) => "saved-row");
+		const persist = vi.fn(
+			async (_plan: ConnectPlan, _input: ConnectServiceInput, _registry: { registryProbeHost: string | null }) =>
+				"saved-row",
+		);
 		const result = await connectGhaService(input, deps({ persist }));
 		expect(result).toMatchObject({ ok: true, saved: "saved-row" });
 		expect(persist).toHaveBeenCalledTimes(1);
 		expect(persist.mock.calls[0]?.[0]).toMatchObject({ repoId: 7, expectedSha: SHA });
+	});
+
+	it("takes the digest-check host from the chosen Dokploy registry, not from the prefix", async () => {
+		const persist = vi.fn(
+			async (_plan: ConnectPlan, _input: ConnectServiceInput, _registry: { registryProbeHost: string | null }) =>
+				"saved-row",
+		);
+		const mirrored = { ...input, registryPrefix: "localhost:5000/registry.devino.ca", registryId: "reg-1" };
+		const result = await connectGhaService(mirrored, deps({ persist }));
+		expect(result).toMatchObject({ ok: true });
+		expect(persist.mock.calls[0]?.[2]).toEqual({ registryProbeHost: "registry.devino.ca" });
+	});
+
+	it("needs a Dokploy registry record whenever a registry prefix is given", async () => {
+		const mirrored = { ...input, registryPrefix: "localhost:5000/registry.devino.ca", registryId: null };
+		const noId = await connectGhaService(mirrored, deps());
+		expect(noId).toMatchObject({ ok: false, code: "registry" });
+		const gone = await connectGhaService(
+			{ ...mirrored, registryId: "reg-9" },
+			deps({ registry: async () => null }),
+		);
+		expect(gone).toMatchObject({ ok: false, code: "registry" });
+		const blank = await connectGhaService(
+			{ ...mirrored, registryId: "reg-1" },
+			deps({ registry: async () => ({ registryUrl: "  /  " }) }),
+		);
+		expect(blank).toMatchObject({ ok: false, code: "registry" });
+	});
+
+	it("refuses a registry without an image prefix", async () => {
+		const result = await connectGhaService({ ...input, registryId: "reg-1" }, deps());
+		expect(result).toMatchObject({ ok: false, code: "registry" });
+	});
+
+	it("looks up no registry for public GHCR images", async () => {
+		const registry = vi.fn(async () => null);
+		const result = await connectGhaService(input, deps({ registry }));
+		expect(result).toMatchObject({ ok: true });
+		expect(registry).not.toHaveBeenCalled();
 	});
 
 	it("answers not found for a service of another organization", async () => {
@@ -3954,6 +4136,7 @@ export type ConnectCode =
 	| "branch"
 	| "environment"
 	| "mode"
+	| "registry"
 	| "github";
 
 export type ConnectRefusal = { ok: false; code: ConnectCode; message: string };
@@ -3964,6 +4147,8 @@ export interface ConnectRequest {
 	trackedBranch: string;
 	environment: string;
 	protectionMode: "environment" | "repository-secret";
+	/** Where mirrored images live (host[:port][/path]); null = public GHCR images only. */
+	registryPrefix: string | null;
 }
 
 export type ServiceFacts =
@@ -4051,6 +4236,17 @@ export const planConnect = async (
 		return refuse(
 			"mode",
 			"Only environment protection is available now. Create the GitHub environment and limit its deployment branches to the tracked branch.",
+		);
+	}
+
+	if (
+		request.registryPrefix !== null &&
+		service.kind === "application" &&
+		service.sourceType === "github"
+	) {
+		return refuse(
+			"registry",
+			"An application built from git can move only to a public GHCR image for now. To use a private registry, give it a Docker image source with that registry first, then connect it.",
 		);
 	}
 
@@ -4149,7 +4345,7 @@ export interface ConnectServiceInput extends ConnectRequest {
 	githubConnectionId: string;
 	workflowPath: string;
 	serviceKey: string;
-	registryHost: string | null;
+	registryId: string | null;
 	gateMode: "image" | "checks" | "workflows";
 }
 
@@ -4175,9 +4371,15 @@ export interface ConnectServiceDeps<Saved> {
 		type: "application" | "compose",
 		id: string,
 	): Promise<{ connection: boolean; plainWatch: boolean }>;
+	/** The organization's Dokploy registry record (Settings, Registry), or null. */
+	registry(id: string): Promise<{ registryUrl: string } | null>;
 	reads(token: string, owner: string, repo: string): ConnectReads;
 	/** Writes the watch, the connection row and the service change; throws on a unique violation. */
-	persist(plan: ConnectPlan, input: ConnectServiceInput): Promise<Saved>;
+	persist(
+		plan: ConnectPlan,
+		input: ConnectServiceInput,
+		registry: { registryProbeHost: string | null },
+	): Promise<Saved>;
 	isUniqueViolation(error: unknown): boolean;
 }
 
@@ -4224,6 +4426,29 @@ export const connectGhaService = async <Saved>(
 		);
 	}
 
+	// The mirror's digests are checked at a Dokploy registry record, with its login.
+	let registryProbeHost: string | null = null;
+	if (input.registryPrefix === null && input.registryId !== null) {
+		return refuse("registry", "A registry was chosen but no image prefix. Give both, or neither.");
+	}
+	if (input.registryPrefix !== null) {
+		const record = input.registryId ? await deps.registry(input.registryId) : null;
+		if (!record) {
+			return refuse(
+				"registry",
+				"Choose the Dokploy registry (Settings, Registry) that serves the mirror. Its login is used to check the image digests.",
+			);
+		}
+		registryProbeHost = record.registryUrl
+			.trim()
+			.toLowerCase()
+			.replace(/^https?:\/\//, "")
+			.replace(/\/+$/, "");
+		if (registryProbeHost === "") {
+			return refuse("registry", "That registry has no URL set.");
+		}
+	}
+
 	const plan = await planConnect(
 		{ scopes: account.scopes, service, request: input },
 		deps.reads(token, input.owner, input.repo),
@@ -4231,7 +4456,7 @@ export const connectGhaService = async <Saved>(
 	if (!plan.ok) return plan;
 
 	try {
-		return { ok: true, saved: await deps.persist(plan, input), plan };
+		return { ok: true, saved: await deps.persist(plan, input, { registryProbeHost }), plan };
 	} catch (error) {
 		if (deps.isUniqueViolation(error)) {
 			return refuse(
@@ -4258,7 +4483,7 @@ git -c user.name=AminDhouib -c user.email=amin@devino.ca commit -m "feat: Connec
 
 ### Task 2.6: Tables, migration 0229 and the idempotency gate
 
-`gha_connection` keeps one row per service: the repository by id, the workflow path, tracked branch, environment, service key, protection and gate modes, state with its reason and since-time, the expected commit, the deployed commit (sha, run id, attempt, digests, time), the handled-run list, the saved source, activity time, and the last error. `gha_release` keeps one row per accepted release (unique on connection, run and attempt). Both live outside the `application` table, which is at the 100-argument limit.
+`gha_connection` keeps one row per service: the repository by id, the workflow path, tracked branch, environment, service key, protection and gate modes, state with its reason and since-time, the expected commit, the deployed commit (sha, run id, attempt, digests, time), the handled-run list, the saved source, activity time, and the last error, and the registry settings: `registryPrefix` (where mirrored images are named, e.g. `localhost:5000/registry.devino.ca`), `registryId` (the Dokploy registry record) and `registryProbeHost` (that record's URL host, e.g. `registry.devino.ca`, where `HEAD /v2/...` goes with the record's login; never the prefix host, because `localhost:5000` inside the Dokploy container is the host's registry only if the host publishes it there). `gha_release` also keeps `sourceBackup`, the service as it was just before the release changed it. `gha_release` keeps one row per accepted release (unique on connection, run and attempt). Both live outside the `application` table, which is at the 100-argument limit.
 
 - [ ] **Step 1: Write the schema file**
 
@@ -4357,8 +4582,21 @@ export const ghaConnection = pgTable(
 			.$type<GhaProtectionMode>()
 			.notNull()
 			.default("environment"),
-		/** Host of this Dokploy's own registry, when releases are mirrored there. */
-		registryHost: text("registryHost"),
+		/**
+		 * Image prefix of the mirror, exactly as it appears in the images of a release:
+		 * host[:port][/path], no trailing slash. The tunnel mirror pushes to
+		 * `localhost:5000/registry.devino.ca/<repo>/<service>`, so its prefix is
+		 * `localhost:5000/registry.devino.ca`. Null: public GHCR images only.
+		 */
+		registryPrefix: text("registryPrefix"),
+		/** The Dokploy registry record (Settings, Registry) whose URL and login the digest check uses. */
+		registryId: text("registryId"),
+		/**
+		 * Host of that record's URL (e.g. registry.devino.ca). The v2 manifest check goes to
+		 * https://<this host> with the record's login, never to the prefix host: `localhost:5000`
+		 * inside the Dokploy container is the registry only if the host publishes it there.
+		 */
+		registryProbeHost: text("registryProbeHost"),
 		gateMode: text("gateMode").$type<GhaGateMode>().notNull().default("image"),
 		gateStartedAt: timestamp("gateStartedAt"),
 		state: text("state")
@@ -4436,6 +4674,12 @@ export const ghaRelease = pgTable(
 			.notNull(),
 		/** Sorted digests, to compare releases without reading the images. */
 		digests: jsonb("digests").$type<string[]>().notNull(),
+		/**
+		 * The service as it was just before this release changed it (an application's source
+		 * settings without the registry password, or a compose stack's id and file text), written in
+		 * the same transaction as the change. The record a rollback or a "take over" reads.
+		 */
+		sourceBackup: jsonb("sourceBackup").$type<Record<string, unknown>>(),
 		/** Kept by retention and never garbage collected. */
 		pinned: boolean("pinned").notNull().default(false),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),
@@ -4476,7 +4720,8 @@ export const ghaReleaseRelations = relations(ghaRelease, ({ one }) => ({
 	}),
 }));
 
-const REGISTRY_HOST = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?$/;
+const REGISTRY_PREFIX =
+	/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 
 export const apiGhaConnectionOne = z.object({
 	serviceType: z.enum(GITHUB_WATCH_SERVICE_TYPES),
@@ -4517,14 +4762,22 @@ export const apiGhaConnect = z.object({
 			"Lowercase letters, digits, dots, dashes and underscores",
 		)
 		.describe("The key in the Deployment task dokploy:<key> and in the release manifest."),
-	registryHost: z
+	registryPrefix: z
 		.string()
 		.trim()
 		.toLowerCase()
-		.regex(REGISTRY_HOST, "Not a valid registry host")
+		.regex(REGISTRY_PREFIX, "Not a valid registry prefix (host[:port][/path], no trailing slash)")
 		.nullable()
 		.default(null)
-		.describe("Host of this Dokploy's own registry when releases are mirrored there."),
+		.describe(
+			"Where the images of a release live when they are mirrored, exactly as written in the release: host[:port][/path] without a trailing slash, e.g. localhost:5000/registry.devino.ca for the tunnel mirror. Needs registryId. Null: public GHCR images only.",
+		),
+	registryId: z
+		.string()
+		.min(1)
+		.nullable()
+		.default(null)
+		.describe("The Dokploy registry (Settings, Registry) whose URL and login are used to check the digests. Required with registryPrefix."),
 	protectionMode: z.enum(GHA_PROTECTION_MODES).default("environment"),
 	gateMode: z.enum(GHA_GATE_MODES).default("image"),
 });
@@ -4585,7 +4838,9 @@ CREATE TABLE IF NOT EXISTS "gha_connection" (
 	"environment" text NOT NULL,
 	"serviceKey" text NOT NULL,
 	"protectionMode" text DEFAULT 'environment' NOT NULL,
-	"registryHost" text,
+	"registryPrefix" text,
+	"registryId" text,
+	"registryProbeHost" text,
 	"gateMode" text DEFAULT 'image' NOT NULL,
 	"gateStartedAt" timestamp,
 	"state" text DEFAULT 'waiting' NOT NULL,
@@ -4617,6 +4872,7 @@ CREATE TABLE IF NOT EXISTS "gha_release" (
 	"githubDeploymentId" bigint,
 	"images" jsonb NOT NULL,
 	"digests" jsonb NOT NULL,
+	"sourceBackup" jsonb,
 	"pinned" boolean DEFAULT false NOT NULL,
 	"createdAt" timestamp DEFAULT now() NOT NULL,
 	"settledAt" timestamp
@@ -4655,9 +4911,9 @@ Append to `apps/dokploy/drizzle/meta/_journal.json` after idx 228:
     }
 ```
 
-- [ ] **Step 3: Add the snapshot**
+- [ ] **Step 3 (optional hygiene): Add the snapshot**
 
-Use the recipe from Task 0 step 5: run `pnpm exec drizzle-kit generate --config ./server/db/drizzle.config.ts --name tmp_snapshot_only` in `apps/dokploy`, move the new snapshot to `meta/0229_snapshot.json`, delete the generated `.sql` file and the generated journal entry, and confirm the new snapshot's `prevId` equals the `id` inside `0228_snapshot.json` and that its `tables` include `public.gha_connection` and `public.gha_release`.
+As in Task 0 step 5, the migrator ignores snapshots and canary has migrations without one, so this is optional: run `pnpm exec drizzle-kit generate --config ./server/db/drizzle.config.ts --name tmp_snapshot_only` in `apps/dokploy`, move the new snapshot to `meta/0229_snapshot.json`, delete the generated `.sql` file and the generated journal entry, and confirm the new snapshot's `prevId` equals the `id` inside `0228_snapshot.json` (if Task 0 added one) and that its `tables` include `public.gha_connection` and `public.gha_release`. Skip it if the generator misbehaves and say so in the PR.
 
 - [ ] **Step 4: Run the gate**
 
@@ -4841,6 +5097,8 @@ export interface ReleaseInput {
 	githubDeploymentId: number | null;
 	images: Array<{ name: string; composeService: string; ref: string }>;
 	digests: string[];
+	/** The service as it was before this release changed it. */
+	sourceBackup?: Record<string, unknown> | null;
 }
 
 /** One history row per (connection, run, attempt); a repeat changes nothing. */
@@ -4977,7 +5235,8 @@ export interface PresentableConnection {
 	environment: string;
 	serviceKey: string;
 	protectionMode: string;
-	registryHost: string | null;
+	registryPrefix: string | null;
+	registryId: string | null;
 	gateMode: string;
 	state: string;
 	stateDetail: string | null;
@@ -5007,7 +5266,8 @@ export const presentGhaConnection = (
 	environment: row.environment,
 	serviceKey: row.serviceKey,
 	protectionMode: row.protectionMode,
-	registryHost: row.registryHost,
+	registryPrefix: row.registryPrefix,
+	registryId: row.registryId,
 	gateMode: row.gateMode,
 	state: row.state,
 	stateSince: row.stateSince,
@@ -5264,7 +5524,7 @@ git -c user.name=AminDhouib -c user.email=amin@devino.ca commit -m "feat: GitHub
 
 ### Task 2.9: The `ghaConnection` router and MCP tools
 
-Procedures: `one` (read), `connect`, `disconnect` and `checkNow`. Each mirrors the permission shape of the `githubDeployment` router: `withPermission("gitProviders", ...)` plus `checkServicePermissionAndAccess` on the service. The saved source and the handled-run list never appear in any output. Cloud is refused for `connect`. `disconnect` puts an application back on its saved source unless asked not to, removes the watch and the connection row, and deletes the watch's GHCR config directories. Wiring: typechecked, then proved by hand (no router test, because the order and messages are tested in Task 2.5 and the permission shape is the one #577's router test covers).
+Procedures: `one` (read), `connect`, `disconnect` and `checkNow`. Each mirrors the permission shape of the `githubDeployment` router: `withPermission("gitProviders", ...)` plus `checkServicePermissionAndAccess` on the service. The saved source and the handled-run list never appear in any output. `connect` takes `registryPrefix` and `registryId` for mirrored images (both or neither; the registry must belong to the caller's organization) and writes the registry's URL host as `registryProbeHost`. Cloud is refused for `connect`. `disconnect` puts an application back on its saved source unless asked not to, removes the watch and the connection row, and deletes the watch's GHCR config directories. Wiring: typechecked, then proved by hand (no router test, because the order and messages are tested in Task 2.5 and the permission shape is the one #577's router test covers).
 
 - [ ] **Step 1: Write the router**
 
@@ -5283,7 +5543,7 @@ import {
 	upsertGithubWatch,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
-import { applications } from "@dokploy/server/db/schema";
+import { applications, registry } from "@dokploy/server/db/schema";
 import {
 	applyConnectionEvent,
 	type ConnectPlan,
@@ -5304,7 +5564,7 @@ import {
 } from "@dokploy/server/services/gha-connect";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
@@ -5382,6 +5642,7 @@ const persistConnection = async (
 	organizationId: string,
 	plan: ConnectPlan,
 	input: ConnectServiceInput,
+	mirror: { registryProbeHost: string | null },
 ) => {
 	// The watch is #577's: it carries the cursor, the ETag and the in-flight
 	// mark. It starts with no cursor, so the first poll baselines and the
@@ -5417,7 +5678,9 @@ const persistConnection = async (
 					environment: input.environment,
 					serviceKey: input.serviceKey,
 					protectionMode: input.protectionMode,
-					registryHost: input.registryHost,
+					registryPrefix: input.registryPrefix,
+					registryId: input.registryId,
+					registryProbeHost: mirror.registryProbeHost,
 					gateMode: input.gateMode,
 					state: "waiting",
 					expectedSha: plan.expectedSha,
@@ -5484,7 +5747,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 				method: "POST",
 				path: "/ghaConnection.connect",
 				description:
-					"Make an application or compose stack follow the GitHub Actions releases of a repository. Dokploy never receives a call from GitHub: it polls GitHub for GitHub Deployments whose task is dokploy:<serviceKey>, reads the run artifact dokploy-release, checks it against the run, the registry and the environment's deployment branch policy, and deploys the image digest. Needs the service's create access, a GitHub connection (githubDeployment-connections) authorized with repo_deployment plus public_repo (public repositories) or repo (private ones), and a GitHub environment whose deployment branches allow only the tracked branch. An application built from git keeps its settings and has git autodeploy turned off now; it moves to the image at the first release. The workflow file is not created: copy the one the dashboard shows. Refuses a service that already follows GitHub Deployments.",
+					"Make an application or compose stack follow the GitHub Actions releases of a repository. Dokploy never receives a call from GitHub: it polls GitHub for GitHub Deployments whose task is dokploy:<serviceKey>, reads the run artifact dokploy-release, checks it against the run, the registry and the environment's deployment branch policy, and deploys the image digest. Needs the service's create access, a GitHub connection (githubDeployment-connections) authorized with repo_deployment plus public_repo (public repositories) or repo (private ones), and a GitHub environment whose deployment branches allow only the tracked branch. An application built from git keeps its settings and has git autodeploy turned off now; it moves to the image at the first release (a public GHCR image only). For images mirrored to a private registry give registryPrefix (host[:port][/path] exactly as in the release, for example localhost:5000/registry.devino.ca) and registryId, the Dokploy registry whose URL and login check the digests; a compose stack stored in Dokploy (raw) is the supported shape. The workflow file is not created: copy the one the dashboard shows. Refuses a service that already follows GitHub Deployments.",
 			},
 		})
 		.input(apiGhaConnect)
@@ -5512,8 +5775,18 @@ export const ghaConnectionRouter = createTRPCRouter({
 					plainWatch: (await findGithubWatch(type, id)) !== null,
 				}),
 				reads: githubReads,
-				persist: (plan, request) =>
-					persistConnection(organizationId, plan, request),
+				// The Dokploy registry (Settings, Registry) whose URL and login check the digests.
+				registry: async (id) => {
+					const [row] = await db
+						.select({ registryUrl: registry.registryUrl })
+						.from(registry)
+						.where(
+							and(eq(registry.registryId, id), eq(registry.organizationId, organizationId)),
+						);
+					return row ?? null;
+				},
+				persist: (plan, request, mirror) =>
+					persistConnection(organizationId, plan, request, mirror),
 				isUniqueViolation,
 			});
 			if (!result.ok) {
@@ -5655,7 +5928,7 @@ One review of the PR head (opus5-worker at high effort). Check: the migration is
 
 - [ ] **Step 8: Manual proof for the lead**
 
-On a test instance with this build: disconnect and reconnect GitHub through Settings, Git, choosing a public repository; in the MCP or the API call `ghaConnection.connect` for the voicekit web `dev` service with the repository, tracked branch and environment `dev`. Expected: the call succeeds, `ghaConnection.one` returns state `waiting` with the sentence "Waiting for GitHub Actions to publish <sha>. Git autodeploy is off.", the application's git autodeploy is off, and a connect with a wider environment policy is refused with the environment message. Then `ghaConnection.disconnect` and confirm the application is back on its git source with autodeploy as it was.
+On a test instance with this build: disconnect and reconnect GitHub through Settings, Git, with repository access set to private (voicekit is a private repository, so the connection needs the `repo` scope; a connection with only `public_repo` must be refused with "This repository is private, and the GitHub connection lacks the repo scope"). In the MCP or the API call `ghaConnection.connect` for the voicekit web service on the `development` environment with: repository `DevinoSolutions/voicelabs`, tracked branch `dev`, environment `development`, workflow file `.github/workflows/dokploy-web-build-deploy.yml`, service key `voicekit-web`, `registryPrefix` `localhost:5000/registry.devino.ca` and `registryId` of the Dokploy registry record for `registry.devino.ca`. Expected: the call succeeds, `ghaConnection.one` returns state `waiting` with the sentence "Waiting for GitHub Actions to publish <sha>.", `registryProbeHost` is `registry.devino.ca`, and a connect against an environment whose policy is wider than the tracked branch is refused with the environment message. A raw compose has no git source, so nothing about the service changes; `ghaConnection.disconnect` removes the connection and leaves the compose as it is. (The git-to-image flip is proved on an application built from git, which is not voicekit; use a scratch application for that.)
 
 ## PR 3: The acceptance engine
 
@@ -5665,10 +5938,10 @@ This is the whole of the spec's "Trust model": given a run id and attempt and wh
 
 The order of the checks inside `acceptRelease` is part of the security design. A run, its artifact and the manifest are verified before anything that could block a connection, so a stranger who can only create a GitHub Deployment cannot put a service in the Blocked state: an unverified claim is `ignored`.
 
-1. Run attempt: `path` equals the connection's workflow path, `head_branch` equals the tracked branch, `event` is `push` or `workflow_dispatch` (never `pull_request`, never `workflow_run`), repository and head repository ids equal the connection's repository id. A run still going is `pending`; a completed run that is not a success is `refused` (`run-failed`).
+1. Run attempt: `path` equals the connection's workflow path, `head_branch` equals the tracked branch, `event` is `push` or `workflow_dispatch` (never `pull_request`, never `workflow_run`), repository and head repository ids equal the connection's repository id. A run still going is `pending`; a completed run that is not a success is `refused` (`run-failed`). Artifacts belong to a run, not to an attempt, and the action uploads with `overwrite: true`, so the artifact always holds the newest attempt's manifest. A Deployment whose attempt is lower than the manifest's attempt is `superseded`: ignored, remembered as handled and never a block (the newer attempt has its own Deployment).
 2. Artifact: named `dokploy-release`, not expired, bound to the run and to the repository id. Download is size-limited and read with the dependency-free zip reader (no zip64, no encryption, bounded output, crc32 checked).
 3. Manifest: `parseReleaseManifest` (schema major 1, no tags next to digests, `migrations` must be null) and the manifest `sha` equals the run's `head_sha`; the service key is one the manifest names.
-4. Registry: each digest sits in an allowed namespace, equals the repository the service runs after the first release, and answers `HEAD /v2/<name>/manifests/<digest>` with the same `Docker-Content-Digest`.
+4. Registry: each digest sits in an allowed namespace (`ghcr.io/<owner>/<repo>/` or `<registryPrefix>/<repo>/`), equals the repository the service runs after the first release, and answers `HEAD /v2/<name>/manifests/<digest>` with the same `Docker-Content-Digest`, asked of `ghcr.io` anonymously or of the connection's `registryProbeHost` with its saved login.
 5. Environment branch policy re-read now: only the tracked branch. A read error, a missing environment or a wider policy refuses and blocks (skipped only in repository-secret mode).
 6. Ordering against the deployed release and the branch head.
 
@@ -5775,6 +6048,11 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
+	allowedNamespaces,
+	checkImageRepository,
+	canonicalRepository,
+} from "@dokploy/server/services/gha-connect/namespace";
+import {
 	MANIFEST_MAX_BYTES,
 	parseReleaseManifest,
 } from "@dokploy/server/services/gha-connect/manifest";
@@ -5837,6 +6115,26 @@ describe("parseReleaseManifest", () => {
 			repository: "registry.example.com/acme/shop/web",
 			digest: `sha256:${"e".repeat(64)}`,
 		});
+	});
+
+	it("reads the tunnel mirror's real image names and keeps them inside the connection's namespace", () => {
+		const result = parseReleaseManifest(read("valid/tunnel-mirror.json"));
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		const image = result.manifest.services[0]?.images[0];
+		expect(image?.repository).toBe("localhost:5000/registry.devino.ca/voicekit/web");
+		const registryPrefix = "localhost:5000/registry.devino.ca";
+		const namespaces = allowedNamespaces({ owner: "DevinoSolutions", repo: "voicekit", registryPrefix });
+		expect(namespaces).toEqual([
+			"ghcr.io/devinosolutions/voicekit/",
+			"localhost:5000/registry.devino.ca/voicekit/",
+		]);
+		expect(
+			checkImageRepository({ repository: image?.repository ?? "", namespaces, currentRepositories: [] }),
+		).toEqual({ ok: true });
+		expect(
+			canonicalRepository({ repository: image?.repository ?? "", owner: "DevinoSolutions", registryPrefix }),
+		).toBe("ghcr.io/devinosolutions/voicekit/web");
 	});
 
 	it("accepts a manifest object as well as its text", () => {
@@ -6543,7 +6841,7 @@ git -c user.name=AminDhouib -c user.email=amin@devino.ca commit -m "feat: wake-u
 
 ### Task 3.4: The registry probe
 
-One `HEAD /v2/<name>/manifests/<digest>` per image, with the manifest media types a registry needs. On a 401 with a bearer challenge it fetches a token from the realm (refusing a plain-http realm that is not local) and repeats once. Registry credentials come from the organization's own registry logins through `loadAccess`; GHCR images are read anonymously, which is why phase 1 is limited to public GHCR images.
+One `HEAD /v2/<name>/manifests/<digest>` per image, with the manifest media types a registry needs. On a 401 with a bearer challenge it fetches a token from the realm (refusing a plain-http realm that is not local) and repeats once. Registry credentials come from the organization's own registry logins through `loadAccess`; GHCR images are read anonymously, which is why phase 1 is limited to public GHCR images. For a mirrored image the digest is checked at the connection's `registryProbeHost` (the host of the chosen Dokploy registry record, for example `registry.devino.ca`) with that record's login, not at the host written in the image name: `localhost:5000` is only where the runner pushed through the tunnel and where the deploy host pulls from. `acceptRelease` chooses the host; the probe stays a plain function of host and name.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -6916,7 +7214,8 @@ const facts = (overrides: Partial<ConnectionFacts> = {}): ConnectionFacts => ({
 	owner: "DevinoSolutions",
 	repo: "voicekit",
 	protectionMode: "environment",
-	registryHost: "registry.devino.ca",
+	registryPrefix: "registry.devino.ca",
+	registryProbeHost: null,
 	deployed: null,
 	currentRepositories: ["registry.devino.ca/voicekit/web"],
 	...overrides,
@@ -6966,6 +7265,7 @@ const world = () => {
 		compare: new Map<string, CompareStatus>(),
 		probe: { kind: "ok", digest: DIGEST } as ProbeResult,
 		calls: [] as string[],
+		probeCalls: [] as Array<{ host: string; name: string; digest: string }>,
 	};
 	const api: ActionsApi = {
 		branchHead: async () => ok({ sha: state.head }),
@@ -6980,7 +7280,10 @@ const world = () => {
 		environmentPolicy: async () => state.policyResult ?? ok(state.policy),
 	};
 	const probe: RegistryProbe = {
-		headDigest: async () => state.probe,
+		headDigest: async (input) => {
+			state.probeCalls.push(input);
+			return state.probe;
+		},
 	};
 	return { state, api, probe };
 };
@@ -7146,7 +7449,6 @@ describe("rule 3: the manifest", () => {
 	it.each([
 		["a sha other than the run's head", manifest({ sha: "d".repeat(40) })],
 		["another run id", manifest({ source: { forge: "github", ref: "refs/heads/dev", runId: "5", runAttempt: 1 } })],
-		["another attempt", manifest({ source: { forge: "github", ref: "refs/heads/dev", runId: String(RUN_ID), runAttempt: 2 } })],
 		["another branch", manifest({ source: { forge: "github", ref: "refs/heads/main", runId: String(RUN_ID), runAttempt: 1 } })],
 		["another environment", manifest({ environment: "production" })],
 	])("blocks on %s", async (_name, m) => {
@@ -7310,6 +7612,81 @@ describe("transient failures never decide", () => {
 		expect(await run(w)).toMatchObject({ kind: "retry" });
 	});
 });
+
+describe("the tunnel mirror (localhost:5000/registry.devino.ca)", () => {
+	const MIRROR = "localhost:5000/registry.devino.ca/voicekit/web";
+	const mirrored = (attempt = 1) =>
+		manifest({
+			source: { forge: "github", ref: "refs/heads/dev", runId: String(RUN_ID), runAttempt: attempt },
+			services: [
+				{
+					key: "web",
+					images: [{ name: "web", composeService: "web", ref: `${MIRROR}@${DIGEST}` }],
+				},
+			],
+		});
+	const mirrorFacts = (over: Partial<ConnectionFacts> = {}) =>
+		facts({
+			registryPrefix: "localhost:5000/registry.devino.ca",
+			registryProbeHost: "registry.devino.ca",
+			currentRepositories: [],
+			...over,
+		});
+
+	it("accepts the wrapper's real image name, checks the digest at the registry record and maps it to GHCR", async () => {
+		const w = world();
+		w.state.zip = zipOf(mirrored());
+		const result = await run(w, mirrorFacts());
+		expect(result.kind).toBe("accepted");
+		if (result.kind !== "accepted") return;
+		expect(w.state.probeCalls).toEqual([
+			{ host: "registry.devino.ca", name: "registry.devino.ca/voicekit/web", digest: DIGEST },
+		]);
+		expect(result.release.canonical).toEqual({ [MIRROR]: "ghcr.io/devinosolutions/voicekit/web" });
+	});
+
+	it("refuses the same image when the connection names no mirror prefix", async () => {
+		const w = world();
+		w.state.zip = zipOf(mirrored());
+		expectRefused(await run(w, facts({ registryPrefix: null, currentRepositories: [] })), "image-namespace", true);
+	});
+
+	it("refuses a mirrored image of another repository", async () => {
+		const w = world();
+		w.state.zip = zipOf(
+			manifest({
+				services: [
+					{
+						key: "web",
+						images: [
+							{ name: "web", composeService: "web", ref: `localhost:5000/registry.devino.ca/other/web@${DIGEST}` },
+						],
+					},
+				],
+			}),
+		);
+		expectRefused(await run(w, mirrorFacts()), "image-namespace", true);
+	});
+});
+
+describe("a re-run replaces the artifact", () => {
+	it("answers a Deployment of an older attempt as superseded and never blocks", async () => {
+		const w = world();
+		w.state.run = { ...w.state.run, attempt: 1 };
+		w.state.zip = zipOf(
+			manifest({ source: { forge: "github", ref: "refs/heads/dev", runId: String(RUN_ID), runAttempt: 2 } }),
+		);
+		const result = await run(w, facts(), 1);
+		expect(result).toMatchObject({ kind: "superseded" });
+	});
+
+	it("still refuses a manifest that claims a lower attempt than the Deployment (a binding error)", async () => {
+		const w = world();
+		w.state.run = { ...w.state.run, attempt: 2 };
+		const result = await run(w, facts(), 2);
+		expectRefused(result, "manifest-binding", true);
+	});
+});
 ```
 
 - [ ] **Step 2: Run it and see it fail**
@@ -7331,6 +7708,7 @@ import {
 } from "./manifest";
 import {
 	allowedNamespaces,
+	canonicalRepository,
 	checkImageRepository,
 	splitRepository,
 } from "./namespace";
@@ -7368,7 +7746,10 @@ export interface ConnectionFacts {
 	owner: string;
 	repo: string;
 	protectionMode: "environment" | "repository-secret";
-	registryHost: string | null;
+	/** Where mirrored images live as written in a release (host[:port][/path]); null = public GHCR only. */
+	registryPrefix: string | null;
+	/** Host of the Dokploy registry record that answers for the prefix; the digest check goes there. */
+	registryProbeHost: string | null;
 	deployed: DeployedStamp | null;
 	/** Repositories the service runs now (empty before its first image). */
 	currentRepositories: string[];
@@ -7388,6 +7769,10 @@ export interface AcceptedRelease {
 	images: ManifestImage[];
 	composePath: string | null;
 	releaseServices: string[];
+	/** Mirrored repository to the GHCR repository it was copied from (only mirrored images appear). */
+	canonical: Record<string, string>;
+	/** When the run finished (epoch ms), for the multi-service completion timeout; null if unknown. */
+	runEndedAt: number | null;
 }
 
 export type RefusalCode =
@@ -7451,6 +7836,8 @@ export type AcceptanceResult =
 			/** Fixing GitHub (not re-running) can clear it: the caller asks again later and does not record the run as handled. */
 			recheck: boolean;
 	  }
+	/** A newer attempt of this run replaced the artifact: this Deployment is answered as inactive and never blocks. */
+	| { kind: "superseded"; reason: string }
 	/** Accepted, and it changes nothing (same digests as deployed). */
 	| { kind: "noop"; release: AcceptedRelease }
 	| { kind: "accepted"; release: AcceptedRelease };
@@ -7572,6 +7959,17 @@ export const acceptRelease = async (
 		);
 	}
 	const manifest = parsed.manifest;
+	// The artifact is per run, not per attempt, and a re-run replaces it. A Deployment of an
+	// older attempt is not wrong, only old: answer it as inactive, never block the service.
+	if (
+		manifest.source.runId === String(runId) &&
+		manifest.source.runAttempt > runAttempt
+	) {
+		return {
+			kind: "superseded",
+			reason: `Attempt ${manifest.source.runAttempt} of this run replaced attempt ${runAttempt}`,
+		};
+	}
 	if (
 		manifest.sha !== run.headSha ||
 		manifest.source.runId !== String(runId) ||
@@ -7596,7 +7994,7 @@ export const acceptRelease = async (
 	const namespaces = allowedNamespaces({
 		owner: c.owner,
 		repo: c.repo,
-		registryHost: c.registryHost,
+		registryPrefix: c.registryPrefix,
 	});
 	for (const image of service.images) {
 		const checked = checkImageRepository({
@@ -7612,7 +8010,16 @@ export const acceptRelease = async (
 			return refuse("image-namespace", `${image.repository} has no registry host`);
 		}
 		const head = await probe.headDigest({
-			host: parts.host,
+			// A mirrored image is checked at the Dokploy registry record, under the name it has there.
+			host:
+				c.registryProbeHost &&
+				canonicalRepository({
+					repository: image.repository,
+					owner: c.owner,
+					registryPrefix: c.registryPrefix,
+				})
+					? c.registryProbeHost
+					: parts.host,
 			name: parts.name,
 			digest: image.digest,
 		});
@@ -7709,6 +8116,17 @@ export const acceptRelease = async (
 		images: service.images,
 		composePath: service.composePath,
 		releaseServices: manifest.releaseServices,
+		canonical: Object.fromEntries(
+			service.images.flatMap((image) => {
+				const canonical = canonicalRepository({
+					repository: image.repository,
+					owner: c.owner,
+					registryPrefix: c.registryPrefix,
+				});
+				return canonical ? [[image.repository, canonical]] : [];
+			}),
+		),
+		runEndedAt: run.updatedAt ? Date.parse(run.updatedAt) || null : null,
 	};
 	return order.noop ? { kind: "noop", release } : { kind: "accepted", release };
 };
@@ -8743,9 +9161,141 @@ git -c user.name=AminDhouib -c user.email=amin@devino.ca commit -m "feat: stale 
 
 ### Task 4.3: The connection poll
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the completeness check and its test (pure)**
 
-It drives `pollConnectionWatch` with a scripted GitHub and a fake `accept`, and checks, among other things: Deployments of other tasks are ignored and never answered; a spammed run costs one verification; at most 5 verifications per tick and the rest held; a refusal that blocks reaches the state machine only after acceptance said the run was verified; a rate limit blocks the connection key; a verified push release is answered `success` and recorded without a start; an accepted pull release is handed to `startDeploy` with the release context; a failed start is retried next tick; and older accepted releases are superseded.
+A release can name several services (`release.services`), and the action creates one GitHub Deployment per service. A service must not deploy while the rest of its release has not been announced, or a workflow that died between two Deployments would leave a repository half released. `checkReleaseComplete` counts the other services' Deployments of the same run and attempt in the tick's listing; missing ones hold the service, and once the run has been over for 15 minutes the release is incomplete and the service is Blocked with the names of what is missing.
+
+**`apps/dokploy/__test__/gha-connect/completeness.test.ts`**
+
+```ts
+import {
+	checkReleaseComplete,
+	RELEASE_COMPLETE_TIMEOUT_MS,
+} from "@dokploy/server/services/gha-connect/completeness";
+import { describe, expect, it } from "vitest";
+
+const deployment = (key: string, runId = 9, runAttempt = 1) => ({
+	task: `dokploy:${key}`,
+	payload: { schema: "dokploy.deployment/v1", run_id: runId, run_attempt: runAttempt, artifact: "dokploy-release" },
+});
+
+const base = {
+	ownKey: "voicekit-web",
+	releaseServices: ["voicekit-web", "voicekit-engine"],
+	runId: 9,
+	runAttempt: 1,
+	now: 1_000_000,
+	runEndedAt: 1_000_000 - 60_000,
+};
+
+describe("checkReleaseComplete", () => {
+	it("is complete for a release of one service", () => {
+		expect(
+			checkReleaseComplete({ ...base, releaseServices: ["voicekit-web"], deployments: [] }),
+		).toEqual({ complete: true });
+	});
+
+	it("is complete when every other service has a Deployment of the same run and attempt", () => {
+		expect(
+			checkReleaseComplete({ ...base, deployments: [deployment("voicekit-engine")] }),
+		).toEqual({ complete: true });
+	});
+
+	it("waits for a missing service and names it", () => {
+		expect(checkReleaseComplete({ ...base, deployments: [] })).toEqual({
+			complete: false,
+			missing: ["voicekit-engine"],
+			timedOut: false,
+		});
+	});
+
+	it("does not count a Deployment of another run, another attempt or another task", () => {
+		const result = checkReleaseComplete({
+			...base,
+			deployments: [
+				deployment("voicekit-engine", 8, 1),
+				deployment("voicekit-engine", 9, 2),
+				{ task: "deploy", payload: null },
+			],
+		});
+		expect(result).toMatchObject({ complete: false, missing: ["voicekit-engine"] });
+	});
+
+	it("times out only after the run has been over for 15 minutes", () => {
+		const within = checkReleaseComplete({ ...base, deployments: [], runEndedAt: base.now - RELEASE_COMPLETE_TIMEOUT_MS });
+		expect(within).toMatchObject({ timedOut: false });
+		const past = checkReleaseComplete({ ...base, deployments: [], runEndedAt: base.now - RELEASE_COMPLETE_TIMEOUT_MS - 1 });
+		expect(past).toMatchObject({ complete: false, timedOut: true });
+	});
+
+	it("never times out when GitHub did not say when the run ended", () => {
+		expect(checkReleaseComplete({ ...base, deployments: [], runEndedAt: null })).toMatchObject({
+			timedOut: false,
+		});
+	});
+});
+```
+
+**`packages/server/src/services/gha-connect/completeness.ts`**
+
+```ts
+import { parseDeploymentTask, parseWakePayload } from "./wake-payload";
+
+/**
+ * A release can name several services (release.services in the manifest), each
+ * with its own GitHub Deployment. A service waits until every other service of
+ * the release has its Deployment for the same run attempt, so one repository
+ * never ends up half-released by a workflow that died between two Deployments.
+ * After the timeout the release is incomplete and the service is Blocked.
+ * Pure.
+ */
+
+export const RELEASE_COMPLETE_TIMEOUT_MS = 15 * 60 * 1000;
+
+export type Completeness =
+	| { complete: true }
+	| { complete: false; missing: string[]; timedOut: boolean };
+
+export const checkReleaseComplete = (input: {
+	ownKey: string;
+	releaseServices: readonly string[];
+	runId: number;
+	runAttempt: number;
+	/** The Deployments of the repository as listed this tick. */
+	deployments: ReadonlyArray<{ task?: string | null; payload?: unknown }>;
+	now: number;
+	/** When the run finished (epoch ms); null when GitHub did not say. */
+	runEndedAt: number | null;
+	timeoutMs?: number;
+}): Completeness => {
+	const seen = new Set<string>();
+	for (const deployment of input.deployments) {
+		const key = parseDeploymentTask(deployment.task);
+		if (key === null) continue;
+		const wake = parseWakePayload(deployment.payload);
+		if (wake.ok && wake.runId === input.runId && wake.runAttempt === input.runAttempt) {
+			seen.add(key);
+		}
+	}
+	const missing = input.releaseServices.filter(
+		(key) => key !== input.ownKey && !seen.has(key),
+	);
+	if (missing.length === 0) return { complete: true };
+	const timeout = input.timeoutMs ?? RELEASE_COMPLETE_TIMEOUT_MS;
+	return {
+		complete: false,
+		missing,
+		timedOut: input.runEndedAt !== null && input.now - input.runEndedAt > timeout,
+	};
+};
+```
+
+Run: `cd apps/dokploy && pnpm exec vitest run --config __test__/vitest.config.ts __test__/gha-connect/completeness.test.ts`
+Expected: PASS (6 tests).
+
+- [ ] **Step 2: Write the failing test**
+
+It drives `pollConnectionWatch` with a scripted GitHub and a fake `accept`, and checks, among other things: Deployments of other tasks are ignored and never answered; a spammed run costs one verification; at most 5 verifications per tick and the rest held; a refusal that blocks reaches the state machine only after acceptance said the run was verified; a rate limit blocks the connection key; a verified push release is answered `success` and recorded without a start; an accepted pull release is handed to `startDeploy` with the release context; a failed start is retried next tick; and older accepted releases are superseded. A Deployment of a lower attempt than the artifact's manifest is superseded, never blocked. The verification budget is per repository, not per connection: with `takeVerification` three connections of one repository together verify at most 5 runs per tick. A release that names another service waits ("Waiting for the other services of this release") until that service's Deployment of the same run and attempt exists, and after 15 minutes it blocks the connection with `release-incomplete`. The first release of a connection (nothing deployed yet) waits for `preFlipBackup`, and a failed backup holds it with the reason.
 
 **`apps/dokploy/__test__/gha-connect/poll.test.ts`**
 
@@ -8808,7 +9358,8 @@ const facts: ConnectionFacts = {
 	owner: "DevinoSolutions",
 	repo: "voicekit",
 	protectionMode: "environment",
-	registryHost: "registry.devino.ca",
+	registryPrefix: "registry.devino.ca",
+	registryProbeHost: null,
 	deployed: null,
 	currentRepositories: ["registry.devino.ca/voicekit/web"],
 };
@@ -8844,6 +9395,8 @@ const release = (runId: number, delivery: "pull" | "push" = "pull"): AcceptedRel
 	],
 	composePath: null,
 	releaseServices: ["web"],
+	canonical: {},
+	runEndedAt: null,
 });
 
 const harness = (
@@ -9179,13 +9732,109 @@ describe("mergeProcessed", () => {
 		expect(merged.at(-1)?.runId).toBe(PROCESSED_CAP - 2);
 	});
 });
+
+describe("pollConnectionWatch: attempts, repository budget, completeness and backup", () => {
+	it("answers a superseded attempt as inactive-style superseded, never blocks, and keeps going", async () => {
+		const h = harness([wake(12, 101), wake(11, 100)], {
+			101: { kind: "accepted", release: release(101) },
+			100: { kind: "superseded", reason: "Attempt 2 of this run replaced attempt 1" },
+		});
+		await pollConnectionWatch(watch(), h.deps);
+		// 101 is newer and accepted; 100 is older than a deployed release, so it is superseded without being verified.
+		expect(h.accepted).toEqual([101]);
+		expect(h.events).not.toContain("release-refused");
+	});
+
+	it("records a superseded attempt as handled", async () => {
+		const h = harness([wake(11, 100)], {
+			100: { kind: "superseded", reason: "Attempt 2 replaced attempt 1" },
+		});
+		await pollConnectionWatch(watch(), h.deps);
+		expect(h.recorded.flat()).toMatchObject([{ runId: 100, outcome: "superseded" }]);
+		expect(h.started).toEqual([]);
+		expect(h.events).toEqual([]);
+	});
+
+	it("stops verifying when the REPOSITORY's budget is used up, even for a connection that verified nothing yet", async () => {
+		const h = harness([wake(12, 101), wake(11, 100)], {
+			101: { kind: "refused", code: "run-failed", message: "x", block: false, recheck: false },
+		});
+		const left = [true, false];
+		h.deps.takeVerification = (repoId) => {
+			expect(repoId).toBe(42);
+			return left.shift() ?? false;
+		};
+		await pollConnectionWatch(watch(), h.deps);
+		expect(h.accepted).toEqual([101]);
+	});
+
+	it("holds a multi-service release until every service has its Deployment", async () => {
+		const multi = { ...release(100), releaseServices: ["web", "engine"] };
+		const waiting = harness([wake(11, 100)], { 100: { kind: "accepted", release: multi } });
+		await pollConnectionWatch(watch(), waiting.deps);
+		expect(waiting.started).toEqual([]);
+
+		const complete = harness([wake(12, 100, 1, "dokploy:engine"), wake(11, 100)], {
+			100: { kind: "accepted", release: multi },
+		});
+		await pollConnectionWatch(watch(), complete.deps);
+		expect(complete.started).toHaveLength(1);
+	});
+
+	it("blocks a multi-service release that is still incomplete 15 minutes after the run ended", async () => {
+		const multi = {
+			...release(100),
+			releaseServices: ["web", "engine"],
+			runEndedAt: NOW - 16 * 60 * 1000,
+		};
+		const h = harness([wake(11, 100)], { 100: { kind: "accepted", release: multi } });
+		await pollConnectionWatch(watch(), h.deps);
+		expect(h.started).toEqual([]);
+		expect(h.events).toContain("release-refused");
+		expect(h.statuses()).toMatchObject([{ deployment: 11, state: "failure" }]);
+		expect(h.recorded.flat()).toMatchObject([{ runId: 100, outcome: "release-incomplete" }]);
+	});
+
+	it("holds the first release until the pre-flip backup is done, then starts it", async () => {
+		const results = { 100: { kind: "accepted", release: release(100) } } as const;
+		const held = harness([wake(11, 100)], results);
+		held.deps.preFlipBackup = async () => ({ ok: false, note: "Waiting for the volume backup to finish." });
+		await pollConnectionWatch(watch(), held.deps);
+		expect(held.started).toEqual([]);
+		expect(held.recorded.flat()).toEqual([]);
+
+		resetPollState();
+		const ready = harness([wake(11, 100)], results);
+		ready.deps.preFlipBackup = async () => ({ ok: true, note: "" });
+		await pollConnectionWatch(watch(), ready.deps);
+		expect(ready.started).toHaveLength(1);
+	});
+
+	it("does not ask for a backup once something is deployed", async () => {
+		const h = harness([wake(11, 100)], { 100: { kind: "accepted", release: release(100) } });
+		let asked = 0;
+		h.deps.loadConnection = async () => ({
+			connectionId: "c1",
+			organizationId: "org1",
+			processed: [],
+			facts: { ...facts, deployed: { sha: "b".repeat(40), runId: 5, attempt: 1, digests: [DIGEST] } },
+		});
+		h.deps.preFlipBackup = async () => {
+			asked += 1;
+			return { ok: false, note: "no" };
+		};
+		await pollConnectionWatch(watch(), h.deps);
+		expect(asked).toBe(0);
+		expect(h.started).toHaveLength(1);
+	});
+});
 ```
 
-- [ ] **Step 2: Run it and see it fail**
+- [ ] **Step 3: Run it and see it fail**
 
 Expected: FAIL, `poll` does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 4: Write the implementation**
 
 **`packages/server/src/services/gha-connect/poll.ts`**
 
@@ -9212,6 +9861,7 @@ import {
 	type ConnectionFacts,
 } from "./acceptance";
 import type { ActionsApi } from "./actions-api";
+import { checkReleaseComplete } from "./completeness";
 import { type ProcessedEntry, wasProcessed } from "./processed";
 import type { RegistryProbe } from "./registry-probe";
 import type { ConnectionEvent } from "./state-machine";
@@ -9245,6 +9895,20 @@ export interface ConnectionPollDeps extends PollDeps {
 	createApi: (token: string, record: ConnectionRecord) => ActionsApi;
 	/** The registry reader of an organization (it uses that organization's registry logins). */
 	createProbe: (organizationId: string) => RegistryProbe;
+	/**
+	 * Called for every run Dokploy is about to verify; false means this repository has used its
+	 * verifications for the tick. The budget belongs to the REPOSITORY, not the connection: several
+	 * services can follow one repository. Absent: MAX_VERIFICATIONS_PER_TICK per connection.
+	 */
+	takeVerification?: (repoId: number) => boolean;
+	/**
+	 * Before the first release of a connection changes the service: a fresh backup of what the
+	 * change could harm. ok false holds the release (it is tried again next tick) and the note is shown.
+	 */
+	preFlipBackup?: (
+		watch: WatchRow,
+		record: ConnectionRecord,
+	) => Promise<{ ok: boolean; note: string }>;
 	/** Test seam; production uses acceptRelease. */
 	accept?: typeof acceptRelease;
 	recordProcessed: (
@@ -9399,7 +10063,10 @@ const pollConnectionInner = async (
 			classified.set(candidate.deployment.id, { kind: "hold", reason: held });
 			continue;
 		}
-		if (verified >= MAX_VERIFICATIONS_PER_TICK) {
+		const mayVerify = deps.takeVerification
+			? deps.takeVerification(record.facts.repoId)
+			: verified < MAX_VERIFICATIONS_PER_TICK;
+		if (!mayVerify) {
 			held = "More runs are waiting to be checked; the rest are checked on the next tick.";
 			classified.set(candidate.deployment.id, { kind: "hold", reason: held });
 			continue;
@@ -9431,6 +10098,12 @@ const pollConnectionInner = async (
 					deps.block(watchKey(watch.watchId), now + 3 * 20_000);
 				}
 				classified.set(id, { kind: "hold", reason: held });
+				break;
+			}
+			case "superseded": {
+				// A re-run replaced the artifact: this Deployment is old, not wrong.
+				handled.push(stamp(candidate, "superseded"));
+				classified.set(id, { kind: "superseded" });
 				break;
 			}
 			case "ignored": {
@@ -9517,6 +10190,48 @@ const pollConnectionInner = async (
 					settled = true;
 					break;
 				}
+				// A release of several services waits for every Deployment of the run.
+				const completeness = checkReleaseComplete({
+					ownKey: record.facts.serviceKey,
+					releaseServices: result.release.releaseServices,
+					runId: result.release.runId,
+					runAttempt: result.release.runAttempt,
+					deployments: tick.listed.deployments,
+					now,
+					runEndedAt: result.release.runEndedAt,
+				});
+				if (!completeness.complete) {
+					const names = completeness.missing.join(", ");
+					if (!completeness.timedOut) {
+						held = `Waiting for the other services of this release: ${names}.`;
+						classified.set(id, { kind: "hold", reason: held });
+						break;
+					}
+					const message = `The release is incomplete: no Deployment for ${names} after 15 minutes.`;
+					await deps.applyEvent(record.connectionId, {
+						type: "release-refused",
+						message,
+						block: true,
+					});
+					const answered = await postStatus(deps, watch, token, id, "failure", STATUS_TEXT.refused);
+					if (!answered.settled) {
+						held = "The status could not be posted yet.";
+						classified.set(id, { kind: "hold", reason: held });
+						break;
+					}
+					handled.push(stamp(candidate, "release-incomplete"));
+					classified.set(id, { kind: "ignore", reason: message });
+					break;
+				}
+				// The first release changes the service: back it up first.
+				if (record.facts.deployed === null && deps.preFlipBackup) {
+					const backup = await deps.preFlipBackup(watch, record);
+					if (!backup.ok) {
+						held = backup.note;
+						classified.set(id, { kind: "hold", reason: held });
+						break;
+					}
+				}
 				targetId = id;
 				classified.set(id, toDeployPayload(record, result.release));
 				settled = true;
@@ -9533,11 +10248,11 @@ const pollConnectionInner = async (
 };
 ```
 
-- [ ] **Step 4: Run the test**
+- [ ] **Step 5: Run the test**
 
-Expected: PASS (21 tests).
+Expected: PASS (28 tests).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 pnpm exec biome check --write packages/server/src/services/gha-connect apps/dokploy/__test__/gha-connect
@@ -9932,6 +10647,7 @@ export const runUpkeep = async (
 Append to `packages/server/src/services/gha-connect/index.ts`:
 
 ```ts
+export * from "./completeness";
 export * from "./environment-url";
 export * from "./poll";
 export * from "./poll-cadence";
@@ -10060,6 +10776,9 @@ vi.mock("@/server/queues/queueSetup", () => ({
 		getJobs: mocks.getJobs,
 	},
 }));
+
+vi.mock("@dokploy/server/services/backup", () => ({ findBackupById: vi.fn() }));
+vi.mock("@dokploy/server/utils/backups/compose", () => ({ runComposeBackup: vi.fn() }));
 
 vi.mock("@dokploy/server/utils/process/background", () => ({
 	runBackgroundJob: async (_name: string, fn: () => Promise<void>) => fn(),
@@ -10206,6 +10925,8 @@ describe("startDeploy: a release of a GitHub Actions connection", () => {
 			status: "accepted",
 			githubDeploymentId: 120,
 			digests: [NEW],
+			// The application as it was just before the flip, saved with the release.
+			sourceBackup: expect.objectContaining({ sourceType: "github", branch: "main", repository: "shop" }),
 		});
 		// The job continues the live GitHub Actions row.
 		expect(mocks.queueAdd.mock.calls[0]?.[1]).toMatchObject({
@@ -10241,6 +10962,8 @@ describe("startDeploy: a release of a GitHub Actions connection", () => {
 		expect(file).not.toContain(OLD);
 		expect(mocks.inserts.find((i) => i.table === ghaRelease)?.values).toMatchObject({
 			digests: [NEW, NEW2].sort(),
+			// The stored compose as it was before the pin.
+			sourceBackup: { composeId: "c-1", sourceType: "raw", composeFile: stack.composeFile },
 		});
 		expect(mocks.queueAdd.mock.calls[0]?.[1]).toMatchObject({ composeId: "c-1" });
 	});
@@ -10308,7 +11031,7 @@ Expected: FAIL, `payload.release` is ignored by the current `startDeploy` (the i
 
 - [ ] **Step 3: Write the connection dependencies**
 
-`createGhaConnectionPollDeps(base)` adds to #577's deps everything `pollConnectionWatch` needs. `runConnectionUpkeep` is throttled to once per two minutes per connection (the polling budget), registers live rows for queued or running runs (a service Dokploy builds itself refuses, which is fine), and applies renames and state events. `pollGhaConnection` is the per-tick entry point.
+`createGhaConnectionPollDeps(base)` adds to #577's deps everything `pollConnectionWatch` needs. `runConnectionUpkeep` is throttled to once per two minutes per connection (the polling budget), registers live rows for queued or running runs (a service Dokploy builds itself refuses, which is fine), and applies renames and state events. `pollGhaConnection` is the per-tick entry point. `createGhaConnectionPollDeps` is called once per tick and keeps the verification budget per repository (`takeVerification`: three connections on one repository share 5 verifications), and its `preFlipBackup` runs every enabled backup schedule of a compose stack before the first release changes it (the same function as the Backups tab's "Run now"); a failed backup holds the release and shows the reason. The facts it hands to acceptance include the connection's `registryProbeHost`, and `loadRegistryAccess` finds the saved login of that host in Settings, Registry.
 
 **`apps/dokploy/server/queues/gha-connection-deps.ts`**
 
@@ -10318,8 +11041,11 @@ import {
 	findComposeById,
 	registerExternalBuild,
 } from "@dokploy/server";
+import { findBackupById } from "@dokploy/server/services/backup";
+import { runComposeBackup } from "@dokploy/server/utils/backups/compose";
 import { db } from "@dokploy/server/db";
 import {
+	backups,
 	domains,
 	ghaConnection,
 	githubDeploymentWatch,
@@ -10339,6 +11065,7 @@ import {
 	getFileText,
 	getRepositoryById,
 	listWorkflowRuns,
+	MAX_VERIFICATIONS_PER_TICK,
 	pickEnvironmentUrl,
 	pollConnectionWatch,
 	type ReleaseInput,
@@ -10437,10 +11164,56 @@ const releaseInput = (
 	digests: digestsOf(release.images),
 });
 
-export const createGhaConnectionPollDeps = (
-	base: PollDeps,
-): ConnectionPollDeps => ({
+/**
+ * Before the first release of a connection changes a service, run what a bad change could harm:
+ * a compose stack that has enabled backup schedules (its Backups tab) gets one fresh run of each, through
+ * the same function the "Run now" button calls. A failure holds the release, shows the reason and tries
+ * again on the next tick. The service's own configuration (an application's source settings, a compose
+ * stack's id and file text) is saved separately, in the same transaction as the change, as
+ * gha_release.sourceBackup (see prepareReleaseDeploy). A service with no schedule passes here: the data of
+ * the other Dokploy services it talks to belongs to their own backup policies.
+ */
+const runServiceBackups = async (
+	watch: WatchRow,
+): Promise<{ ok: boolean; note: string }> => {
+	if (watch.serviceType !== "compose") return { ok: true, note: "" };
+	const schedules = await db
+		.select({ backupId: backups.backupId })
+		.from(backups)
+		.where(and(eq(backups.composeId, watch.serviceId), eq(backups.enabled, true)));
+	if (schedules.length === 0) return { ok: true, note: "" };
+	const stack = await findComposeById(watch.serviceId).catch(() => null);
+	if (!stack) {
+		return { ok: false, note: "The compose stack could not be read for its backup." };
+	}
+	for (const { backupId } of schedules) {
+		try {
+			await runComposeBackup(stack, await findBackupById(backupId));
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			return {
+				ok: false,
+				note: `The backup before the first release failed (${reason}). The release waits and is tried again.`,
+			};
+		}
+	}
+	return { ok: true, note: "" };
+};
+
+export const createGhaConnectionPollDeps = (base: PollDeps): ConnectionPollDeps => {
+	// The verification budget belongs to the repository and to this tick: voicekit has three
+	// connections on one repository, and together they get MAX_VERIFICATIONS_PER_TICK. This
+	// function is called once per tick, so the counter starts at zero every tick.
+	const verificationsUsed = new Map<number, number>();
+	return {
 	...base,
+	takeVerification: (repoId) => {
+		const used = verificationsUsed.get(repoId) ?? 0;
+		if (used >= MAX_VERIFICATIONS_PER_TICK) return false;
+		verificationsUsed.set(repoId, used + 1);
+		return true;
+	},
+	preFlipBackup: (watch) => runServiceBackups(watch),
 	loadConnection: async (watch) => {
 		const row = watch.ghaConnectionId
 			? await findGhaConnectionById(watch.ghaConnectionId)
@@ -10459,7 +11232,8 @@ export const createGhaConnectionPollDeps = (
 				owner: watch.owner,
 				repo: watch.repo,
 				protectionMode: row.protectionMode,
-				registryHost: row.registryHost,
+				registryPrefix: row.registryPrefix,
+				registryProbeHost: row.registryProbeHost,
 				deployed:
 					row.deployedSha &&
 					row.deployedRunId !== null &&
@@ -10523,7 +11297,8 @@ export const createGhaConnectionPollDeps = (
 			);
 		}
 	},
-});
+	};
+};
 
 /** A queued or running run shows as a live GitHub Actions row, when the service can have one. */
 const registerLiveRow = async (
@@ -10671,6 +11446,7 @@ import {
 	listGhaConnections,
 	planApplicationFlip,
 	recordRelease,
+	snapshotPreviousSource,
 } from "@dokploy/server/services/gha-connect";
 ```
 
@@ -10813,7 +11589,12 @@ type ReleaseContext = NonNullable<DeployPayload["release"]>;
  * flipped to the image (its settings were saved at Connect and are kept).
  * Compose: every image of the release is pinned in the stored file. The
  * release row is inserted in the same transaction, so a release either has its
- * deploy or does not exist.
+ * deploy or does not exist. It carries sourceBackup: the service as it was just
+ * before this change (an application's source settings without the registry
+ * password; a compose stack's id, source type and file text), so a rollback or a
+ * take-over reads it from the database and not only from the connection's
+ * previousSource. A compose stack that has backup schedules was backed up before
+ * the first release started (preFlipBackup in the connection dependencies).
  */
 const prepareReleaseDeploy = async (
 	tx: Tx,
@@ -10961,7 +11742,15 @@ const prepareReleaseDeploy = async (
 				.set({ previousSource: savedSource })
 				.where(eq(ghaConnection.ghaConnectionId, connection.ghaConnectionId));
 		}
-		await recordRelease(releaseRow, tx);
+		await recordRelease(
+			{
+				...releaseRow,
+				sourceBackup: snapshotPreviousSource(
+					app as unknown as Record<string, unknown>,
+				),
+			},
+			tx,
+		);
 		const job = {
 			applicationId: app.applicationId,
 			titleLog: title,
@@ -11020,7 +11809,17 @@ const prepareReleaseDeploy = async (
 			.set({ composeFile: pinned.composeFile })
 			.where(eq(compose.composeId, stack.composeId));
 	}
-	await recordRelease(releaseRow, tx);
+	await recordRelease(
+		{
+			...releaseRow,
+			sourceBackup: {
+				composeId: stack.composeId,
+				sourceType: stack.sourceType,
+				composeFile: stack.composeFile,
+			},
+		},
+		tx,
+	);
 	const job = {
 		composeId: stack.composeId,
 		titleLog: title,
@@ -11067,12 +11866,27 @@ export const runGithubDeploymentsTick = async (
 			row,
 		]),
 	);
+	// One call per tick: the verification budget of a repository is counted inside it.
 	const connectionDeps = createGhaConnectionPollDeps(deps);
 	for (const record of watches) {
 		if (shouldStop()) return;
 		const gha = connections.get(`${record.serviceType}:${record.serviceId}`);
 		const watch: WatchRow = {
-			// ...the existing fields, plus:
+			watchId: record.watchId,
+			organizationId: record.organizationId,
+			serviceType: record.serviceType,
+			serviceId: record.serviceId,
+			connectionId: record.connectionId,
+			owner: record.owner,
+			repo: record.repo,
+			environment: record.environment,
+			enabled: record.enabled,
+			lastSeenDeploymentId: record.lastSeenDeploymentId,
+			etag: record.etag,
+			inflightDeploymentId: record.inflightDeploymentId,
+			inflightStartedAt: record.inflightStartedAt,
+			postLogUrl: record.postLogUrl,
+			// New in Task 4.1: set for a watch that a GitHub Actions connection owns.
 			ghaConnectionId: gha?.ghaConnectionId ?? null,
 		};
 		if (!(await serviceExists(watch))) {
@@ -11128,13 +11942,17 @@ gh pr create --repo DevinoSolutions/dokploy-community --base canary --title "fea
 
 One review of the PR head (opus5-worker at high effort). Ask it to check: plain watches behave exactly as before (the refactor is covered by #577's unchanged tests); the cursor, in-flight mark, source flip, release row and image pin are one transaction and the undo restores them; nothing is enqueued before the commit; only `pull` releases deploy; a refusal blocks the service only after the run and artifact are verified; the poll count stays inside the budget (Deployments list every 20 seconds, upkeep every two minutes, at most 5 verifications per tick); and no log line or output carries a token.
 
-- [ ] **Step 9: Manual proof for the lead (voicekit web, `dev`)**
+- [ ] **Step 9: Manual proof for the lead (voicekit web, GitHub environment `development`)**
 
-On a test instance with this build, using the connection made in PR 2's proof:
-1. In the action repository's self-test or a scratch repository, publish a `delivery: push` release for the service key. Expected within one minute: the GitHub Deployment gets a `success` status "Verified, not deployed" and `ghaConnection.one` shows the new deployed commit, still without a deploy.
-2. Publish a `delivery: pull` release whose digest equals what runs. Expected: `success` "Already deployed", state Connected, no deploy.
-3. Publish a `pull` release with a new digest. Expected: a live GitHub Actions row while the run builds, then one Dokploy deployment that continues that row, the application moved from git to the image (its old source saved), a `success` Deployment status carrying the service's domain as `environment_url`, and state Connected with the sentence "Deployed from GitHub Actions."
-4. Re-run an older run. Expected: refused ("older than the deployed commit"), the service does not change.
+The proof uses real releases published by the voicekit repository itself (`DevinoSolutions/voicelabs`), because the connection reads that repository's runs, artifacts and environments; a scratch repository would prove nothing about them. Those releases exist only after PR 6 and Task 6.2 steps 1 and 2 (the wrapper bump with `release-key: voicekit-web` and the environment secrets). So the proof has two parts.
+
+Part A, on a test instance with this build and the connection made in PR 2's proof, before PR 6 is merged: wait three ticks. Expected: `ghaConnection.one` stays `waiting`, `lastError` is empty, no Deployment is answered, and the GitHub rate-limit headers show the polling budget is respected (one Deployments request per 20 seconds per repository, one upkeep every two minutes). Press "Check now" and confirm the next tick runs the upkeep at once.
+
+Part B, after PR 6 and Task 6.2 steps 1 and 2 (it is the same sequence as Task 6.2 Step 4; this list names what PR 4 owes):
+1. A `delivery: push` release from a push to `dev`. Expected within one minute: the GitHub Deployment gets a `success` status "Verified, not deployed" and `ghaConnection.one` shows the new deployed commit, still without a deploy.
+2. A `delivery: pull` release whose digest equals what runs (set `DOKPLOY_PUSH_DEPLOY=false` and re-run the workflow of the same commit). Expected: `success` "Already deployed", state Connected, no deploy.
+3. Before the first pull release with a new digest, take a fresh dump of the stack's database with the standing recipe and note it on the PR; if the compose has a Backups schedule, expect Dokploy to have run it first (the release shows "waiting" until the backup finishes). Then push a change to `dev`. Expected for voicekit (a raw compose): a live GitHub Actions row while the run builds, then one Dokploy deployment that continues that row, the compose still raw with the new digests pinned in its stored file (the file text before the change is saved in the release row's `sourceBackup`), a `success` Deployment status carrying the service's domain as `environment_url`, and state Connected with the sentence "Deployed from GitHub Actions." (An application built from git, which is not voicekit, would here move from git to the image and keep its old source; prove that on a scratch application.)
+4. Re-run an older run of the workflow. Expected: refused ("older than the deployed commit"), the service does not change. Re-run the latest run once (attempt 2) with the same digests: Deployment of attempt 1 is superseded, attempt 2 is an already-deployed no-op, nothing is blocked.
 5. Push a commit that triggers no run of the workflow. Expected: the service never turns Stale.
 
 ## PR 5: Copy-the-file connect UI and the status panel
@@ -11328,7 +12146,7 @@ git -c user.name=AminDhouib -c user.email=amin@devino.ca commit -m "feat: ghaCon
 
 ### Task 5.3: The panel
 
-Wiring (React): typechecked and proved by hand, like #577's `GithubDeploymentsWatch`, whose structure and primitives it copies.
+Wiring (React): typechecked and proved by hand, like #577's `GithubDeploymentsWatch`, whose structure and primitives it copies. Besides the fields of the file-snippet flow the form has three that the voicekit proof needs: the workflow file that publishes the release (a repository that calls the shared wrapper has its own file name, not `dokploy.yml`), and, for images mirrored to a private registry, the Dokploy registry that checks the digests and how the images are named in a release (for the tunnel mirror, `localhost:5000/registry.devino.ca`).
 
 - [ ] **Step 1: Write the component**
 
@@ -11402,6 +12220,7 @@ export const GhaConnectionPanel = ({ id, type }: Props) => {
 		{ serviceType: type, serviceId: id },
 		{ enabled: enabled && !!id, refetchInterval: 15_000 },
 	);
+	const { data: registries } = api.registry.all.useQuery(undefined, { enabled });
 	const connect = api.ghaConnection.connect.useMutation();
 	const disconnect = api.ghaConnection.disconnect.useMutation();
 	const checkNow = api.ghaConnection.checkNow.useMutation();
@@ -11414,6 +12233,13 @@ export const GhaConnectionPanel = ({ id, type }: Props) => {
 	const [buildJob, setBuildJob] = useState("build");
 	const [imageOutput, setImageOutput] = useState("image");
 	const [delivery, setDelivery] = useState<"pull" | "push">("pull");
+	// A workflow that calls the shared wrapper has its own file name; the default is the file the snippet creates.
+	const [workflowPath, setWorkflowPath] = useState(".github/workflows/dokploy.yml");
+	// Images mirrored to a private registry (the SSH tunnel mirror): which Dokploy registry checks the digests, and how the
+	// images are named in a release. "none" = public GHCR images only.
+	const [registryId, setRegistryId] = useState("none");
+	const [registryPrefix, setRegistryPrefix] = useState("");
+	const mirrored = registryId !== "none";
 
 	const parsed = REPO.exec(repository.trim());
 	const key = serviceKey || (parsed ? keyFromRepo(parsed[2] as string) : "");
@@ -11441,6 +12267,10 @@ export const GhaConnectionPanel = ({ id, type }: Props) => {
 
 	const onConnect = async () => {
 		if (!parsed || !githubConnectionId || !validSnippet) return;
+		if (mirrored && registryPrefix.trim() === "") {
+			toast.error("Enter how the mirrored images are named, for example localhost:5000/registry.devino.ca");
+			return;
+		}
 		try {
 			await connect.mutateAsync({
 				serviceType: type,
@@ -11448,11 +12278,12 @@ export const GhaConnectionPanel = ({ id, type }: Props) => {
 				githubConnectionId,
 				owner: parsed[1] as string,
 				repo: parsed[2] as string,
-				workflowPath: ".github/workflows/dokploy.yml",
+				workflowPath: workflowPath.trim(),
 				trackedBranch: trackedBranch.trim(),
 				environment: environment.trim(),
 				serviceKey: key,
-				registryHost: null,
+				registryPrefix: mirrored ? registryPrefix.trim() : null,
+				registryId: mirrored ? registryId : null,
 				protectionMode: "environment",
 				gateMode: "image",
 			});
@@ -11640,6 +12471,32 @@ export const GhaConnectionPanel = ({ id, type }: Props) => {
 									onChange={(e) => setImageOutput(e.target.value)}
 								/>
 							</div>
+								<div className="space-y-1">
+									<Label>Workflow file that publishes the release</Label>
+									<Input value={workflowPath} onChange={(e) => setWorkflowPath(e.target.value)} placeholder=".github/workflows/dokploy.yml" />
+								</div>
+								<div className="space-y-1">
+									<Label>Images are mirrored to a registry</Label>
+									<Select value={registryId} onValueChange={setRegistryId}>
+										<SelectTrigger>
+											<SelectValue />
+										</SelectTrigger>
+										<SelectContent>
+											<SelectItem value="none">No, public GHCR images</SelectItem>
+											{(registries ?? []).map((entry) => (
+												<SelectItem key={entry.registryId} value={entry.registryId}>
+													{entry.registryName} ({entry.registryUrl})
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								</div>
+								{mirrored ? (
+									<div className="space-y-1">
+										<Label>How the images are named in the release</Label>
+										<Input value={registryPrefix} onChange={(e) => setRegistryPrefix(e.target.value)} placeholder="localhost:5000/registry.devino.ca" />
+									</div>
+								) : null}
 						</div>
 						<p className="text-sm text-muted-foreground">
 							Create the GitHub environment {environment || "..."} first, limit
@@ -11721,7 +12578,7 @@ One review of the PR head (opus5-worker at high effort). Check that nothing in t
 
 - [ ] **Step 6: Manual proof for the lead**
 
-On a test instance, open the voicekit web `dev` service page in a headed browser. Expected: the panel shows the form; fill in the repository, `dev` environment and branch; the YAML appears and Copy puts it on the clipboard; Connect with a wider environment policy shows the environment message as a toast; after fixing the environment, Connect succeeds and the panel shows "Waiting for GitHub Actions to publish <sha>. Git autodeploy is off.", then (after a release) "Deployed from GitHub Actions." Screenshot each state onto the PR.
+On a test instance, open the voicekit web `development` service page in a headed browser. Expected: the panel shows the form; fill in the repository `DevinoSolutions/voicelabs`, environment `development` and branch `dev`, choose the registry record for `registry.devino.ca` and the image prefix `localhost:5000/registry.devino.ca`, and set the workflow file to `.github/workflows/dokploy-web-build-deploy.yml`; the YAML appears (it is not needed for a wrapper caller) and Copy puts it on the clipboard; Connect with a wider environment policy shows the environment message as a toast; after fixing the environment, Connect succeeds and the panel shows "Waiting for GitHub Actions to publish <sha>. Git autodeploy is off.", then (after a release) "Deployed from GitHub Actions." Screenshot each state onto the PR.
 
 ## PR 6: The shared workflow wrapper and the cutovers (`DevinoSolutions/.github`)
 
@@ -11729,13 +12586,13 @@ On a test instance, open the voicekit web `dev` service page in a headed browser
 
 `dokploy-compose.yml` already builds every image once, mirrors each one by digest to our registry through the SSH tunnel, renders the compose file with the digests and hands it to Dokploy with the API. This PR makes the same workflow also publish the release (artifact and Deployment) and lets a repository stop calling the Dokploy API without editing its own file.
 
-Both deployers are never active at once: Dokploy deploys only `pull` manifests, and the wrapper makes the Dokploy API call only while `push_deploy` is true. A repository moves in three steps, each reversible:
+Both deployers are never active at once: Dokploy deploys only `pull` manifests, and the wrapper makes the Dokploy API call only while `push-deploy` is true. Before step 1 a repository needs its GitHub environment ready (a deployment branch policy that allows exactly the tracked branch, and the registry secrets stored in the environment; Task 6.3 lists every repository's state). A repository then moves in three steps, each reversible:
 
 1. **Publish only (today's behavior plus a record).** `push-deploy` stays true. The wrapper still deploys through the API and also publishes a `delivery: push` manifest. Dokploy verifies it and advances its record of the deployed commit; it deploys nothing.
 2. **First pull release.** Set the repository variable `DOKPLOY_PUSH_DEPLOY` to `false`. The wrapper skips the Dokploy API call and publishes `delivery: pull`. Dokploy deploys the release; when its digest equals what already runs it is an already-deployed no-op and the service becomes Connected.
 3. **Steady state.** Nothing more to do. Setting the variable back to `true` (or deleting it) returns to API deploys at once.
 
-The wrapper reads the variable through the `vars` context, which a called workflow sees from its caller's repository, so the cutover to step 2 needs no file edit.
+The wrapper reads the variable through the `vars` context, which a called workflow sees from its caller's repository, so the cutover to step 2 needs no file edit. If `vars` turns out not to be visible, the wrapper fails safe: it keeps deploying through the API (Task 6.1, backward compatibility).
 
 **Files:**
 - Modify: `.github/workflows/dokploy-compose.yml`, the header comment of the same file, the README section "Deploy a compose project to Dokploy with GitHub Actions"
@@ -11758,70 +12615,112 @@ Use the printed sha, with `# v1.0.0` after it, wherever `<RELEASE_SHA>` appears 
         description: >-
           true (default): this workflow deploys through the Dokploy API as before, and also publishes a delivery=push release that Dokploy only
           verifies. false: this workflow makes no Dokploy call; Dokploy deploys the published release (delivery=pull). A repository variable
-          DOKPLOY_PUSH_DEPLOY set to 'false' switches an existing caller to false without editing its file.
+          DOKPLOY_PUSH_DEPLOY set to 'false' switches an existing caller to false without editing its file. false together with
+          release-key 'none' is refused (nothing would deploy the commit).
         type: boolean
         required: false
         default: true
       release-key:
         description: >-
-          Service key of the Dokploy connection (the GitHub Deployment task is dokploy:<key>). Empty = the repository name.
-          'none' = publish no release.
+          Service key of the Dokploy connection (the GitHub Deployment task is dokploy:<key>). Empty = <repository>-<compose file name
+          without directory, extension and a leading docker-compose or compose> (docker-compose.web.yml in repository shop gives shop-web;
+          docker-compose.yml gives shop). A repository with more than one compose file, or the same file for more than one environment
+          with different Dokploy services, MUST pass the key explicitly. 'none' = publish no release.
         type: string
         required: false
         default: ''
 ```
 
-- [ ] **Step 3: Add the publish steps** in the `deploy` job, after the mirror step (the one with `id: mirror`) and before `Check out the compose file`
+Release keys are unique per repository and GitHub environment on the Dokploy side (`gha_connection_repo_key_unique`). The default includes the compose file name so two workflows of one repository do not collide, and a multi-service repository sets the key itself in the same pull request that bumps the wrapper sha (Task 6.2 and 6.3 give the key for each). There is no "sha bump only" cutover for such a repository.
+
+- [ ] **Step 3: Refuse a pull release that nothing publishes.** First step of the `deploy` job (before the mirror step)
+
+```yaml
+      - name: Refuse push-deploy=false without a release
+        if: ${{ !inputs.mirror-only && !(inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false') && inputs.release-key == 'none' }}
+        run: |
+          printf '::error title=dokploy-compose::push-deploy is false (or DOKPLOY_PUSH_DEPLOY is false) and release-key is none: this workflow would neither deploy the commit nor publish a release for Dokploy. Set a release-key, or set push-deploy back to true.\n'
+          exit 1
+```
+
+- [ ] **Step 4: Let the registry secrets live in the GitHub Environment.** The mirror step reads `secrets.CI_REGISTRY_PASSWORD`, which GitHub resolves from the job's environment first and from the repository second, so the existing emptiness check already accepts both sources; only its message changes. In the step `Mirror the images to registry.devino.ca by digest` replace the text `Add it as a REPOSITORY secret and pass it from the caller (secrets: inherit works)` with `Add it as a secret of the GitHub Environment (preferred: an environment secret wins and is released only to runs the environment's deployment branch policy allows) or as a REPOSITORY secret, and pass it from the caller (secrets: inherit works)`. Make the same change wherever `CI_REGISTRY_TUNNEL_KEY` emptiness is reported, and in the header comment's secrets list. The `deploy` job already declares `environment: ${{ inputs.github-environment != '' && inputs.github-environment || null }}`, so a caller that passes `github-environment` receives environment secrets with no other change.
+
+- [ ] **Step 5: Add the publish steps** in the `deploy` job, after the mirror step (the one with `id: mirror`) and before `Check out the compose file`
 
 ```yaml
       # Phase 1 of the native GitHub Actions connection (T-13719): publish the release Dokploy reads. The images are the mirrored
       # ones the rendered compose uses, by digest, so what Dokploy verifies in its registry is exactly what it will run.
+      # A release needs a GitHub environment (acceptance rule 5 reads its branch policy); a caller without github-environment
+      # publishes nothing and is told so.
+      - name: Explain why no release is published
+        if: ${{ inputs.release-key != 'none' && inputs.github-environment == '' }}
+        run: printf '::notice title=dokploy-compose::no release published: this caller passes no github-environment, and Dokploy only accepts a release made under a GitHub environment whose deployment branch policy allows the tracked branch.\n'
+
       - name: List the mirrored images for the release
         id: release-images
-        if: ${{ inputs.release-key != 'none' }}
+        if: ${{ inputs.release-key != 'none' && inputs.github-environment != '' }}
         env:
           DIGESTS: ${{ steps.collect.outputs.digests }}
           PREFIX: ${{ steps.mirror.outputs.image-prefix }}
-          RELEASE_KEY: ${{ inputs.release-key || github.event.repository.name }}
+          REPO_LC: ${{ steps.collect.outputs.repo-lc }}
+          RELEASE_KEY: ${{ inputs.release-key }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
         run: |
           set -euo pipefail
-          key=$(printf '%s' "$RELEASE_KEY" | tr 'A-Z' 'a-z')
+          key="$RELEASE_KEY"
+          if [ -z "$key" ]; then
+            stem=$(basename "$COMPOSE_FILE"); stem=${stem%.*}
+            case "$stem" in docker-compose*) stem=${stem#docker-compose} ;; compose*) stem=${stem#compose} ;; esac
+            stem=${stem#[._-]}
+            key="${REPO_LC}${stem:+-$stem}"
+          fi
+          key=$(printf '%s' "$key" | tr 'A-Z' 'a-z')
+          [[ $key =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { printf '::error title=dokploy-compose::release key %s is not valid; pass release-key (lowercase letters, digits, dots, dashes, underscores, at most 63 characters)\n' "$key"; exit 1; }
+          # image-prefix already ends in a slash (localhost:5000/registry.devino.ca/<repo>/); never produce a double slash.
+          prefix="${PREFIX%/}/"
           {
             echo "key=${key}"
             echo 'lines<<EOF_RELEASE_IMAGES'
-            jq -r --arg key "$key" --arg prefix "$PREFIX" 'to_entries[] | "\($key)/\(.key)=\($prefix)/\(.key)@\(.value)"' <<<"$DIGESTS"
+            jq -r --arg key "$key" --arg prefix "$prefix" 'to_entries[] | "\($key)/\(.key)=\($prefix)\(.key)@\(.value)"' <<<"$DIGESTS"
             echo 'EOF_RELEASE_IMAGES'
           } >> "$GITHUB_OUTPUT"
 
       - name: Publish the release for Dokploy
-        if: ${{ inputs.release-key != 'none' }}
-        # In push mode a failure to publish only warns (the action says so); the deploy below is unaffected.
+        id: publish
+        if: ${{ steps.release-images.outcome == 'success' }}
+        # While this workflow still deploys through the API (push mode) a failure to publish only warns: the deploy below is
+        # unaffected. In pull mode (push-deploy false) the failure fails the job, because nothing else would deploy the commit.
+        continue-on-error: ${{ inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false' }}
         uses: DevinoSolutions/dokploy-release@<RELEASE_SHA> # v1.0.0
         with:
           service: ${{ steps.release-images.outputs.key }}
-          environment: ${{ inputs.github-environment || 'production' }}
+          environment: ${{ inputs.github-environment }}
           delivery: ${{ (inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false') && 'push' || 'pull' }}
           existing-image: ${{ steps.release-images.outputs.lines }}
           compose: ${{ inputs.compose-file }}
 ```
 
-- [ ] **Step 4: Gate the Dokploy API call** on the same expression. On the existing step `Render the compose and deploy it` (`id: deploy`) add
+The mirror's image prefix is `localhost:5000/registry.devino.ca/<repo>/` with a trailing slash (the real value written by the mirror step as `image-prefix`), and `<repo>` is the lowercase repository name at run time. A repository renamed on GitHub mirrors under its new name: voicekit is now `voicelabs` on GitHub (the old name redirects), so its images are `localhost:5000/registry.devino.ca/voicelabs/web`. Dokploy stores the connection's prefix `localhost:5000/registry.devino.ca` and allows `<prefix>/<repo>/` with `<repo>` the connected repository's current name (Task 2.1), which the upkeep re-reads after a rename (Task 4.4). The release key does not follow a rename, which is why voicekit passes `voicekit-web` explicitly.
+
+- [ ] **Step 6: Gate the Dokploy API call** on the same expression. On the existing step `Render the compose and deploy it` (`id: deploy`) add
 
 ```yaml
         if: ${{ inputs.mirror-only || (inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false') }}
 ```
 
-and give the job output a value when the step is skipped:
+and give the job output a value when the step is skipped, but only when the release really was published:
 
 ```yaml
     outputs:
       digests: ${{ steps.collect.outputs.digests }}
-      result: ${{ steps.deploy.outputs.result || (steps.deploy.outcome == 'skipped' && 'published' || '') }}
+      result: ${{ steps.deploy.outputs.result || (steps.deploy.outcome == 'skipped' && steps.publish.outcome == 'success' && 'published' || '') }}
 ```
 
-Document the new value in the header comment: `deploy-result` is now `deployed | skipped | dry-run | rendered | published` (`published` = the release was handed to Dokploy, which deploys it).
+Document the new value in the header comment: `deploy-result` is now `deployed | skipped | dry-run | rendered | published` (`published` = the release was handed to Dokploy, which deploys it; it is never reported when the publish step did not succeed).
 
-- [ ] **Step 5: Do not register live rows from the workflow in pull mode**
+**Backward compatibility, in one place.** (1) With the defaults a caller behaves as before plus one publish step whose failure only warns. (2) `push-deploy: false` with `release-key: none` fails the job at once with a clear error. (3) If the `vars` context is not visible inside the called workflow, `vars.DOKPLOY_PUSH_DEPLOY` is empty, the condition reads "push", and the caller keeps deploying through the API. That is the safe failure, and the proof in Task 6.2 detects it (the run still calls the Dokploy API) and gives the one-line caller edit that fixes it.
+
+- [ ] **Step 7: Do not register live rows from the workflow in pull mode**
 
 Dokploy registers the live row itself once a connection exists. Find every use of the register action:
 
@@ -11831,20 +12730,20 @@ grep -n "dokploy-register-build" .github/workflows/dokploy-compose.yml
 
 and, on each of those steps (the build legs' register step and the closing `mode: finish` steps), AND the existing `if:` condition with `&& inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false'`. A step with no `if:` gets `if: ${{ inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false' }}`.
 
-- [ ] **Step 6: Update the header comment and the README**
+- [ ] **Step 8: Update the header comment and the README**
 
 In the header comment of `dokploy-compose.yml` add a section "THE RELEASE (Dokploy Community 'Build on GitHub Actions')" that states: what is published (artifact `dokploy-release` and one Deployment with task `dokploy:<release-key>`), the two inputs, the variable, the three-step migration above, and that the callers need `contents: read`, `deployments: write` and `packages: write` (and `actions: read` when the caller declares a `permissions:` block). Copy the same text into the README section.
 
-- [ ] **Step 7: Add one case to the self-test**
+- [ ] **Step 9: Add one case to the self-test**
 
-In `selftest-dokploy-compose.yml` add a case that calls the wrapper with `mirror-only: true` and `release-key: none`, and asserts that the job summary and `deploy-result` are `rendered` as before. This protects every existing caller: with `mirror-only` or the default `push-deploy`, the behavior is unchanged.
+In `selftest-dokploy-compose.yml` add a case that calls the wrapper with `mirror-only: true` and `release-key: none`, and asserts that the job summary and `deploy-result` are `rendered` as before. Add a second case that calls the wrapper with `push-deploy: false` and `release-key: none` and expects the job to fail with the message of Step 3 (use the repository's existing negative-case pattern for the self-test, or assert it in a `continue-on-error` job whose next step checks the `needs` result). This protects every existing caller: with `mirror-only` or the default `push-deploy`, the behavior is unchanged, and the one invalid combination is refused instead of silently publishing nothing.
 
-- [ ] **Step 8: Validate the YAML**
+- [ ] **Step 10: Validate the YAML**
 
 Run: `npx --yes yaml-lint .github/workflows/dokploy-compose.yml .github/workflows/selftest-dokploy-compose.yml` and the repository's own workflow lint (`python-ci.yml` or `ci-lint.yml` run on the pull request).
 Expected: no errors; the lint that restricts runner labels and action pins passes (the new action is pinned by sha).
 
-- [ ] **Step 9: Commit, push, open the PR**
+- [ ] **Step 11: Commit, push, open the PR**
 
 ```bash
 git add -A
@@ -11853,38 +12752,68 @@ git push -u origin feat/dokploy-compose-release
 gh pr create --repo DevinoSolutions/.github --base main --title "feat: dokploy-compose publishes a release for Dokploy (push-deploy, release-key) (T-13719)" --body "Phase 1 PR 6 of the native GitHub Actions connect (spec in DevinoSolutions/dokploy-community docs/superpowers/specs/2026-11-03-gha-native-connect-design.md). Adds push-deploy and release-key. Default behavior is unchanged; a repository variable DOKPLOY_PUSH_DEPLOY=false hands deploys to Dokploy."
 ```
 
-- [ ] **Step 10: Review gate**
+- [ ] **Step 12: Review gate**
 
-One review of the PR head (opus5-worker at high effort). Check: with the defaults a caller behaves exactly as before plus one non-blocking publish step; `existing-image` carries digests only (no tag); the job still holds no extra secret; the live-row registration is off in pull mode; every sibling action is pinned by sha.
+One review of the PR head (opus5-worker at high effort). Check: with the defaults a caller behaves exactly as before plus one non-blocking publish step (`continue-on-error` while `push-deploy` is true, a hard failure in pull mode); `push-deploy: false` with `release-key: none` fails with a clear error and `deploy-result` is never `published` unless the publish step succeeded; `existing-image` carries digests only (no tag) and no double slash in the image names; the release key is unique per repository and environment (explicit for a multi-service repository); the job still holds no extra secret; the live-row registration is off in pull mode; every sibling action is pinned by sha.
 
 ### Task 6.2: Cut over voicekit web (the proof adopter)
 
-Voicekit calls the shared `dokploy-compose.yml` for its web and engine files, and its `dev` environment limits deployment branches to one branch. Cut over `web` on `dev` first.
+**Facts about the adopter (read from GitHub on 2026-11-03, read-only; recheck before starting).**
 
-- [ ] **Step 1: Sha bump (the lane that owns voicekit does this PR)**
+- The repository is `DevinoSolutions/voicelabs` on GitHub (formerly voicekit, the old name redirects) and is **private**.
+- The web workflow is `.github/workflows/dokploy-web-build-deploy.yml`. It calls the wrapper with `compose-file: docker-compose.web.yml` and `github-environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}`, so branch `dev` releases under the GitHub environment **`development`** and branch `main` under **`production`**. (The environment is called `development`, not `dev`; the branch is `dev`.)
+- Both environments have one custom deployment branch policy, `development` = `branch:dev` and `production` = `branch:main`. Neither holds any secret yet.
+- The Dokploy service is a **raw compose** stored by the wrapper, one for `dev` (`DOKPLOY_COMPOSE_ID_DEV`) and one for `main` (`DOKPLOY_COMPOSE_ID_PROD`). The engine (`dokploy-engine-build-deploy.yml`, `docker-compose.cuda.yml`, environment `production`, branch `main`) is a third service. That is three connections on one repository, which is why the verification budget is counted per repository (Task 4.3).
+- The caller passes the three secrets through an explicit map, `CI_REGISTRY_PASSWORD`, `CI_REGISTRY_TUNNEL_KEY` and `DOKPLOY_API_KEY`, all read from **repository** secrets. The kill switch variable `VOICEKIT_DIGEST_SERVICES` must list `dev` for the deploy job to run.
+- The wrapper mirrors the image to `localhost:5000/registry.devino.ca/voicelabs/web` (the repository's current name, not voicekit). The connection therefore uses registry prefix `localhost:5000/registry.devino.ca`, and Dokploy checks the digest at `https://registry.devino.ca` with the saved registry login of that name (Settings, Registry). `localhost:5000` is only the name under which the image is pulled on the deploy host, where the registry is published on port 5000, exactly as for today's API deploys.
 
-In voicekit's `web` caller change the `uses: DevinoSolutions/.github/.github/workflows/dokploy-compose.yml@<old sha>` to the sha of the merged PR 6. Nothing else changes. Check `permissions:` of the caller includes `contents: read`, `deployments: write`, `packages: write` and `actions: read`.
+All three Dokploy services keep the release key explicit: `voicekit-web` for both web composes (they differ by GitHub environment, so the key is unique per environment), and `voicekit-engine` for the engine. The default key would be `voicelabs-web` and `voicelabs-cuda`, which is not what the lead and the runbooks call them.
 
-- [ ] **Step 2: Create the GitHub environment values**
+This is a raw compose, so the "application moved from a git source to an image" flip of Task 4.3 does not apply to it: the compose stays raw, and a release pins the new digests in the stored compose text the way the `dokploy-deploy` action does today. The first release is therefore an already-deployed no-op when its digests equal what runs.
 
-The `dev` environment must exist with Deployment branches set to the one tracked branch. No secret is added.
+- [ ] **Step 1: The sha bump and the key (the lane that owns voicekit does this PR, in the voicelabs repository itself)**
 
-- [ ] **Step 3: Manual proof for the lead, in order**
+In `dokploy-web-build-deploy.yml` change the `uses:` sha to the merged PR 6 commit and add `release-key: voicekit-web` under `with:`. Do the same in `dokploy-engine-build-deploy.yml` with `release-key: voicekit-engine`. Check that the top-level `permissions:` block has `contents: read`, `packages: write`, `deployments: write` and add `actions: read` if it is missing. Nothing else changes. Do not publish this change from a scratch repository: the run must come from the real repository, because the connection reads that repository's runs, artifacts and environments.
 
-1. Merge the sha bump. A push to the tracked branch publishes a `delivery: push` release. Expected: the run shows the artifact `dokploy-release` and a Deployment `dokploy:voicekit-web`; the Dokploy deployment still happens through the API as before; `ghaConnection.one` shows the deployed commit advance and the state unchanged. Nothing deployed twice.
-2. Connect the service in the dashboard (PR 5 panel) using the service key printed by the run. Expected: "Waiting for GitHub Actions to publish <sha>. Git autodeploy is off." (or Connected on the next release).
-3. Set the repository variable `DOKPLOY_PUSH_DEPLOY` to `false` and push. Expected: the run makes no Dokploy API call (`deploy-result` is `published`); Dokploy deploys the release; the service becomes Connected; the Deployment shows `success` with the service URL. If the wrapper still calls the Dokploy API, the `vars` context is not visible inside the called workflow: have the caller pass `push-deploy: ${{ vars.DOKPLOY_PUSH_DEPLOY != 'false' }}` instead (a one-time file edit in that repository) and keep the wrapper's own check as a second guard.
-4. Set the variable back to `true` and push. Expected: the API deploy returns, and Dokploy only verifies. This is the rollback.
+- [ ] **Step 2: Put the registry secrets into the GitHub environment**
 
-### Task 6.3: The other nine repositories
+For `development` (and later `production`), set `CI_REGISTRY_PASSWORD` and `CI_REGISTRY_TUNNEL_KEY` as environment secrets, with the values piped from the secrets manager (Resync) into `gh secret set <name> --env development --repo DevinoSolutions/voicelabs`, never through a file, an argument or a transcript. The repository copies stay in place for now; the caller's explicit map still reads them and the wrapper's check accepts either source. After one green run with both present, delete the repository copies and run the workflow again by `workflow_dispatch` with `dry_run`; the mirror step must still pass. If it fails with "CI_REGISTRY_PASSWORD is empty", the caller's explicit map is overriding the environment secret: restore the repository copies from Resync and report it, because those callers then need a one-line edit to stop passing the two names. (GitHub documents that an environment secret wins over a repository secret of the same name for a job that declares the environment; the rule that decides it for a called workflow with an explicit secrets map is exactly what this step proves, so it is not assumed.)
 
-Each cutover is its own pull request, owned by the repository's lane (the wizard never edits workflows). Per repository, the order is the three steps above.
+- [ ] **Step 3: Check the GitHub connection can read a private repository**
+
+voicelabs is private, so the Dokploy GitHub connection needs the `repo` scope (Task 2.8 asks `repo_deployment repo` for a private repository; `public_repo` is enough only for public ones). In the dashboard, reconnect GitHub with repository access set to private (`repositoryAccess: "private"` on the device-flow start); the dialog lists the scopes before approving. Without it, Connect refuses with "This repository is private, and the GitHub connection lacks the repo scope. Reconnect GitHub and approve repository access."
+
+- [ ] **Step 4: Manual proof for the lead, in order**
+
+1. **Connect first.** Connect the dev web compose in the dashboard (PR 5 panel) with: service key `voicekit-web`, repository `DevinoSolutions/voicelabs`, tracked branch `dev`, environment `development`, workflow file `.github/workflows/dokploy-web-build-deploy.yml`, registry prefix `localhost:5000/registry.devino.ca`, and the registry record for `registry.devino.ca`. Expected: the panel says "Waiting for GitHub Actions to publish <sha>", and `ghaConnection.one` returns state `waiting` with `deployedSha` null. A raw compose has no git autodeploy, so there is nothing to turn off.
+2. **Push mode.** Merge the sha bump. A push to `dev` runs the workflow with `push-deploy` true. Expected: the run shows the artifact `dokploy-release` and a Deployment `dokploy:voicekit-web` under `development`; the Dokploy deployment still happens through the API as before; within one minute `ghaConnection.one` shows `deployedSha` advance to the run's commit, with the state unchanged and nothing deployed twice.
+3. **Pull mode.** Set the repository variable `DOKPLOY_PUSH_DEPLOY` to `false` and push to `dev`. Expected: the run makes no Dokploy API call (`deploy-result` is `published`); Dokploy deploys the release (a live row linking to the run, the digest pinned into the compose text); the connection becomes Connected; the Deployment shows `success` with the service URL. If the wrapper still calls the Dokploy API, the `vars` context is not visible inside the called workflow: pass `push-deploy: ${{ vars.DOKPLOY_PUSH_DEPLOY != 'false' }}` from the caller instead (a one-time edit in that repository) and keep the wrapper's own check as a second guard.
+4. **Rollback.** Set the variable back to `true` and push. Expected: the API deploy returns and Dokploy only verifies.
+
+### Task 6.3: The other nine repositories (environment readiness)
+
+Each cutover is its own pull request, owned by the repository's lane (the wizard never edits workflows). Per repository the order is: fix the environment, move the secrets, then the three steps above. A repository whose environment does not allow exactly its tracked branch **stays Blocked in phase 1**: Connect refuses it with "the environment allows more than the tracked branch", and nothing is deployed from it by Dokploy. The table is what was read from GitHub on 2026-11-03 (read-only, names only, no values); recheck each row before its cutover.
+
+| Repository (GitHub) | Shape | GitHub environments and their branch policy | `CI_REGISTRY_*` lives in | Phase 1 state and what the lane does first |
+|---|---|---|---|---|
+| `voicelabs` (voicekit) | Shared wrapper, web (dev and prod) and engine | `development` = `dev`, `production` = `main` | Repository | Ready after Step 2 of Task 6.2. Keys `voicekit-web`, `voicekit-engine` |
+| `notifly` | Shared wrapper | `development` = `dev`, `production` = `main` | Repository | Ready after the secrets move |
+| `snapvisor` | Shared wrapper | `development`, `production`, no branch policy | Repository | **Blocked** until each environment gets a custom policy with exactly the tracked branch, then the secrets move |
+| `shorty` | Shared wrapper | `dev`, `development`, `prod`, `production`, no branch policy | Repository | **Blocked** until the two environments it actually uses (`development`, `production`) get a policy; the unused `dev` and `prod` environments are deleted or left, they are not read |
+| `uptimely` | Shared wrapper | `development`, `production`, no branch policy | Repository | **Blocked** until policies exist, then the secrets move |
+| `demofy` | Shared wrapper | `development`, `production`, no branch policy | Repository | **Blocked** until policies exist, then the secrets move |
+| `superbooks` | Own workflow with `dokploy-deploy`, `workflow_run` on CI | `development` = `dev`, `production` = `main` | Repository; `DOKPLOY_DEPLOY_API_KEY` already in each environment | Environments ready. Stays on API deploys until the deploy gate (phase 3) because `workflow_run` is never accepted |
+| `upAPI` | Own `publish-image.yml` | `production` = `main` (and `npm-release`, which is not used) | Repository; `DOKPLOY_DEPLOY_API_KEY` in `production` | Ready for `production` after the secrets move; there is no `development` environment, so a dev service stays Blocked |
+| `caly` | Own `publish-prod-images.yml`, `workflow_run` | `production` = `main` | Repository | Environment ready. Stays on API deploys until phase 3 |
+| `postify` | Own `build-deploy.yml`, private GHCR images pulled with Dokploy's ghcr login | `development` = `dev`, `production` = `main` | Neither: no `CI_REGISTRY_*` at all | **Blocked** in phase 1: its images are private on GHCR and not in the mirror, and phase 1 drops the GHCR read token (Task 2.8). It joins when the registry token service of phase 2 exists |
+
+Moving the two registry secrets into an environment, per repository: set `CI_REGISTRY_PASSWORD` and `CI_REGISTRY_TUNNEL_KEY` as environment secrets for every environment the repository releases under, with the values piped from Resync; keep the repository copies until a run with both present is green, then delete them and prove one more run, exactly as in Task 6.2 Step 2. The wrapper accepts either source, so no repository breaks at any moment of the move.
 
 | Shape | Repositories | What the lane changes |
 |---|---|---|
-| Calls the shared `dokploy-compose.yml@sha` | SnapVisor, Shorty, Notifly, Uptimely, Demofy, voicekit engine | Sha bump only; set `DOKPLOY_PUSH_DEPLOY` at step 2 |
-| Own workflow with `dokploy-deploy` and `dokploy-register-build` | SuperBooks, upAPI, Caly | Add the job from the Connect panel (it takes the image from the build job's output), keep the API deploy while `delivery: push`, then remove the API deploy at step 2. Review checks the cache trust rule: the build job uses `cache: gha` or an environment-scoped credential, never a registry cache written with a repository-wide credential |
-| Own `build-deploy.yml`, no shared action found | Postify | Same as the row above, on Postify's workflow, through its own lane (postify-65) |
+| Calls the shared `dokploy-compose.yml@sha` | voicelabs, notifly, snapvisor, shorty, uptimely, demofy | Sha bump **and an explicit `release-key` for every caller of a multi-service repository** (voicelabs: two compose files, three Dokploy services; the others set it too when they call the wrapper more than once). Then set `DOKPLOY_PUSH_DEPLOY` at step 2 |
+| Own workflow with `dokploy-deploy` and `dokploy-register-build` | superbooks, upAPI, caly | Add the job from the Connect panel (it takes the image from the build job's output), keep the API deploy while `delivery: push`, then remove the API deploy at step 2. Review checks the cache trust rule: the build job uses `cache: gha` or an environment-scoped credential, never a registry cache written with a repository-wide credential |
+| Own `build-deploy.yml`, private GHCR images | postify | Blocked as above until phase 2; nothing to do now |
 
 SuperBooks and Caly use `workflow_run` on CI. That trigger is never accepted, so they move to a push trigger plus the deploy gate "workflows: CI", which is phase 3 (T-13720); until then they stay on API deploys. A key with no connected service is published and ignored, which is today's dry run.
 
@@ -11908,9 +12837,12 @@ The spec puts the deploy gate in phase 3, PR 10, not in phase 1. Phase 1 stores 
 | Deployment statuses as the record, with environment URL | PR 4 (`postStatus`, `environmentUrl`) |
 | `delivery: push|pull` guard | PR 1 (`cli`), PR 3 (manifest `delivery`), PR 4 (`poll`: push verified and recorded, never deployed), PR 6 |
 | Phase 1 token is #577's device-flow token, scope change, no registry credential | PR 2 Task 2.8 |
-| Limited to tunnel adopters and public GHCR | PR 3 `registry-probe` (anonymous GHCR, saved login for our registry), PR 2 Task 2.8 (`read:packages` dropped) |
+| Limited to tunnel adopters and public GHCR | PR 3 `registry-probe` (anonymous GHCR, saved login for the chosen Dokploy registry at its own host), PR 2 `namespace` (registry prefix with a path) and Task 2.5/2.9 (`registryId`), Task 2.8 (`read:packages` dropped) |
+| Re-run attempts replace the artifact; an older attempt is superseded | PR 1 Task 1.6 (`overwrite: true`), PR 3 (`acceptRelease`, `superseded`), PR 4 (`poll`) |
+| Multi-service releases complete before any deploys, 15 minute timeout | PR 4 Task 4.3 (`completeness`, `poll`) |
+| A fresh backup and the service snapshot before the first release | PR 4 Task 4.3 (`preFlipBackup` hook), Task 4.5 (`runServiceBackups`, `gha_release.sourceBackup`) |
 | The action repository skeleton | PR 1 |
-| One-adopter proof | voicekit web `dev`, PR 6 Task 6.2 |
+| One-adopter proof | voicekit web `development` (branch `dev`), PR 6 Task 6.2 |
 | Flip at first release with `previousSource`, git autodeploy off at Connect | PR 2 (`planConnect`), PR 4 (`prepareReleaseDeploy`) |
 | Stale, polling budget, idle slow-down, rename safety | PR 4 (`stale`, `poll-cadence`, `upkeep`) |
 | Live rows | PR 4 (`registerLiveRow`, job `deploymentId`) |
@@ -11920,6 +12852,6 @@ The spec puts the deploy gate in phase 3, PR 10, not in phase 1. Phase 1 stores 
 
 **Not in phase 1 by the spec's own split:** the GitHub App and wizard (PR 6 to 9 of the spec), migrations, retention and GC, previews, local build once, multi-instance guard, drift protection, the registry token service. This plan does not touch them.
 
-**Names used in more than one task** (checked for agreement): `acceptRelease`, `AcceptedRelease`, `ConnectionFacts`, `ConnectionRecord` (with `organizationId`), `ConnectionPollDeps` (with `createProbe`), `pollConnectionWatch`, `runUpkeep`, `planConnect`, `connectGhaService`, `planApplicationFlip`, `recordRelease`, `recordVerifiedRelease`, `settleRelease`, `applyConnectionEvent`, `presentGhaConnection`, `pinComposeImages`, `listPinnedComposeRepositories`, `pickEnvironmentUrl`, `buildPublishSnippet`, `wakeGhaConnection`, `ReleaseContext`.
+**Names used in more than one task** (checked for agreement): `acceptRelease`, `AcceptedRelease`, `ConnectionFacts`, `ConnectionRecord` (with `organizationId`), `ConnectionPollDeps` (with `createProbe`), `pollConnectionWatch`, `runUpkeep`, `planConnect`, `connectGhaService`, `planApplicationFlip`, `recordRelease`, `recordVerifiedRelease`, `settleRelease`, `applyConnectionEvent`, `presentGhaConnection`, `pinComposeImages`, `listPinnedComposeRepositories`, `pickEnvironmentUrl`, `buildPublishSnippet`, `wakeGhaConnection`, `ReleaseContext`, `checkReleaseComplete`, `canonicalRepository`, `takeVerification`, `preFlipBackup`, `snapshotPreviousSource`.
 
 **Placeholder scan:** the plan contains no unfinished-work markers and no "similar to". The three places that move existing #577 code (Task 4.5 step 4, parts b) name the exact first and last statement of the moved block and are checked by #577's own unchanged `poller-wiring.test.ts`. Values that must be read at execution time are marked and come with the command that prints them: the action pins in Task 1.6 and `<RELEASE_SHA>` in Task 6.1.
