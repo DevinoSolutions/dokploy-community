@@ -21,10 +21,13 @@ import { loadGhcrCredentials } from "./store";
  * later ghcr.io pull on that host (any organization, any service) would reuse
  * it and where it would outlive the connection. Each watch gets a Docker config
  * dir of its own and only that service's pull / up is pointed at it
- * (`docker --config <dir>` / `DOCKER_CONFIG=<dir>`). The dir is deleted when the
- * connection is removed, the watch is removed or turned off, or the service goes
- * away. Docker has no per-repository credentials, so a login is also limited to
- * the images it is meant for: those under `ghcr.io/<watched owner>/`.
+ * (`docker --config <dir>` / `DOCKER_CONFIG=<dir>`). The dir is deleted as soon
+ * as the pull (application) or the pull / up (compose) that used it has ended,
+ * whether it worked or not, and again, as a fallback for a crash in between,
+ * when the connection is removed, the watch is removed or turned off, or the
+ * service goes away. Docker has no per-repository credentials, so a login is
+ * also limited to the images it is meant for: those under
+ * `ghcr.io/<watched owner>/`.
  */
 
 /** A watch's own docker config dir name; the id is a nanoid so it is path-safe. */
@@ -56,6 +59,42 @@ export const getGhcrWatchConfigDirRemovalCommand = (
 		return null;
 	}
 	return `rm -rf -- ${shEscape(dir)}`;
+};
+
+/**
+ * The command that deletes a watch's config dir given the path login() handed
+ * out, or null for any other path (it never becomes an `rm -rf` of anything
+ * but `<base>/docker-config/ghcr-<id>`).
+ */
+export const getGhcrConfigDirRemovalCommandForPath = (
+	dir: string | undefined | null,
+): string | null => {
+	if (!dir || !/^\/[^\0\n]*\/docker-config\/ghcr-[A-Za-z0-9_-]+$/.test(dir)) {
+		return null;
+	}
+	return `rm -rf -- ${shEscape(dir)}`;
+};
+
+/**
+ * Delete one watch's config dir right after the pull / up that used it, on the
+ * host it was made on. Best effort and never throws: the fallback cleanup
+ * (disconnect, watch off, service gone) still covers a failure here.
+ */
+export const removeGhcrConfigDir = async (
+	dir: string | undefined | null,
+	serverId: string | null | undefined,
+): Promise<void> => {
+	const command = getGhcrConfigDirRemovalCommandForPath(dir);
+	if (!command) return;
+	try {
+		if (serverId) await execAsyncRemote(serverId, command);
+		else await execAsync(command);
+	} catch (error) {
+		console.warn(
+			"GitHub deployments: could not remove the docker config dir after the pull:",
+			error instanceof Error ? error.message : "unknown error",
+		);
+	}
 };
 
 /**

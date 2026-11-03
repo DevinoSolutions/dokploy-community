@@ -48,6 +48,7 @@ import {
 	loadGhcrCredentials,
 	patchGithubWatch,
 	presentGithubWatch,
+	upsertGithubConnection,
 	upsertGithubWatch,
 } from "@dokploy/server/services/github-deployments/store";
 
@@ -244,5 +245,25 @@ describe("the ghcr credentials", () => {
 			registryUrl: "ghcr.io",
 			username: "amin",
 		});
+	});
+});
+
+describe("reconnecting an account", () => {
+	it("re-takes the connection for the member who ran the flow but never changes whether it is shared", async () => {
+		await upsertGithubConnection({
+			organizationId: "org-a",
+			createdByUserId: "user-2",
+			githubLogin: "amin",
+			githubUserId: "123",
+			scopes: "repo_deployment,read:packages",
+			accessToken: "gho_new",
+		});
+		expect(mocks.upsertSet).toMatchObject({
+			createdByUserId: "user-2",
+			status: "active",
+		});
+		// An owner who shared the account does not lose the share by reconnecting,
+		// and a reconnect never shares an account on its own.
+		expect(mocks.upsertSet).not.toHaveProperty("sharedWithOrganization");
 	});
 });

@@ -10,6 +10,7 @@ describe("GitHub Deployments MCP tools", () => {
 		"githubDeployment-startConnect",
 		"githubDeployment-completeConnect",
 		"githubDeployment-disconnect",
+		"githubDeployment-toggleShare",
 		"githubDeployment-watches",
 		"githubDeployment-watchOne",
 		"githubDeployment-watchSet",
@@ -37,6 +38,7 @@ describe("GitHub Deployments MCP tools", () => {
 			"githubDeployment-startConnect",
 			"githubDeployment-completeConnect",
 			"githubDeployment-disconnect",
+			"githubDeployment-toggleShare",
 			"githubDeployment-watchSet",
 			"githubDeployment-watchRemove",
 		]) {
@@ -58,6 +60,22 @@ describe("GitHub Deployments MCP tools", () => {
 		expect(byName.get("githubDeployment-connections")?.description).toContain(
 			"access token is never returned",
 		);
+	});
+
+	it("describe the ownership and two-deployer rules", () => {
+		expect(byName.get("githubDeployment-toggleShare")?.description).toContain(
+			"Only the member who connected it",
+		);
+		expect(byName.get("githubDeployment-disconnect")?.description).toContain(
+			"organization owner or admin",
+		);
+		const watchSet = byName.get("githubDeployment-watchSet");
+		expect(watchSet?.description).toContain("override");
+		expect(
+			Object.keys(
+				(watchSet?.inputSchema.properties as Record<string, unknown>) ?? {},
+			),
+		).toContain("override");
 	});
 
 	it("describe the digest rule on the watch tool", () => {

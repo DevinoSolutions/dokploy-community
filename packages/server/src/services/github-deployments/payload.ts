@@ -1,3 +1,5 @@
+import { normalizeBuildRunUrl, parseBuildRunUrl } from "../build-origin-shared";
+
 /**
  * The payload a workflow puts on a GitHub Deployment to ask Dokploy to deploy:
  *
@@ -72,14 +74,25 @@ export const parsePinnedImage = (
 	return { image: `${repository}@${digest}`, repository, digest };
 };
 
-const RUN_URL =
-	/^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/actions\/runs\/[0-9]+(?:\/(?:attempts\/[0-9]+|job\/[0-9]+))?$/;
-
-/** A GitHub Actions run link, normalized (no query, fragment or trailing slash); else undefined. */
-export const normalizeRunUrl = (value: unknown): string | undefined => {
-	if (typeof value !== "string") return undefined;
-	const bare = value.trim().split(/[?#]/)[0]?.replace(/\/+$/, "") ?? "";
-	return RUN_URL.test(bare) ? bare : undefined;
+/**
+ * The run link a payload may carry: a valid github.com Actions run link (the
+ * same check the deploy API applies, normalizeBuildRunUrl) of the repository
+ * the watch follows. A link to another repository is dropped: it would put a
+ * foreign run in the deployment's history as the build of this image.
+ */
+export const watchedRunUrl = (
+	value: unknown,
+	watched: { owner: string; repo: string },
+): string | undefined => {
+	const parts = parseBuildRunUrl(value);
+	if (!parts) return undefined;
+	if (
+		parts.repository.toLowerCase() !==
+		`${watched.owner}/${watched.repo}`.toLowerCase()
+	) {
+		return undefined;
+	}
+	return normalizeBuildRunUrl(value) ?? undefined;
 };
 
 /**
@@ -93,6 +106,7 @@ export const normalizeRunUrl = (value: unknown): string | undefined => {
 export const parseDeploymentPayload = (
 	raw: unknown,
 	serviceId: string,
+	watched: { owner: string; repo: string },
 ): ParsedPayload => {
 	const payload = readDeploymentPayload(raw);
 	const dokploy = asObject(payload?.dokploy);
@@ -111,7 +125,10 @@ export const parseDeploymentPayload = (
 				"dokploy.image must be <repository>@sha256:<64 hex>; an image that is not pinned by digest is never deployed",
 		};
 	}
-	const buildRunUrl = normalizeRunUrl(dokploy.runUrl ?? dokploy.buildRunUrl);
+	const buildRunUrl = watchedRunUrl(
+		dokploy.runUrl ?? dokploy.buildRunUrl,
+		watched,
+	);
 	return {
 		kind: "deploy",
 		image: pinned.image,

@@ -1,10 +1,22 @@
 import { db } from "@dokploy/server/db";
+import { deployments } from "@dokploy/server/db/schema/deployment";
 import {
 	type GithubWatchServiceType,
 	githubDeploymentConnection,
 	githubDeploymentWatch,
 } from "@dokploy/server/db/schema/github-deployment";
-import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
+import {
+	and,
+	desc,
+	eq,
+	gte,
+	inArray,
+	isNull,
+	like,
+	lt,
+	not,
+	or,
+} from "drizzle-orm";
 
 /**
  * Database access for the GitHub Deployments pull flow.
@@ -23,6 +35,7 @@ export const presentGithubConnection = (row: GithubConnectionRow) => ({
 	connectionId: row.connectionId,
 	githubLogin: row.githubLogin,
 	scopes: row.scopes ? row.scopes.split(",") : [],
+	sharedWithOrganization: row.sharedWithOrganization,
 	status: row.status,
 	lastError: row.lastError,
 	createdAt: row.createdAt,
@@ -45,18 +58,37 @@ export const presentGithubWatch = (row: GithubWatchRecord) => ({
 	createdAt: row.createdAt,
 });
 
-export const listGithubConnections = async (organizationId: string) => {
+/**
+ * What the router needs to decide who may see or use a connection: the
+ * presentable fields plus its owner. Never sent to a client as is (the owner
+ * is dropped by `visibleGithubConnections`), and never carries the token.
+ */
+export type GithubConnectionRecord = ReturnType<
+	typeof presentGithubConnection
+> & { createdByUserId: string | null };
+
+const toConnectionRecord = (
+	row: GithubConnectionRow,
+): GithubConnectionRecord => ({
+	...presentGithubConnection(row),
+	createdByUserId: row.createdByUserId,
+});
+
+/** Every connection of the organization; the caller filters them by viewer. */
+export const listGithubConnectionRecords = async (
+	organizationId: string,
+): Promise<GithubConnectionRecord[]> => {
 	const rows = await db
 		.select()
 		.from(githubDeploymentConnection)
 		.where(eq(githubDeploymentConnection.organizationId, organizationId));
-	return rows.map(presentGithubConnection);
+	return rows.map(toConnectionRecord);
 };
 
 export const findGithubConnectionInOrganization = async (
 	connectionId: string,
 	organizationId: string,
-) => {
+): Promise<GithubConnectionRecord | null> => {
 	const [row] = await db
 		.select()
 		.from(githubDeploymentConnection)
@@ -66,6 +98,25 @@ export const findGithubConnectionInOrganization = async (
 				eq(githubDeploymentConnection.organizationId, organizationId),
 			),
 		);
+	return row ? toConnectionRecord(row) : null;
+};
+
+/** Share a connection with the organization or take it back (the router checks who may). */
+export const setGithubConnectionShared = async (
+	connectionId: string,
+	organizationId: string,
+	sharedWithOrganization: boolean,
+) => {
+	const [row] = await db
+		.update(githubDeploymentConnection)
+		.set({ sharedWithOrganization })
+		.where(
+			and(
+				eq(githubDeploymentConnection.connectionId, connectionId),
+				eq(githubDeploymentConnection.organizationId, organizationId),
+			),
+		)
+		.returning();
 	return row ? presentGithubConnection(row) : null;
 };
 
@@ -362,4 +413,54 @@ export const loadGhcrCredentials = async (
 		username: row.githubLogin,
 		password: row.accessToken,
 	};
+};
+
+/** A GitHub Actions deployment of a service this recent counts as "the action deploys it". */
+export const OTHER_DEPLOYER_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The title ending that marks a Dokploy deployment started by the poller
+ * ("... [deployment #<GitHub deployment id>]"). Those rows are this feature's
+ * own, not a second deployer.
+ */
+export const GITHUB_DEPLOYMENT_HANDLE_LIKE = "% [deployment #%]";
+
+/**
+ * Another deployer on this service: a deployment row of the last 24 hours that
+ * the dokploy-deploy action sent (a live row registered while GitHub builds, or
+ * any row with build origin github-actions), other than the ones this poller
+ * started. Setting up a watch on such a service makes two writers of its image;
+ * the router refuses unless asked to override.
+ */
+export const findRecentOtherGithubDeployer = async (
+	serviceType: GithubWatchServiceType,
+	serviceId: string,
+	now: number = Date.now(),
+) => {
+	const [row] = await db
+		.select({
+			title: deployments.title,
+			createdAt: deployments.createdAt,
+			externalBuildOnly: deployments.externalBuildOnly,
+		})
+		.from(deployments)
+		.where(
+			and(
+				serviceType === "application"
+					? eq(deployments.applicationId, serviceId)
+					: eq(deployments.composeId, serviceId),
+				gte(
+					deployments.createdAt,
+					new Date(now - OTHER_DEPLOYER_WINDOW_MS).toISOString(),
+				),
+				or(
+					eq(deployments.externalBuildOnly, true),
+					eq(deployments.buildOrigin, "github-actions"),
+				),
+				not(like(deployments.title, GITHUB_DEPLOYMENT_HANDLE_LIKE)),
+			),
+		)
+		.orderBy(desc(deployments.createdAt))
+		.limit(1);
+	return row ?? null;
 };

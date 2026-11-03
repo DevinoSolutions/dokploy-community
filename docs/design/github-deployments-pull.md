@@ -96,15 +96,41 @@ app has no client secret and its tokens do not expire.
 
 4. The token is stored in `github_deployment_connection.accessToken`, an
    `encryptedText` column (AES-256-GCM through `lib/encryption.ts`, the same
-   helper that protects other provider secrets). The connection belongs to the
-   organization, shows the GitHub login and the granted scopes, and has a
-   Disconnect button. Disconnect deletes the row, and with it every watch that
+   helper that protects other provider secrets). The connection is **its
+   owner's**, the member who ran the flow (`createdByUserId`): see "Who may use
+   a connection" below. It shows the GitHub login and the granted scopes, and has
+   a Disconnect button. Disconnect deletes the row, and with it every watch that
    used it. (GitHub's side of the grant can only be revoked by the user, under
    Settings > Applications, because revoking needs the client secret the app does
    not have.)
 
 The token is never part of any tRPC output, so never part of an MCP tool result.
 `presentGithubConnection` is the only shape that leaves the server.
+
+### Who may use a connection
+
+The token can pull its owner's private GHCR packages, so a connection is not an
+organization-wide resource: letting any member with `gitProviders.create` bind
+any connection of the organization to a service they can deploy would let them
+spend another member's token (a confused deputy). The model is the one Git
+providers have (`routers/git-provider.ts`, `getAccessibleGitProviderIds`),
+implemented as pure functions in `github-deployments/connection-access.ts`:
+
+| | owner of the connection | other member | organization owner / admin |
+| --- | --- | --- | --- |
+| see it in `connections` | yes | only if shared | all of them |
+| bind it with `watchSet` | yes | only if shared | yes |
+| remove it with `disconnect` | yes | no | yes |
+| share it with `toggleShare` | yes | no | no (only the owner) |
+
+`sharedWithOrganization` (column on the connection, default false) is the
+owner's switch for letting every member bind it. `watchSet` checks the
+connection on every call, also when the watch already uses it: being allowed to
+deploy a service is not being allowed to spend another member's token. Reconnecting
+the same GitHub account (the same `githubUserId`) makes the member who ran the
+flow its owner, and leaves the sharing switch as it was. A connection with no
+recorded owner (none exist today) belongs to nobody and is usable by owners and
+admins only.
 
 ## 2. Watch per service
 
@@ -115,7 +141,7 @@ error 54023).
 | column                  | meaning                                                       |
 | ----------------------- | ------------------------------------------------------------- |
 | `serviceType`, `serviceId` | `application` or `compose`, and its id (unique together)   |
-| `connectionId`          | which GitHub account to use                                   |
+| `connectionId`          | which GitHub account to use (one the caller may use)          |
 | `owner`, `repo`         | the repository to follow                                      |
 | `environment`           | GitHub environment name, default `production`                 |
 | `enabled`               | switch                                                        |
@@ -130,7 +156,9 @@ and a `status` (`active`, or `revoked` after GitHub answers 401).
 
 Migration `0228_github_deployment_watch` is additive and idempotent
 (`CREATE TABLE IF NOT EXISTS`, constraints in `DO $$ ... EXCEPTION` blocks), so it
-passes `__test__/db/migration-idempotency.test.ts`. Canary already uses 0225 to 0227
+passes `__test__/db/migration-idempotency.test.ts`. Constraint names are kept
+within Postgres's 63 bytes (the watch's foreign key to the connection is named by
+hand: `github_deployment_watch_connectionId_fk`). Canary already uses 0225 to 0227
 (PR #576 and later); if the merge order differs, renumber (the file name, the journal entry
 and the snapshot).
 
@@ -144,9 +172,20 @@ the watch before it was disabled and enabled again cannot write its stale cursor
 ETag or progress over the reset, and stops its pass. Owner and repository names
 may not be `.` or `..` (they would walk out of `/repos/` in the API URL).
 
-The column `postLogUrl` is part of migration 0228 (the PR is unmerged, so the
-migration is edited in place; an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` makes
-it safe on a database that already ran an earlier 0226 of this branch).
+The columns `postLogUrl` and `sharedWithOrganization` are part of migration 0228
+(the PR is unmerged, so the migration is edited in place; an
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` makes it safe on a database that already
+ran an earlier 0226 of this branch).
+
+**One deployer per service.** The dokploy-deploy action (T-12149) also deploys a
+service by pushing to Dokploy. A service that both the action and a watch deploy
+has two writers of its image. `watchSet` therefore refuses with a conflict when
+the service has a deployment of the last 24 hours that the action sent (a live row
+registered while GitHub builds, or build origin `github-actions`), other than the
+ones the poller itself started (titles ending `[deployment #<id>]`). Send
+`override: true` to go on anyway; it is not stored. The check does not run for a
+watch that is already on (it is the pull deployer itself) or for one being turned
+off, and does run again when a disabled watch is turned back on.
 
 ## 3. The poller
 
@@ -166,7 +205,7 @@ Per enabled watch, every 20 seconds:
 1. **Skip** if the watch or its connection is backed off (below), or the token is
    missing or revoked.
 2. **In flight?** If a GitHub deployment is being deployed, look only at that:
-   - the Dokploy deployment (found by its title `GHA GitHub deployment #<id>`)
+   - the Dokploy deployment (found by the `[deployment #<id>]` ending of its title)
      is `done` -> `success`; `error` -> `failure`; `cancelled` -> `failure`;
    - still running or waiting in the queue -> wait;
    - running for more than 90 minutes -> `failure` ("did not finish in time");
@@ -233,18 +272,23 @@ It is the normal Dokploy deploy, not a special path.
   deployment queue. (The queue's `pinnedImage` was not used: it deploys through
   the build-policy path, which does not persist `dockerImage`, waits for required
   checks and takes registry credentials from the organization's registries, and it
-  does not exist for compose.) The job title is `GHA GitHub deployment #<id>` (the `GHA `
-  prefix is what Dokploy already reads as "built by GitHub Actions").
+  does not exist for compose.) The job title is
+  `GHA <environment> <sha8> [deployment #<id>]`, the shape the action uses
+  (`GHA <env> <sha8> ...`), so the GitHub Actions pill and the run modal read the
+  environment and the commit from it (`parseGithubActionsTitle`). The poller finds
+  its deployment by the trailing `[deployment #<id>]` handle alone, so the rest of
+  the title is free to change.
 - **Compose** (file stored in Dokploy): the digest on the single
   `image: <repository>@sha256:...` line is replaced and nothing else changes
   (`pinComposeImage`, the rule of `deploy.sh`'s `render`: exactly one pinned line
   for that repository, the old reference occurring exactly once), written in the
   same transaction, then a regular `deploy` job.
-- **Build origin** (PR #576, T-12149): the job also carries `buildOrigin:
-  "github-actions"` and `buildRunUrl` (from `payload.dokploy.runUrl` when it is a
-  valid `https://github.com/<o>/<r>/actions/runs/<id>` link). Until #576 is
-  merged the queue ignores those two fields (`TODO(T-12149)` in the poller), and
-  the `GHA ` title already lets Dokploy infer the origin.
+- **Build origin** (T-12149): the job also carries `buildOrigin:
+  "github-actions"` and `buildRunUrl`, built with `buildOriginJobFields` like the
+  deploy API's. The run link comes from `payload.dokploy.runUrl`, is checked with
+  the same `normalizeBuildRunUrl`, and must be a run of the **watched**
+  `owner/repo` (case-insensitive); a link to any other repository is dropped, so
+  a deployment cannot put a foreign run in the history as the build of this image.
 - **Private GHCR images**: the watch's connection supplies the login (username =
   the GitHub login, password = the token), read at pull time, for images under
   `ghcr.io/<watched owner>/` only. An application's swarm service is created with
@@ -263,8 +307,11 @@ It is the normal Dokploy deploy, not a special path.
   `docker login` would give the ghcr token to the host's shared store), so
   `credsStore` / `credHelpers` are renamed to inert keys in the copy: logins a host
   keeps in a helper are not visible to a watched deploy. Hosts set up by Dokploy
-  have none. The directory is
-  deleted when the connection is removed, the watch is removed or turned off, or
+  have none. **Residency of the token on the host:** the directory is deleted as
+  soon as the pull (application) or the pull / up (compose, in a `finally`, so a
+  failed deploy too) that used it has ended, on the host that made it. Only a crash
+  between the login and that cleanup leaves it, and then it is deleted by the
+  fallback: when the connection is removed, the watch is removed or turned off, or
   its service is deleted (on this host and on every server of the organization,
   best effort). The token is not stored on the service and never put in argv or a
   log (`runDockerLogin` feeds it on stdin and redacts failures). Docker has no
@@ -316,13 +363,14 @@ descriptions from `.meta({ openapi: { description } })`.
 
 | tool | scope | does |
 | ---- | ----- | ---- |
-| `githubDeployment-connections` | read | login, scopes, status, last error. Never the token |
+| `githubDeployment-connections` | read | the connections you may use (yours, shared, all for an owner/admin): login, scopes, `sharedWithOrganization`, `isOwner`, status, last error. Never the token |
+| `githubDeployment-toggleShare` | admin | share a connection with the organization, or take it back (its owner only) |
 | `githubDeployment-startConnect` | admin | begin the device flow: `flowId`, `userCode`, `verificationUri` |
 | `githubDeployment-completeConnect` | admin | poll it: `pending`, `connected`, `expired`, `denied`, `failed` |
-| `githubDeployment-disconnect` | admin | delete the connection and its token |
+| `githubDeployment-disconnect` | admin | delete the connection and its token (its owner, or an owner/admin) |
 | `githubDeployment-watches` | read | the watches of the organization (a member only sees the services they have access to) |
 | `githubDeployment-watchOne` | read | one service's watch |
-| `githubDeployment-watchSet` | admin | create / change / disable a watch |
+| `githubDeployment-watchSet` | admin | create / change / disable a watch (with a connection you may use; `override` to proceed past a second deployer) |
 | `githubDeployment-watchRemove` | admin | stop following |
 
 Connect and disconnect use the existing `gitProviders` permissions. Setting or
@@ -330,9 +378,11 @@ removing a watch needs `gitProviders.create` (read access to git providers is no
 enough: a watch lets a repository drive a deploy with that GitHub account's
 token), `deployment.create` and `service.create` on the service. The `watches`
 list is filtered by the member's `accessedServices` like the other service lists.
-Connections and watches are checked against the caller's organization.
+Connections and watches are checked against the caller's organization, and a
+connection also against the caller (see "Who may use a connection").
 Disconnecting also deletes the docker login of every watch that used the
-connection.
+connection. Every request to GitHub (the device flow, the poll, the status posts)
+is cut off after 15 seconds.
 
 ## Security model
 
@@ -364,6 +414,8 @@ connection.
   `ghcr.io/<watched owner>/`, never for any other ghcr.io image a service runs,
   and only through the watch's own Docker config directory (see "How the deploy
   runs").
+- **Whose token.** A member can bind only a connection they own, or one its
+  owner shared; owners and admins any. Binding is checked on every `watchSet`.
 - **Token handling.** Encrypted at rest; never returned by tRPC or MCP, never in
   a log line, argv, status or URL (tests assert it). Read only by the poller, the
   GHCR pull and the `docker login` helper. Disconnect deletes it.
@@ -387,6 +439,7 @@ connection.
 | token revoked or expired | `401`: connection `revoked`, UI asks to reconnect, watches pause |
 | repository renamed, deleted, or account lost access | `404`: error shown on the watch, retried every 5 minutes |
 | service deleted | a deployment in flight is answered `failure`, then the watch and its docker login are removed on the next tick |
+| one watch's database or service lookup fails | logged, that watch is skipped for this tick; the other watches are still polled |
 | payload for another service | ignored, no status |
 | unpinned / foreign image for this service | `failure` status with the reason |
 | deploy fails or is cancelled in Dokploy | `failure` status with the log link |

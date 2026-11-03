@@ -3,6 +3,7 @@ import {
 	compose,
 	githubDeploymentWatch,
 } from "@dokploy/server/db/schema";
+import { parseGithubActionsTitle } from "@dokploy/server/services/build-origin-shared";
 import type { WatchRow } from "@dokploy/server/services/github-deployments";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { scriptedFetch } from "./helpers";
@@ -126,7 +127,11 @@ const payload = {
 	repository: REPO,
 	digest: DIGEST_NEW,
 };
-const deployment = { id: 120 };
+const deployment = {
+	id: 120,
+	sha: "0123456789abcdef0123456789abcdef01234567",
+	environment: "production",
+};
 
 const watchRow = (overrides: Partial<WatchRow> = {}): WatchRow => ({
 	watchId: "w1",
@@ -235,7 +240,7 @@ describe("startDeploy: application", () => {
 			applicationId: "app-1",
 			applicationType: "application",
 			type: "deploy",
-			titleLog: poller.githubDeploymentTitle(120),
+			titleLog: poller.githubDeploymentTitle(watch, deployment),
 		});
 	});
 
@@ -449,11 +454,114 @@ describe("inspectInflight", () => {
 	it("is running while the job still waits in the queue, and missing when it does not", async () => {
 		mocks.selectRows = [];
 		mocks.getJobs.mockResolvedValue([
-			{ data: { titleLog: poller.githubDeploymentTitle(120) } },
+			{
+				data: {
+					titleLog: poller.githubDeploymentTitle(watchRow(), deployment),
+				},
+			},
 		]);
 		expect((await deps().inspectInflight(inflight())).state).toBe("running");
 		mocks.getJobs.mockResolvedValue([]);
 		expect((await deps().inspectInflight(inflight())).state).toBe("missing");
+	});
+});
+
+describe("the Dokploy deployment title", () => {
+	it("has the shape the dokploy-deploy action uses, so the GitHub Actions pill reads the environment and the commit", () => {
+		const title = poller.githubDeploymentTitle(watchRow(), deployment);
+		expect(title).toBe("GHA production 01234567 [deployment #120]");
+		expect(parseGithubActionsTitle(title)).toEqual({
+			buildCommitSha: "01234567",
+			buildEnvironment: "production",
+			buildRunId: null,
+		});
+	});
+
+	it("uses the watch's environment when GitHub sent none, and makes an odd one a single word", () => {
+		expect(
+			poller.githubDeploymentTitle(watchRow({ environment: "staging blue" }), {
+				id: 7,
+				sha: "ABCDEF1234",
+			}),
+		).toBe("GHA staging-blue abcdef12 [deployment #7]");
+		const parsed = parseGithubActionsTitle(
+			poller.githubDeploymentTitle(watchRow({ environment: "eu / prod!" }), {
+				id: 7,
+				sha: "abcdef1234",
+			}),
+		);
+		expect(parsed.buildCommitSha).toBe("abcdef12");
+		expect(parsed.buildEnvironment).toBe("eu-/-prod-");
+	});
+
+	it("still parses when GitHub sent no usable sha", () => {
+		const title = poller.githubDeploymentTitle(watchRow(), {
+			id: 7,
+			sha: "not-a-sha",
+		});
+		expect(title).toBe("GHA production [deployment #7]");
+		expect(parseGithubActionsTitle(title)).toMatchObject({
+			buildEnvironment: "production",
+			buildCommitSha: null,
+		});
+	});
+
+	it("ends with a handle that never matches another GitHub deployment's id", () => {
+		expect(poller.githubDeploymentHandle(120)).toBe("[deployment #120]");
+		expect("GHA production 01234567 [deployment #1120]").not.toMatch(
+			/\[deployment #120\]$/,
+		);
+	});
+
+	it("the job carries github-actions as build origin, and the run link only when valid", async () => {
+		await deps().startDeploy(watchRow(), deployment, payload);
+		const without = mocks.queueAdd.mock.calls[0]?.[1] as Record<
+			string,
+			unknown
+		>;
+		expect(without).toMatchObject({ buildOrigin: "github-actions" });
+		expect(without).not.toHaveProperty("buildRunUrl");
+
+		mocks.queueAdd.mockClear();
+		mocks.lockedRow = lockedFor(watchRow());
+		await deps().startDeploy(watchRow(), deployment, {
+			...payload,
+			buildRunUrl: "https://github.com/DevinoSolutions/sendly/actions/runs/9",
+		});
+		expect(mocks.queueAdd.mock.calls[0]?.[1]).toMatchObject({
+			buildOrigin: "github-actions",
+			buildRunUrl: "https://github.com/DevinoSolutions/sendly/actions/runs/9",
+		});
+	});
+
+	it("a compose job carries it too", async () => {
+		const watch = watchRow({ serviceType: "compose", serviceId: "c-1" });
+		mocks.lockedRow = lockedFor(watch);
+		await deps().startDeploy(watch, deployment, payload);
+		expect(mocks.queueAdd.mock.calls[0]?.[1]).toMatchObject({
+			composeId: "c-1",
+			applicationType: "compose",
+			buildOrigin: "github-actions",
+			titleLog: "GHA production 01234567 [deployment #120]",
+		});
+	});
+
+	it("a waiting job is found by the handle alone, not by a longer id", async () => {
+		mocks.selectRows = [];
+		const inflight = {
+			...watchRow({
+				inflightDeploymentId: 120,
+				inflightStartedAt: new Date("2026-11-03T10:00:00Z"),
+			}),
+		};
+		mocks.getJobs.mockResolvedValue([
+			{ data: { titleLog: "GHA production 01234567 [deployment #1120]" } },
+		]);
+		expect((await deps().inspectInflight(inflight)).state).toBe("missing");
+		mocks.getJobs.mockResolvedValue([
+			{ data: { titleLog: "GHA production 99999999 [deployment #120]" } },
+		]);
+		expect((await deps().inspectInflight(inflight)).state).toBe("running");
 	});
 });
 
@@ -499,6 +607,42 @@ describe("the tick", () => {
 		await poller.runGithubDeploymentsTick({ ...deps(), fetch });
 		expect(calls).toHaveLength(0);
 		expect(mocks.deleteGithubWatch).toHaveBeenCalled();
+	});
+
+	it("one watch failing does not end the tick for the watches after it", async () => {
+		mocks.listEnabledGithubWatches.mockResolvedValue([
+			record(),
+			record({ watchId: "w2", serviceId: "app-2" }),
+		]);
+		mocks.appFindFirst
+			.mockRejectedValueOnce(new Error("db down"))
+			.mockResolvedValueOnce(undefined);
+		const log = vi.fn();
+		await poller.runGithubDeploymentsTick({ ...deps(), log });
+
+		expect(log).toHaveBeenCalledWith(expect.stringContaining("w1"));
+		expect(log).toHaveBeenCalledWith(expect.stringContaining("db down"));
+		// The second watch was still looked at (its service is gone here, so it is dropped).
+		expect(mocks.deleteGithubWatch).toHaveBeenCalledTimes(1);
+		expect(mocks.deleteGithubWatch).toHaveBeenCalledWith(
+			"application",
+			"app-2",
+		);
+	});
+
+	it("a failure while cleaning up a gone service stays with that watch", async () => {
+		mocks.listEnabledGithubWatches.mockResolvedValue([
+			record(),
+			record({ watchId: "w2", serviceId: "app-2" }),
+		]);
+		mocks.appFindFirst.mockResolvedValue(undefined);
+		mocks.deleteGithubWatch
+			.mockRejectedValueOnce(new Error("delete failed"))
+			.mockResolvedValueOnce(undefined);
+		const log = vi.fn();
+		await poller.runGithubDeploymentsTick({ ...deps(), log });
+		expect(mocks.deleteGithubWatch).toHaveBeenCalledTimes(2);
+		expect(log).toHaveBeenCalledWith(expect.stringContaining("delete failed"));
 	});
 
 	it("does not start on another watch once told to stop", async () => {

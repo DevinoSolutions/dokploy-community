@@ -25,6 +25,7 @@ vi.mock("@dokploy/server/services/registry", () => ({
 vi.mock("@dokploy/server/utils/aws/ecr", () => ({ getECRAuthToken: vi.fn() }));
 
 import { getSafeRegistryLoginCommand } from "@dokploy/server/db/schema";
+import { getGhcrConfigDirRemovalCommandForPath } from "@dokploy/server/services/github-deployments/registry-auth";
 import { getCleanEnvPrefix as cleanPrefix } from "@dokploy/server/utils/builders/compose";
 import { getRollingReplaceScript } from "@dokploy/server/utils/builders/compose-rolling";
 import {
@@ -66,6 +67,31 @@ describe("application pull", () => {
 		expect(command).toContain(
 			`docker --config ${quote([dir])} pull ${quote([IMAGE])}`,
 		);
+	});
+
+	it("deletes the watch's dir once the pull has ended: after a pull that worked and before the exit of one that failed", async () => {
+		const command = await buildRemoteDocker(application(), null);
+		const dir = mocks.runDockerLogin.mock.calls[0]?.[0].configDir as string;
+		const rm = `${getGhcrConfigDirRemovalCommandForPath(dir)};`;
+		expect(command.split(rm)).toHaveLength(3);
+		const pull = command.indexOf(" pull ");
+		const failedBranch = command.indexOf("Pulling image failed");
+		const exit = command.indexOf("exit 1");
+		// failure branch: removal sits between the message and the exit.
+		expect(command.indexOf(rm, failedBranch)).toBeGreaterThan(failedBranch);
+		expect(command.indexOf(rm, failedBranch)).toBeLessThan(exit);
+		// success path: a second removal after the whole pull command.
+		expect(command.lastIndexOf(rm)).toBeGreaterThan(exit);
+		expect(command.lastIndexOf(rm)).toBeGreaterThan(pull);
+		expect(command.lastIndexOf(rm)).toBeLessThan(
+			command.indexOf("Pulling image completed"),
+		);
+	});
+
+	it("deletes nothing when no GitHub login was made", async () => {
+		mocks.loadGhcrCredentials.mockResolvedValue(null);
+		const command = await buildRemoteDocker(application(), null);
+		expect(command).not.toContain("rm -rf");
 	});
 
 	it("the login command itself names --config: nothing is written to the default config", async () => {

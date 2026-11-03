@@ -1,20 +1,27 @@
 import {
 	beginGithubConnect,
+	canRemoveGithubConnection,
+	canUseGithubConnection,
+	createGithubFetch,
 	deleteGithubConnection,
 	deleteGithubWatch,
 	findApplicationById,
 	findComposeById,
 	findGithubConnectionInOrganization,
 	findGithubWatch,
+	findRecentOtherGithubDeployer,
 	IS_CLOUD,
-	listGithubConnections,
+	listGithubConnectionRecords,
 	listGithubWatchesForConnection,
 	listGithubWatchesForOrganization,
+	ownsGithubConnection,
 	presentGithubWatch,
 	progressGithubConnect,
 	removeGhcrWatchConfigDirs,
+	setGithubConnectionShared,
 	upsertGithubConnection,
 	upsertGithubWatch,
+	visibleGithubConnections,
 } from "@dokploy/server";
 import {
 	checkServicePermissionAndAccess,
@@ -26,6 +33,7 @@ import { audit } from "@/server/api/utils/audit";
 import {
 	apiGithubDeploymentCompleteConnect,
 	apiGithubDeploymentDisconnect,
+	apiGithubDeploymentToggleShare,
 	apiGithubDeploymentWatchOne,
 	apiGithubDeploymentWatchSet,
 } from "@/server/db/schema";
@@ -46,10 +54,48 @@ const assertSelfHosted = () => {
 };
 
 const deps = () => ({
-	fetch: (url: string, init?: Parameters<typeof fetch>[1]) =>
-		fetch(url, init as RequestInit),
+	// Cut off after 15 s: a hung GitHub must not hold a dashboard call open.
+	fetch: createGithubFetch(),
 	now: () => Date.now(),
 });
+
+/** Who is calling, for the connection ownership rules (the role is the one in the active organization). */
+const viewerOf = (ctx: { user: { id: string; role: string } }) => ({
+	userId: ctx.user.id,
+	role: ctx.user.role,
+});
+
+/**
+ * A connection's token can pull its owner's private GHCR packages, so a
+ * connection is used and removed only by its owner, by an organization owner or
+ * admin, or (use only) by anyone when its owner shared it. See
+ * packages/server/src/services/github-deployments/connection-access.ts.
+ */
+const requireConnectionToUse = async (
+	ctx: Parameters<typeof viewerOf>[0] & {
+		session: { activeOrganizationId: string };
+	},
+	connectionId: string,
+) => {
+	const connection = await findGithubConnectionInOrganization(
+		connectionId,
+		ctx.session.activeOrganizationId,
+	);
+	if (!connection) {
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "GitHub connection not found",
+		});
+	}
+	if (!canUseGithubConnection(connection, viewerOf(ctx))) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message:
+				"This GitHub connection belongs to another member and is not shared with the organization",
+		});
+	}
+	return connection;
+};
 
 export const githubDeploymentRouter = createTRPCRouter({
 	connections: withPermission("gitProviders", "read")
@@ -58,11 +104,54 @@ export const githubDeploymentRouter = createTRPCRouter({
 				method: "GET",
 				path: "/githubDeployment.connections",
 				description:
-					"List the GitHub accounts this organization connected for GitHub Deployments (the device-flow connection used to deploy from GitHub Actions without Dokploy being reachable). Returns, per connection: connectionId, githubLogin, the OAuth scopes GitHub granted, status ('active' or 'revoked') and lastError. The access token is never returned.",
+					"List the GitHub accounts connected for GitHub Deployments (the device-flow connection used to deploy from GitHub Actions without Dokploy being reachable) that you may use: your own, the ones their owner shared with the organization, and every one for an organization owner or admin. Returns, per connection: connectionId, githubLogin, the OAuth scopes GitHub granted, sharedWithOrganization, isOwner, status ('active' or 'revoked') and lastError. The access token is never returned.",
 			},
 		})
 		.query(async ({ ctx }) => {
-			return await listGithubConnections(ctx.session.activeOrganizationId);
+			return visibleGithubConnections(
+				await listGithubConnectionRecords(ctx.session.activeOrganizationId),
+				viewerOf(ctx),
+			);
+		}),
+
+	toggleShare: withPermission("gitProviders", "create")
+		.meta({
+			openapi: {
+				method: "POST",
+				path: "/githubDeployment.toggleShare",
+				description:
+					"Share a GitHub connection with the organization, or take the share back. Only the member who connected it can. While shared, every member who can deploy a service may bind the connection to it, and its token then pulls that service's private GHCR images of the connected account, so share only an account whose packages the whole organization may deploy. Off by default.",
+			},
+		})
+		.input(apiGithubDeploymentToggleShare)
+		.mutation(async ({ ctx, input }) => {
+			const connection = await findGithubConnectionInOrganization(
+				input.connectionId,
+				ctx.session.activeOrganizationId,
+			);
+			if (!connection) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "GitHub connection not found",
+				});
+			}
+			if (!ownsGithubConnection(connection, viewerOf(ctx))) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Only the member who connected this account can share it",
+				});
+			}
+			await audit(ctx, {
+				action: "update",
+				resourceType: "gitProvider",
+				resourceId: connection.connectionId,
+				resourceName: `GitHub Deployments: ${connection.githubLogin}`,
+			});
+			return await setGithubConnectionShared(
+				input.connectionId,
+				ctx.session.activeOrganizationId,
+				input.sharedWithOrganization,
+			);
 		}),
 
 	startConnect: withPermission("gitProviders", "create")
@@ -133,7 +222,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 				method: "POST",
 				path: "/githubDeployment.disconnect",
 				description:
-					"Remove a GitHub connection and the token stored for it. Every service watch that used the connection is removed with it, so those services stop following GitHub Deployments. To revoke the grant on GitHub's side too, remove 'Dokploy Community' under GitHub Settings > Applications.",
+					"Remove a GitHub connection and the token stored for it. Only the member who connected it or an organization owner or admin can. Every service watch that used the connection is removed with it, so those services stop following GitHub Deployments. To revoke the grant on GitHub's side too, remove 'Dokploy Community' under GitHub Settings > Applications.",
 			},
 		})
 		.input(apiGithubDeploymentDisconnect)
@@ -146,6 +235,12 @@ export const githubDeploymentRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "NOT_FOUND",
 					message: "GitHub connection not found",
+				});
+			}
+			if (!canRemoveGithubConnection(connection, viewerOf(ctx))) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "You can only remove your own GitHub connections",
 				});
 			}
 			await audit(ctx, {
@@ -224,7 +319,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 				method: "POST",
 				path: "/githubDeployment.watchSet",
 				description:
-					'Make an application or compose stack follow GitHub Deployments, or change/disable it. Dokploy then polls owner/repo for deployments of the given environment (default production) and deploys the ones whose payload is {"dokploy":{"serviceId":"<this service>","image":"<repository>@sha256:<64 hex>"}}. The image must be pinned by digest and be a new digest of the repository the service already runs. Existing deployments are never replayed: only ones created after this is set. Changing the repository, environment or connection, or turning a disabled watch back on, resets that starting point. When several deployments are waiting only the newest is deployed; the older ones are answered as inactive. Statuses sent to GitHub carry fixed text only; set postLogUrl to also send the Dokploy dashboard link as log_url (off by default). Needs the gitProviders and deployment create permissions plus create access to the service.',
+					'Make an application or compose stack follow GitHub Deployments, or change/disable it. Dokploy then polls owner/repo for deployments of the given environment (default production) and deploys the ones whose payload is {"dokploy":{"serviceId":"<this service>","image":"<repository>@sha256:<64 hex>"}}. The image must be pinned by digest and be a new digest of the repository the service already runs. Existing deployments are never replayed: only ones created after this is set. Changing the repository, environment or connection, or turning a disabled watch back on, resets that starting point. When several deployments are waiting only the newest is deployed; the older ones are answered as inactive. Statuses sent to GitHub carry fixed text only; set postLogUrl to also send the Dokploy dashboard link as log_url (off by default). Needs the gitProviders and deployment create permissions plus create access to the service, and a GitHub connection you may use (your own, one shared with the organization, or any for an owner or admin). Refused with a conflict when GitHub Actions deployed this service in the last 24 hours (or has a build live for it), because two deployers would write its image; send override true to proceed.',
 			},
 		})
 		.input(apiGithubDeploymentWatchSet)
@@ -249,17 +344,32 @@ export const githubDeploymentRouter = createTRPCRouter({
 					message: "Service not found",
 				});
 			}
-			const connection = await findGithubConnectionInOrganization(
-				input.connectionId,
-				organizationId,
-			);
-			if (!connection) {
-				throw new TRPCError({
-					code: "NOT_FOUND",
-					message: "GitHub connection not found",
-				});
+			// Also on an unchanged connection: being allowed to deploy a service is
+			// not being allowed to spend another member's GitHub token.
+			await requireConnectionToUse(ctx, input.connectionId);
+			// Two deployers: the dokploy-deploy action already pushes to this
+			// service. Both would write its image; refuse unless told to go on.
+			const { override, ...watchInput } = input;
+			if (watchInput.enabled && !override) {
+				const existing = await findGithubWatch(
+					input.serviceType,
+					input.serviceId,
+				);
+				// A watch that is already on is the pull deployer itself.
+				if (!existing?.enabled) {
+					const other = await findRecentOtherGithubDeployer(
+						input.serviceType,
+						input.serviceId,
+					);
+					if (other) {
+						throw new TRPCError({
+							code: "CONFLICT",
+							message: `This service was deployed by GitHub Actions in the last 24 hours ("${other.title}"). Following GitHub Deployments as well would give it two deployers writing its image. Switch the workflow to the Deployments flow first, or set override to true to continue.`,
+						});
+					}
+				}
 			}
-			const watch = await upsertGithubWatch({ ...input, organizationId });
+			const watch = await upsertGithubWatch({ ...watchInput, organizationId });
 			// A watch that is off has no use for a login on any host.
 			if (!watch.enabled) {
 				await removeGhcrWatchConfigDirs([watch.watchId], organizationId);

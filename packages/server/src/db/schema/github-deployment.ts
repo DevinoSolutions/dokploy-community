@@ -2,6 +2,7 @@ import { relations } from "drizzle-orm";
 import {
 	bigint,
 	boolean,
+	foreignKey,
 	pgTable,
 	text,
 	timestamp,
@@ -49,8 +50,20 @@ export const githubDeploymentConnection = pgTable(
 		organizationId: text("organizationId")
 			.notNull()
 			.references(() => organization.id, { onDelete: "cascade" }),
-		/** Dokploy user who ran the flow (informational, no foreign key). */
+		/**
+		 * Dokploy user who ran the flow: the connection's owner. A member may bind
+		 * or remove only their own connection (an owner or admin any), unless it is
+		 * shared with the organization (bind only). No foreign key.
+		 */
 		createdByUserId: text("createdByUserId"),
+		/**
+		 * The owner lets every member of the organization bind this connection to
+		 * a service they can deploy (same meaning as git_provider's flag). Off by
+		 * default: the token can pull the owner's private GHCR packages.
+		 */
+		sharedWithOrganization: boolean("sharedWithOrganization")
+			.notNull()
+			.default(false),
 		githubLogin: text("githubLogin").notNull(),
 		githubUserId: text("githubUserId").notNull(),
 		/** Comma separated scopes GitHub granted, from `X-OAuth-Scopes`. */
@@ -87,11 +100,7 @@ export const githubDeploymentWatch = pgTable(
 		serviceType: text("serviceType").$type<GithubWatchServiceType>().notNull(),
 		/** applicationId or composeId; polymorphic, so no foreign key. */
 		serviceId: text("serviceId").notNull(),
-		connectionId: text("connectionId")
-			.notNull()
-			.references(() => githubDeploymentConnection.connectionId, {
-				onDelete: "cascade",
-			}),
+		connectionId: text("connectionId").notNull(),
 		owner: text("owner").notNull(),
 		repo: text("repo").notNull(),
 		environment: text("environment").notNull().default("production"),
@@ -118,6 +127,13 @@ export const githubDeploymentWatch = pgTable(
 			table.serviceType,
 			table.serviceId,
 		),
+		// Named by hand: the generated name is 81 characters and Postgres cuts
+		// identifiers at 63.
+		foreignKey({
+			columns: [table.connectionId],
+			foreignColumns: [githubDeploymentConnection.connectionId],
+			name: "github_deployment_watch_connectionId_fk",
+		}).onDelete("cascade"),
 	],
 );
 
@@ -181,6 +197,18 @@ export const apiGithubDeploymentDisconnect = z.object({
 	connectionId: z.string().min(1).describe("The connection to remove."),
 });
 
+export const apiGithubDeploymentToggleShare = z.object({
+	connectionId: z
+		.string()
+		.min(1)
+		.describe("The connection to share or unshare."),
+	sharedWithOrganization: z
+		.boolean()
+		.describe(
+			"true lets every member of the organization bind this connection to a service they can deploy; false keeps it to its owner and the organization's owners and admins.",
+		),
+});
+
 export const apiGithubDeploymentWatchOne = z.object({
 	serviceType: z.enum(GITHUB_WATCH_SERVICE_TYPES),
 	serviceId: z.string().min(1).describe("applicationId or composeId."),
@@ -202,5 +230,11 @@ export const apiGithubDeploymentWatchSet = z.object({
 		.default(false)
 		.describe(
 			"Send the Dokploy dashboard link to GitHub as the deployment status log_url. Off by default: the link is internal.",
+		),
+	override: z
+		.boolean()
+		.default(false)
+		.describe(
+			"Set the watch even though a GitHub Actions build of this service is live or was sent to Dokploy in the last 24 hours (two deployers on one service). Not stored.",
 		),
 });

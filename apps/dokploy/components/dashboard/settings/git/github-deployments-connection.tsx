@@ -29,6 +29,12 @@ interface Flow {
 	intervalSeconds: number;
 }
 
+/** The server only hands out github.com pages; a link is rendered only for one. */
+const githubVerificationHref = (uri: string) =>
+	uri.startsWith("https://github.com/")
+		? uri
+		: "https://github.com/login/device";
+
 /**
  * "Connect GitHub" (device flow): lets a Dokploy that GitHub Actions cannot
  * reach pull deployments from GitHub instead. No GitHub App to create, no
@@ -240,7 +246,7 @@ export const GithubDeploymentsConnection = () => {
 											</code>
 											<Button asChild variant="outline" className="gap-2">
 												<a
-													href={flow.verificationUri}
+													href={githubVerificationHref(flow.verificationUri)}
 													target="_blank"
 													rel="noreferrer"
 												>

@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
 	},
 	/** A member the admin granted read access to git providers (legacy flag). */
 	memberMayReadGitProviders: false,
+	/** gitProviders actions a custom role gives a plain member (read, create, delete). */
+	memberGitProviderActions: [] as string[],
 	serviceOrganizationId: "org-a",
 	checkServicePermissionAndAccess: vi.fn(),
 	beginGithubConnect: vi.fn(),
@@ -17,7 +19,9 @@ const mocks = vi.hoisted(() => ({
 	findComposeById: vi.fn(),
 	findGithubConnectionInOrganization: vi.fn(),
 	findGithubWatch: vi.fn(),
-	listGithubConnections: vi.fn(),
+	findRecentOtherGithubDeployer: vi.fn(),
+	listGithubConnectionRecords: vi.fn(),
+	setGithubConnectionShared: vi.fn(),
 	listGithubWatchesForConnection: vi.fn(),
 	listGithubWatchesForOrganization: vi.fn(),
 	progressGithubConnect: vi.fn(),
@@ -51,6 +55,16 @@ vi.mock("@dokploy/server/services/permission", async () => {
 			if (privileged && onlyEnterprise) return;
 			if (
 				ctx.user.role === "member" &&
+				mocks.memberGitProviderActions.some(
+					(action) =>
+						JSON.stringify(permissions) ===
+						JSON.stringify({ gitProviders: [action] }),
+				)
+			) {
+				return;
+			}
+			if (
+				ctx.user.role === "member" &&
 				mocks.memberMayReadGitProviders &&
 				JSON.stringify(permissions) ===
 					JSON.stringify({ gitProviders: ["read"] })
@@ -73,8 +87,15 @@ vi.mock("@dokploy/server/services/permission", async () => {
 	};
 });
 
-vi.mock("@dokploy/server", () => ({
+// The real ownership rules decide who may bind, list, share and remove a
+// connection here, so "another member cannot use it" is a fact about the
+// product, not about a stub.
+vi.mock("@dokploy/server", async () => ({
+	...(await vi.importActual<object>(
+		"@dokploy/server/services/github-deployments/connection-access",
+	)),
 	IS_CLOUD: false,
+	createGithubFetch: () => vi.fn(),
 	beginGithubConnect: mocks.beginGithubConnect,
 	deleteGithubConnection: mocks.deleteGithubConnection,
 	deleteGithubWatch: mocks.deleteGithubWatch,
@@ -82,7 +103,9 @@ vi.mock("@dokploy/server", () => ({
 	findComposeById: mocks.findComposeById,
 	findGithubConnectionInOrganization: mocks.findGithubConnectionInOrganization,
 	findGithubWatch: mocks.findGithubWatch,
-	listGithubConnections: mocks.listGithubConnections,
+	findRecentOtherGithubDeployer: mocks.findRecentOtherGithubDeployer,
+	listGithubConnectionRecords: mocks.listGithubConnectionRecords,
+	setGithubConnectionShared: mocks.setGithubConnectionShared,
 	listGithubWatchesForConnection: mocks.listGithubWatchesForConnection,
 	listGithubWatchesForOrganization: mocks.listGithubWatchesForOrganization,
 	presentGithubWatch: (row: unknown) => row,
@@ -99,10 +122,11 @@ const { githubDeploymentRouter } = await import(
 const callerFor = (
 	role: "owner" | "admin" | "member",
 	organizationId = "org-a",
+	userId = "user-1",
 ) =>
 	githubDeploymentRouter.createCaller({
 		session: { activeOrganizationId: organizationId },
-		user: { id: "user-1", email: "u@example.com", role },
+		user: { id: userId, email: "u@example.com", role },
 	} as Parameters<typeof githubDeploymentRouter.createCaller>[0]);
 
 const setInput = {
@@ -115,6 +139,17 @@ const setInput = {
 	enabled: true,
 	postLogUrl: false,
 };
+const connection = (overrides: Record<string, unknown> = {}) => ({
+	connectionId: "conn-1",
+	githubLogin: "amin",
+	scopes: ["repo_deployment", "read:packages"],
+	status: "active",
+	lastError: null,
+	createdAt: new Date("2026-11-01T00:00:00Z"),
+	createdByUserId: "user-1",
+	sharedWithOrganization: false,
+	...overrides,
+});
 const watchRow = (overrides: Record<string, unknown> = {}) => ({
 	watchId: "w1",
 	organizationId: "org-a",
@@ -134,6 +169,7 @@ beforeEach(() => {
 	mocks.member.role = "member";
 	mocks.member.accessedServices = [];
 	mocks.memberMayReadGitProviders = false;
+	mocks.memberGitProviderActions = [];
 	mocks.serviceOrganizationId = "org-a";
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
 	mocks.findApplicationById.mockImplementation(async () => ({
@@ -144,10 +180,12 @@ beforeEach(() => {
 		composeId: "c-1",
 		environment: { project: { organizationId: mocks.serviceOrganizationId } },
 	}));
-	mocks.findGithubConnectionInOrganization.mockResolvedValue({
-		connectionId: "conn-1",
-		githubLogin: "amin",
-	});
+	mocks.findGithubConnectionInOrganization.mockResolvedValue(
+		connection({ connectionId: "conn-1", createdByUserId: "user-1" }),
+	);
+	mocks.findRecentOtherGithubDeployer.mockResolvedValue(null);
+	mocks.setGithubConnectionShared.mockResolvedValue({ connectionId: "conn-1" });
+	mocks.listGithubConnectionRecords.mockResolvedValue([]);
 	mocks.upsertGithubWatch.mockImplementation(async (input) =>
 		watchRow({ ...input }),
 	);
@@ -279,6 +317,266 @@ describe("watchSet and watchRemove need to be allowed to manage git providers AN
 		});
 		expect(mocks.deleteGithubWatch).not.toHaveBeenCalled();
 		expect(mocks.removeGhcrWatchConfigDirs).not.toHaveBeenCalled();
+	});
+});
+
+describe("a connection is its owner's: another member of the organization cannot spend its token", () => {
+	const ATTACKER = "user-attacker";
+	const VICTIM = "user-victim";
+	/** A member whose custom role may manage git providers (read, create, delete). */
+	const attacker = () => {
+		mocks.memberGitProviderActions = ["read", "create", "delete"];
+		return callerFor("member", "org-a", ATTACKER);
+	};
+	const victimsConnection = (overrides: Record<string, unknown> = {}) =>
+		connection({
+			connectionId: "conn-victim",
+			githubLogin: "victim",
+			createdByUserId: VICTIM,
+			...overrides,
+		});
+	const bindVictims = () => ({ ...setInput, connectionId: "conn-victim" });
+
+	beforeEach(() => {
+		mocks.findGithubConnectionInOrganization.mockImplementation(
+			async (id: string) =>
+				id === "conn-victim" ? victimsConnection() : connection(),
+		);
+	});
+
+	it("watchSet: the attacker cannot bind the victim's connection to a service", async () => {
+		const input = bindVictims();
+		await expect(attacker().watchSet(input)).rejects.toMatchObject({
+			code: "FORBIDDEN",
+		});
+		expect(mocks.upsertGithubWatch).not.toHaveBeenCalled();
+	});
+
+	it("watchSet: not even when the watch already uses that connection (only the service change is theirs)", async () => {
+		mocks.findGithubWatch.mockResolvedValue(
+			watchRow({ connectionId: "conn-victim" }),
+		);
+		const input = bindVictims();
+		await expect(attacker().watchSet(input)).rejects.toMatchObject({
+			code: "FORBIDDEN",
+		});
+		expect(mocks.upsertGithubWatch).not.toHaveBeenCalled();
+	});
+
+	it("watchSet: the attacker can bind their own connection", async () => {
+		mocks.findGithubConnectionInOrganization.mockResolvedValue(
+			connection({ connectionId: "conn-mine", createdByUserId: ATTACKER }),
+		);
+		await attacker().watchSet({ ...setInput, connectionId: "conn-mine" });
+		expect(mocks.upsertGithubWatch).toHaveBeenCalledWith(
+			expect.objectContaining({ connectionId: "conn-mine" }),
+		);
+	});
+
+	it("watchSet: the victim, an admin and an owner can bind the victim's connection", async () => {
+		const input = bindVictims();
+		mocks.memberGitProviderActions = ["create"];
+		await callerFor("member", "org-a", VICTIM).watchSet(input);
+		await callerFor("admin", "org-a", "user-admin").watchSet(input);
+		await callerFor("owner", "org-a", "user-owner").watchSet(input);
+		expect(mocks.upsertGithubWatch).toHaveBeenCalledTimes(3);
+	});
+
+	it("watchSet: a connection the owner shared with the organization can be bound by a member", async () => {
+		mocks.findGithubConnectionInOrganization.mockImplementation(async () =>
+			victimsConnection({ sharedWithOrganization: true }),
+		);
+		const input = bindVictims();
+		await attacker().watchSet(input);
+		expect(mocks.upsertGithubWatch).toHaveBeenCalledWith(
+			expect.objectContaining({ connectionId: "conn-victim" }),
+		);
+	});
+
+	it("disconnect: the attacker cannot remove the victim's connection, its watches or its docker logins", async () => {
+		await expect(
+			attacker().disconnect({ connectionId: "conn-victim" }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(mocks.deleteGithubConnection).not.toHaveBeenCalled();
+		expect(mocks.listGithubWatchesForConnection).not.toHaveBeenCalled();
+		expect(mocks.removeGhcrWatchConfigDirs).not.toHaveBeenCalled();
+	});
+
+	it("disconnect: a shared connection can be used by the attacker but still not removed", async () => {
+		mocks.findGithubConnectionInOrganization.mockImplementation(async () =>
+			victimsConnection({ sharedWithOrganization: true }),
+		);
+		await expect(
+			attacker().disconnect({ connectionId: "conn-victim" }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(mocks.deleteGithubConnection).not.toHaveBeenCalled();
+	});
+
+	it("disconnect: the owner of the connection, an admin and an owner can remove it", async () => {
+		mocks.memberGitProviderActions = ["delete"];
+		await callerFor("member", "org-a", VICTIM).disconnect({
+			connectionId: "conn-victim",
+		});
+		await callerFor("admin", "org-a", "user-admin").disconnect({
+			connectionId: "conn-victim",
+		});
+		await callerFor("owner", "org-a", "user-owner").disconnect({
+			connectionId: "conn-victim",
+		});
+		expect(mocks.deleteGithubConnection).toHaveBeenCalledTimes(3);
+	});
+
+	describe("the connection list", () => {
+		const all = () => [
+			victimsConnection(),
+			connection({ connectionId: "conn-mine", createdByUserId: ATTACKER }),
+			victimsConnection({
+				connectionId: "conn-shared",
+				sharedWithOrganization: true,
+			}),
+		];
+		beforeEach(() => {
+			mocks.listGithubConnectionRecords.mockResolvedValue(all());
+		});
+
+		it("shows the attacker their own and the shared ones, not the victim's private one", async () => {
+			const seen = await attacker().connections();
+			expect(seen.map((c) => c.connectionId).sort()).toEqual([
+				"conn-mine",
+				"conn-shared",
+			]);
+			expect(seen.find((c) => c.connectionId === "conn-mine")?.isOwner).toBe(
+				true,
+			);
+			expect(seen.find((c) => c.connectionId === "conn-shared")?.isOwner).toBe(
+				false,
+			);
+		});
+
+		it("shows the victim their own, and an admin or owner every connection", async () => {
+			mocks.memberGitProviderActions = ["read"];
+			const victimSees = await callerFor(
+				"member",
+				"org-a",
+				VICTIM,
+			).connections();
+			expect(victimSees.map((c) => c.connectionId).sort()).toEqual([
+				"conn-shared",
+				"conn-victim",
+			]);
+			expect(
+				(await callerFor("admin", "org-a", "user-admin").connections()).length,
+			).toBe(3);
+			expect(
+				(await callerFor("owner", "org-a", "user-owner").connections()).length,
+			).toBe(3);
+		});
+
+		it("never carries the owner's user id or the token", async () => {
+			for (const seen of await callerFor(
+				"admin",
+				"org-a",
+				"user-admin",
+			).connections()) {
+				expect(seen).not.toHaveProperty("createdByUserId");
+				expect(JSON.stringify(seen)).not.toContain(VICTIM);
+				expect(seen).not.toHaveProperty("accessToken");
+			}
+		});
+	});
+
+	describe("toggleShare", () => {
+		it("only the member who connected the account can share it", async () => {
+			mocks.memberGitProviderActions = ["create"];
+			await callerFor("member", "org-a", VICTIM).toggleShare({
+				connectionId: "conn-victim",
+				sharedWithOrganization: true,
+			});
+			expect(mocks.setGithubConnectionShared).toHaveBeenCalledWith(
+				"conn-victim",
+				"org-a",
+				true,
+			);
+		});
+
+		it("another member, even an admin or owner, cannot share (or unshare) it", async () => {
+			mocks.memberGitProviderActions = ["create"];
+			for (const caller of [
+				callerFor("member", "org-a", ATTACKER),
+				callerFor("admin", "org-a", "user-admin"),
+				callerFor("owner", "org-a", "user-owner"),
+			]) {
+				await expect(
+					caller.toggleShare({
+						connectionId: "conn-victim",
+						sharedWithOrganization: true,
+					}),
+				).rejects.toMatchObject({ code: "FORBIDDEN" });
+			}
+			expect(mocks.setGithubConnectionShared).not.toHaveBeenCalled();
+		});
+
+		it("a connection of another organization is not found", async () => {
+			mocks.findGithubConnectionInOrganization.mockResolvedValue(null);
+			await expect(
+				callerFor("admin", "org-b").toggleShare({
+					connectionId: "conn-victim",
+					sharedWithOrganization: true,
+				}),
+			).rejects.toMatchObject({ code: "NOT_FOUND" });
+		});
+	});
+});
+
+describe("watchSet refuses a second deployer", () => {
+	const other = { title: "GHA production 0123abcd: ship it [run 9.1]" };
+
+	it("refuses with a clear conflict when GitHub Actions deployed the service in the last 24 hours", async () => {
+		mocks.findRecentOtherGithubDeployer.mockResolvedValue(other);
+		mocks.findGithubWatch.mockResolvedValue(null);
+		const refused = callerFor("admin").watchSet(setInput);
+		await expect(refused).rejects.toMatchObject({ code: "CONFLICT" });
+		await expect(refused).rejects.toThrow(/two deployers/);
+		expect(mocks.findRecentOtherGithubDeployer).toHaveBeenCalledWith(
+			"application",
+			"app-1",
+		);
+		expect(mocks.upsertGithubWatch).not.toHaveBeenCalled();
+	});
+
+	it("override: true goes ahead and is not stored on the watch", async () => {
+		mocks.findRecentOtherGithubDeployer.mockResolvedValue(other);
+		mocks.findGithubWatch.mockResolvedValue(null);
+		await callerFor("admin").watchSet({ ...setInput, override: true });
+		expect(mocks.upsertGithubWatch).toHaveBeenCalledTimes(1);
+		expect(mocks.upsertGithubWatch.mock.calls[0]?.[0]).not.toHaveProperty(
+			"override",
+		);
+		expect(mocks.findRecentOtherGithubDeployer).not.toHaveBeenCalled();
+	});
+
+	it("is not checked for a watch that is already on (it is the pull deployer itself) or for one being turned off", async () => {
+		mocks.findRecentOtherGithubDeployer.mockResolvedValue(other);
+		mocks.findGithubWatch.mockResolvedValue(watchRow({ enabled: true }));
+		await callerFor("admin").watchSet(setInput);
+		mocks.findGithubWatch.mockResolvedValue(null);
+		await callerFor("admin").watchSet({ ...setInput, enabled: false });
+		expect(mocks.upsertGithubWatch).toHaveBeenCalledTimes(2);
+		expect(mocks.findRecentOtherGithubDeployer).not.toHaveBeenCalled();
+	});
+
+	it("is checked again when a disabled watch is turned back on", async () => {
+		mocks.findRecentOtherGithubDeployer.mockResolvedValue(other);
+		mocks.findGithubWatch.mockResolvedValue(watchRow({ enabled: false }));
+		await expect(callerFor("admin").watchSet(setInput)).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+	});
+
+	it("lets a service nobody else deploys through", async () => {
+		mocks.findGithubWatch.mockResolvedValue(null);
+		await callerFor("admin").watchSet(setInput);
+		expect(mocks.upsertGithubWatch).toHaveBeenCalledTimes(1);
 	});
 });
 

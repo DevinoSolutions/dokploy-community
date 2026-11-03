@@ -18,6 +18,7 @@ export type FetchLike = (
 		method?: string;
 		headers?: Record<string, string>;
 		body?: string;
+		signal?: AbortSignal;
 	},
 ) => Promise<{
 	ok: boolean;
@@ -26,6 +27,31 @@ export type FetchLike = (
 	json(): Promise<unknown>;
 	text(): Promise<string>;
 }>;
+
+/** No GitHub request waits longer than this: a hung connection must not stall a poll tick or a dashboard call. */
+export const GITHUB_FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * The real `fetch` for GitHub: every request is cut off after
+ * GITHUB_FETCH_TIMEOUT_MS. A timeout rejects like any network failure, which
+ * every caller already handles.
+ */
+export const createGithubFetch =
+	(
+		base: (url: string, init?: RequestInit) => Promise<Response> = (
+			url,
+			init,
+		) => fetch(url, init),
+		timeoutMs: number = GITHUB_FETCH_TIMEOUT_MS,
+	): FetchLike =>
+	(url, init) =>
+		base(url, {
+			...(init as RequestInit | undefined),
+			signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
+		});
+
+/** The page the user is sent to is rendered as a link: it has to be on github.com. */
+export const VERIFICATION_URI_PREFIX = "https://github.com/";
 
 export const DEVICE_CODE_URL = "https://github.com/login/device/code";
 export const ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -113,6 +139,7 @@ export const startDeviceFlow = async (deps: {
 		typeof device_code !== "string" ||
 		typeof user_code !== "string" ||
 		typeof verification_uri !== "string" ||
+		!verification_uri.startsWith(VERIFICATION_URI_PREFIX) ||
 		typeof expires_in !== "number"
 	) {
 		return { ok: false, message: "GitHub answered with an unexpected body" };

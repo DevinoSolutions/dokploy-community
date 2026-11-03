@@ -11,7 +11,9 @@ import {
 	deployments,
 	githubDeploymentWatch,
 } from "@dokploy/server/db/schema";
+import { buildOriginJobFields } from "@dokploy/server/services/build-origin-shared";
 import {
+	createGithubFetch,
 	decideApplicationImage,
 	deleteGithubWatch,
 	describeError,
@@ -31,7 +33,7 @@ import {
 	type WatchRow,
 } from "@dokploy/server/services/github-deployments";
 import { runBackgroundJob } from "@dokploy/server/utils/process/background";
-import { and, asc, desc, eq, gte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, like } from "drizzle-orm";
 import type { DeploymentJob } from "./queue-types";
 import { myQueue } from "./queueSetup";
 
@@ -42,9 +44,46 @@ import { myQueue } from "./queueSetup";
  * wires them to this process. See docs/design/github-deployments-pull.md.
  */
 
-/** Title of the Dokploy deployment a GitHub deployment starts. Also its handle. */
-export const githubDeploymentTitle = (githubDeploymentId: number) =>
-	`GHA GitHub deployment #${githubDeploymentId}`;
+/**
+ * The end of the Dokploy deployment title a GitHub deployment starts. It is the
+ * handle the poller finds that deployment by, whatever the rest of the title
+ * says, so it must stay unique per GitHub deployment id.
+ */
+export const githubDeploymentHandle = (githubDeploymentId: number) =>
+	`[deployment #${githubDeploymentId}]`;
+
+/** An environment as one word of a title (the title parser reads one token after "GHA "). */
+const titleToken = (value: string | undefined): string | null => {
+	const token = (value ?? "")
+		.trim()
+		.replace(/[^A-Za-z0-9._/-]+/g, "-")
+		.replace(/^[^A-Za-z0-9]+/, "")
+		.slice(0, 100);
+	return token || null;
+};
+
+/**
+ * Title of the Dokploy deployment a GitHub deployment starts, in the shape the
+ * dokploy-deploy action uses ("GHA <environment> <sha8> ..."), so the GitHub
+ * Actions pill and the run modal read the environment and the commit from it
+ * (parseGithubActionsTitle). Ends with the handle.
+ */
+export const githubDeploymentTitle = (
+	watch: Pick<WatchRow, "environment">,
+	deployment: Pick<GithubDeployment, "id" | "sha" | "environment">,
+) => {
+	const sha = /^[0-9a-f]{7,40}$/i.test(deployment.sha ?? "")
+		? (deployment.sha as string).slice(0, 8).toLowerCase()
+		: null;
+	const environment =
+		titleToken(deployment.environment) ?? titleToken(watch.environment);
+	return [
+		"GHA",
+		...(environment ? [environment] : []),
+		...(sha ? [sha] : []),
+		githubDeploymentHandle(deployment.id),
+	].join(" ");
+};
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -103,15 +142,14 @@ const startDeploy = async (
 			return { kind: "stale" } as const;
 		}
 
-		const title = githubDeploymentTitle(deployment.id);
+		const title = githubDeploymentTitle(watch, deployment);
 		const description = `${watch.owner}/${watch.repo} (${watch.environment}) ${payload.digest.slice(0, 19)}${payload.buildRunUrl ? ` ${payload.buildRunUrl}` : ""}`;
-		// TODO(T-12149 / #576): the queue only carries these once #576 is merged;
-		// until then they are ignored, and the "GHA " title prefix already lets
-		// Dokploy infer github-actions as the build origin.
-		const origin = {
+		// What the queue carries to the deployment row: where the image was built
+		// (a valid run link only, as for the deploy API).
+		const origin = buildOriginJobFields({
 			buildOrigin: "github-actions",
-			...(payload.buildRunUrl ? { buildRunUrl: payload.buildRunUrl } : {}),
-		};
+			buildRunUrl: payload.buildRunUrl,
+		});
 
 		if (watch.serviceType === "application") {
 			const app = await findApplicationById(watch.serviceId).catch(() => null);
@@ -130,7 +168,7 @@ const startDeploy = async (
 			const decision = decideApplicationImage(app, payload, watch.owner);
 			if (!decision.ok)
 				return { kind: "rejected", reason: decision.reason } as const;
-			const job = {
+			const job: DeploymentJob = {
 				applicationId: app.applicationId,
 				titleLog: title,
 				descriptionLog: description,
@@ -139,7 +177,7 @@ const startDeploy = async (
 				server: !!app.serverId,
 				serverId: app.serverId ?? undefined,
 				...origin,
-			} as DeploymentJob;
+			};
 			await tx
 				.update(githubDeploymentWatch)
 				.set(claim(deployment.id))
@@ -191,7 +229,7 @@ const startDeploy = async (
 			payload.digest,
 		);
 		if (!pinned.ok) return { kind: "rejected", reason: pinned.reason } as const;
-		const job = {
+		const job: DeploymentJob = {
 			composeId: stack.composeId,
 			titleLog: title,
 			descriptionLog: description,
@@ -200,7 +238,7 @@ const startDeploy = async (
 			server: !!stack.serverId,
 			serverId: stack.serverId ?? undefined,
 			...origin,
-		} as DeploymentJob;
+		};
 		await tx
 			.update(githubDeploymentWatch)
 			.set(claim(deployment.id))
@@ -280,7 +318,7 @@ const claim = (githubDeploymentId: number) => ({
 const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 	const id = watch.inflightDeploymentId;
 	if (id === null) return { state: "missing" };
-	const title = githubDeploymentTitle(id);
+	const handle = githubDeploymentHandle(id);
 	const owner =
 		watch.serviceType === "application"
 			? eq(deployments.applicationId, watch.serviceId)
@@ -291,7 +329,7 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 	const [titled] = await db
 		.select(statusOf)
 		.from(deployments)
-		.where(and(owner, eq(deployments.title, title)))
+		.where(and(owner, like(deployments.title, `GHA %${handle}`)))
 		.orderBy(desc(deployments.createdAt))
 		.limit(1);
 	let row = titled;
@@ -324,7 +362,9 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 			watch.serviceType === "application" ? "applicationId" : "composeId";
 		return queued.some(
 			(job) =>
-				job.data.titleLog === title ||
+				(typeof job.data.titleLog === "string" &&
+					job.data.titleLog.startsWith("GHA ") &&
+					job.data.titleLog.endsWith(handle)) ||
 				(job.data as Record<string, unknown>)[serviceKey] === watch.serviceId,
 		)
 			? { state: "running" }
@@ -345,7 +385,8 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 const blocks = new Map<string, number>();
 
 export const createGithubDeploymentsPollDeps = (): PollDeps => ({
-	fetch: (url, init) => fetch(url, init as RequestInit),
+	// Cut off after 15 s: a hung GitHub must not stall the tick for every watch.
+	fetch: createGithubFetch(),
 	now: () => Date.now(),
 	loadToken: loadConnectionToken,
 	markRevoked: markGithubConnectionRevoked,
@@ -386,36 +427,51 @@ export const runGithubDeploymentsTick = async (
 	const watches = await listEnabledGithubWatches();
 	for (const record of watches) {
 		if (shouldStop()) return;
-		const watch: WatchRow = {
-			watchId: record.watchId,
-			organizationId: record.organizationId,
-			serviceType: record.serviceType,
-			serviceId: record.serviceId,
-			connectionId: record.connectionId,
-			owner: record.owner,
-			repo: record.repo,
-			environment: record.environment,
-			enabled: record.enabled,
-			lastSeenDeploymentId: record.lastSeenDeploymentId,
-			etag: record.etag,
-			inflightDeploymentId: record.inflightDeploymentId,
-			inflightStartedAt: record.inflightStartedAt,
-			postLogUrl: record.postLogUrl,
-		};
-		// The service was deleted: the watch has nothing left to deploy. A
-		// workflow may still be waiting on a deployment that was in flight, so
-		// GitHub is told it failed before the watch (and its login) go away.
-		if (!(await serviceExists(watch))) {
-			await reportServiceGone(watch, deps);
-			await deleteGithubWatch(watch.serviceType, watch.serviceId);
-			await removeGhcrWatchConfigDirs(
-				[watch.watchId],
-				watch.organizationId,
-			).catch(() => {});
-			continue;
+		// One watch failing (a database error, a service lookup) must not end the
+		// tick for the watches after it.
+		try {
+			await pollOneWatch(record, deps);
+		} catch (error) {
+			deps.log(
+				`github deployments: watch ${record.watchId} failed this tick: ${describeError(error)}`,
+			);
 		}
-		await pollWatch(watch, deps);
 	}
+};
+
+const pollOneWatch = async (
+	record: Awaited<ReturnType<typeof listEnabledGithubWatches>>[number],
+	deps: PollDeps,
+): Promise<void> => {
+	const watch: WatchRow = {
+		watchId: record.watchId,
+		organizationId: record.organizationId,
+		serviceType: record.serviceType,
+		serviceId: record.serviceId,
+		connectionId: record.connectionId,
+		owner: record.owner,
+		repo: record.repo,
+		environment: record.environment,
+		enabled: record.enabled,
+		lastSeenDeploymentId: record.lastSeenDeploymentId,
+		etag: record.etag,
+		inflightDeploymentId: record.inflightDeploymentId,
+		inflightStartedAt: record.inflightStartedAt,
+		postLogUrl: record.postLogUrl,
+	};
+	// The service was deleted: the watch has nothing left to deploy. A
+	// workflow may still be waiting on a deployment that was in flight, so
+	// GitHub is told it failed before the watch (and its login) go away.
+	if (!(await serviceExists(watch))) {
+		await reportServiceGone(watch, deps);
+		await deleteGithubWatch(watch.serviceType, watch.serviceId);
+		await removeGhcrWatchConfigDirs(
+			[watch.watchId],
+			watch.organizationId,
+		).catch(() => {});
+		return;
+	}
+	await pollWatch(watch, deps);
 };
 
 /**

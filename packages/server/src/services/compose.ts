@@ -102,7 +102,10 @@ import {
 } from "./deployment-cancel";
 import { recordVaultFailureReason } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
-import { loginGhcrForCompose } from "./github-deployments/registry-auth";
+import {
+	loginGhcrForCompose,
+	removeGhcrConfigDir,
+} from "./github-deployments/registry-auth";
 import { claimLiveGithubBuild } from "./live-build-claim";
 import {
 	findPatchesByEntityId,
@@ -973,10 +976,15 @@ export const deployCompose = async ({
 			compose.serverId,
 			compose.composeFile,
 		);
-		await runComposeBuild(entity, deployment, {
-			freshVolumes,
-			dockerConfigDir,
-		});
+		try {
+			await runComposeBuild(entity, deployment, {
+				freshVolumes,
+				dockerConfigDir,
+			});
+		} finally {
+			// The login only served this pull / up; its dir holds a GitHub token.
+			await removeGhcrConfigDir(dockerConfigDir, compose.serverId);
+		}
 		await phases.note(
 			`Deployment finished (total ${phases.elapsed(deployStartedAt)})`,
 		);
@@ -1287,41 +1295,48 @@ export const rebuildCompose = async ({
 		}
 
 		command = "set -e;";
-		command += await getBuildComposeCommand(compose, {
-			deploymentId: deployment.deploymentId,
-			freshVolumes,
-			remoteBuild,
-			patches: appliedPatches,
-			dockerConfigDir: await loginGhcrForCompose(
-				compose.composeId,
-				compose.serverId,
-				compose.composeFile,
-			),
-		});
-		if (!tearsDown) await checkpoint();
-		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		await withDeployLogHeartbeat(
-			{ serverId: compose.serverId, logPath: deployment.logPath },
-			COMPOSE_RELEASE_STEP_LABEL,
-			async () => {
-				if (isReleaseCancelable(command)) {
-					await runReleaseScript({
-						serverId: compose.serverId,
-						command: commandWithLog,
-						deploymentId: deployment.deploymentId,
-					});
-				} else if (compose.serverId) {
-					await execAsyncRemote(compose.serverId, commandWithLog);
-				} else {
-					await execAsync(commandWithLog);
-				}
-			},
-			{
-				isRunning: () => isDeploymentStillRunning(deployment.deploymentId),
-				wallLimitMinutes: () =>
-					getDeploymentWallLimitMinutes(deployment.deploymentId),
-			},
+		// The login only serves this release's pull / up; its dir holds a GitHub
+		// token and is deleted as soon as the release has ended.
+		const dockerConfigDir = await loginGhcrForCompose(
+			compose.composeId,
+			compose.serverId,
+			compose.composeFile,
 		);
+		try {
+			command += await getBuildComposeCommand(compose, {
+				deploymentId: deployment.deploymentId,
+				freshVolumes,
+				remoteBuild,
+				patches: appliedPatches,
+				dockerConfigDir,
+			});
+			if (!tearsDown) await checkpoint();
+			commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
+			await withDeployLogHeartbeat(
+				{ serverId: compose.serverId, logPath: deployment.logPath },
+				COMPOSE_RELEASE_STEP_LABEL,
+				async () => {
+					if (isReleaseCancelable(command)) {
+						await runReleaseScript({
+							serverId: compose.serverId,
+							command: commandWithLog,
+							deploymentId: deployment.deploymentId,
+						});
+					} else if (compose.serverId) {
+						await execAsyncRemote(compose.serverId, commandWithLog);
+					} else {
+						await execAsync(commandWithLog);
+					}
+				},
+				{
+					isRunning: () => isDeploymentStillRunning(deployment.deploymentId),
+					wallLimitMinutes: () =>
+						getDeploymentWallLimitMinutes(deployment.deploymentId),
+				},
+			);
+		} finally {
+			await removeGhcrConfigDir(dockerConfigDir, compose.serverId);
+		}
 
 		// Carries the record of the deploy forward on this row (T-7960), once the
 		// release is running, like a deploy (see runComposeBuild). The values are

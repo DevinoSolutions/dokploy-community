@@ -1,4 +1,5 @@
 export * from "./connect-flow";
+export * from "./connection-access";
 export * from "./device-flow";
 export * from "./github-api";
 export * from "./payload";

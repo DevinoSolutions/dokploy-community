@@ -4,8 +4,10 @@ import {
 } from "@dokploy/server/db/schema/github-deployment";
 import {
 	ACCESS_TOKEN_URL,
+	createGithubFetch,
 	DEVICE_CODE_URL,
 	DEVICE_GRANT_TYPE,
+	GITHUB_FETCH_TIMEOUT_MS,
 	getDeviceClientId,
 	startDeviceFlow,
 	stepDeviceFlow,
@@ -213,5 +215,72 @@ describe("stepDeviceFlow", () => {
 		expect(
 			(await stepDeviceFlow(state, { fetch: bad.fetch, now: () => T0 })).status,
 		).toBe("failed");
+	});
+});
+
+describe("the verification page is a github.com page", () => {
+	it("refuses a device flow whose verification_uri is anywhere else", async () => {
+		for (const verification_uri of [
+			"https://evil.example/login/device",
+			"http://github.com/login/device",
+			"javascript:alert(1)",
+			"//github.com/login/device",
+		]) {
+			const { fetch } = scriptedFetch([
+				{ json: { ...started, verification_uri } },
+			]);
+			const result = await startDeviceFlow({ fetch, now: () => T0 });
+			expect(result.ok, verification_uri).toBe(false);
+		}
+	});
+
+	it("accepts the github.com one", async () => {
+		const { fetch } = scriptedFetch([{ json: started }]);
+		const result = await startDeviceFlow({ fetch, now: () => T0 });
+		expect(result.ok).toBe(true);
+	});
+});
+
+describe("createGithubFetch", () => {
+	it("gives every request a 15 second timeout signal", async () => {
+		expect(GITHUB_FETCH_TIMEOUT_MS).toBe(15_000);
+		const seen: Array<RequestInit | undefined> = [];
+		const fetch = createGithubFetch(async (_url, init) => {
+			seen.push(init);
+			return new Response("{}");
+		});
+		await fetch("https://api.github.com/x", {
+			method: "POST",
+			headers: { a: "b" },
+			body: "{}",
+		});
+		expect(seen[0]?.method).toBe("POST");
+		expect(seen[0]?.body).toBe("{}");
+		expect(seen[0]?.signal).toBeInstanceOf(AbortSignal);
+		expect(seen[0]?.signal?.aborted).toBe(false);
+	});
+
+	it("really aborts a request that hangs", async () => {
+		const fetch = createGithubFetch(
+			(_url, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () =>
+						reject(init.signal?.reason),
+					);
+				}),
+			20,
+		);
+		await expect(fetch("https://api.github.com/x")).rejects.toBeDefined();
+	});
+
+	it("a request that already carries a signal keeps it", async () => {
+		const own = new AbortController();
+		let used: AbortSignal | undefined;
+		const fetch = createGithubFetch(async (_url, init) => {
+			used = init?.signal ?? undefined;
+			return new Response("{}");
+		});
+		await fetch("https://api.github.com/x", { signal: own.signal });
+		expect(used).toBe(own.signal);
 	});
 });

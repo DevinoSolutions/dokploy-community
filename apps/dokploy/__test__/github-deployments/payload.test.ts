@@ -1,13 +1,15 @@
 import {
-	normalizeRunUrl,
 	parseDeploymentPayload,
 	parsePinnedImage,
+	watchedRunUrl,
 } from "@dokploy/server/services/github-deployments/payload";
 import { describe, expect, it } from "vitest";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const IMAGE = `ghcr.io/devinosolutions/sendly-web@${DIGEST}`;
 const payload = (dokploy: unknown) => ({ dokploy });
+/** The repository the watch in these tests follows. */
+const WATCHED = { owner: "DevinoSolutions", repo: "sendly" };
 
 describe("parsePinnedImage", () => {
 	it("accepts repository@sha256:<64 hex>", () => {
@@ -56,24 +58,42 @@ describe("parsePinnedImage", () => {
 	});
 });
 
-describe("normalizeRunUrl", () => {
+describe("watchedRunUrl", () => {
 	const RUN =
 		"https://github.com/DevinoSolutions/sendly/actions/runs/123456789";
-	it("accepts an Actions run link and drops query, fragment and slash", () => {
-		expect(normalizeRunUrl(RUN)).toBe(RUN);
-		expect(normalizeRunUrl(`${RUN}/attempts/2`)).toBe(`${RUN}/attempts/2`);
-		expect(normalizeRunUrl(`${RUN}/?x=1#y`)).toBe(RUN);
+	it("accepts an Actions run link of the watched repository and drops query, fragment and slash", () => {
+		expect(watchedRunUrl(RUN, WATCHED)).toBe(RUN);
+		expect(watchedRunUrl(`${RUN}/attempts/2`, WATCHED)).toBe(
+			`${RUN}/attempts/2`,
+		);
+		expect(watchedRunUrl(`${RUN}/?x=1#y`, WATCHED)).toBe(RUN);
+	});
+	it("compares owner and repo case-insensitively, as GitHub does", () => {
+		expect(
+			watchedRunUrl(RUN, { owner: "devinosolutions", repo: "SENDLY" }),
+		).toBe(RUN);
+	});
+	it("drops a link to another repository, even a well-formed one", () => {
+		expect(
+			watchedRunUrl("https://github.com/o/r/actions/runs/1", WATCHED),
+		).toBeUndefined();
+		expect(
+			watchedRunUrl(
+				"https://github.com/DevinoSolutions/other/actions/runs/1",
+				WATCHED,
+			),
+		).toBeUndefined();
 	});
 	it("refuses anything else", () => {
 		for (const value of [
-			"http://github.com/o/r/actions/runs/1",
-			"https://evil.example/o/r/actions/runs/1",
-			"https://github.com/o/r/pull/1",
+			"http://github.com/DevinoSolutions/sendly/actions/runs/1",
+			"https://evil.example/DevinoSolutions/sendly/actions/runs/1",
+			"https://github.com/DevinoSolutions/sendly/pull/1",
 			"javascript:alert(1)",
 			42,
 			undefined,
 		]) {
-			expect(normalizeRunUrl(value)).toBeUndefined();
+			expect(watchedRunUrl(value, WATCHED)).toBeUndefined();
 		}
 	});
 });
@@ -83,6 +103,7 @@ describe("parseDeploymentPayload", () => {
 		const result = parseDeploymentPayload(
 			payload({ serviceId: "svc1", image: IMAGE }),
 			"svc1",
+			WATCHED,
 		);
 		expect(result).toEqual({
 			kind: "deploy",
@@ -93,10 +114,11 @@ describe("parseDeploymentPayload", () => {
 	});
 
 	it("carries the Actions run link when it is valid", () => {
-		const runUrl = "https://github.com/o/r/actions/runs/9";
+		const runUrl = "https://github.com/DevinoSolutions/sendly/actions/runs/9";
 		const result = parseDeploymentPayload(
 			payload({ serviceId: "svc1", image: IMAGE, runUrl }),
 			"svc1",
+			WATCHED,
 		);
 		expect(result).toMatchObject({ kind: "deploy", buildRunUrl: runUrl });
 		const bad = parseDeploymentPayload(
@@ -106,14 +128,28 @@ describe("parseDeploymentPayload", () => {
 				runUrl: "https://evil.test/x",
 			}),
 			"svc1",
+			WATCHED,
 		);
 		expect(bad).not.toHaveProperty("buildRunUrl");
+		// Well formed, but another repository's run: not the build of this image.
+		const foreign = parseDeploymentPayload(
+			payload({
+				serviceId: "svc1",
+				image: IMAGE,
+				runUrl: "https://github.com/o/r/actions/runs/9",
+			}),
+			"svc1",
+			WATCHED,
+		);
+		expect(foreign.kind).toBe("deploy");
+		expect(foreign).not.toHaveProperty("buildRunUrl");
 	});
 
 	it("reads a payload GitHub returns as a JSON string", () => {
 		const result = parseDeploymentPayload(
 			JSON.stringify(payload({ serviceId: "svc1", image: IMAGE })),
 			"svc1",
+			WATCHED,
 		);
 		expect(result.kind).toBe("deploy");
 	});
@@ -123,6 +159,7 @@ describe("parseDeploymentPayload", () => {
 			parseDeploymentPayload(
 				payload({ serviceId: "other", image: IMAGE }),
 				"svc1",
+				WATCHED,
 			).kind,
 		).toBe("ignore");
 		for (const raw of [
@@ -134,15 +171,18 @@ describe("parseDeploymentPayload", () => {
 			{ dokploy: "x" },
 			{ dokploy: [] },
 		]) {
-			expect(parseDeploymentPayload(raw, "svc1").kind).toBe("ignore");
+			expect(parseDeploymentPayload(raw, "svc1", WATCHED).kind).toBe("ignore");
 		}
 	});
 
 	it("never deploys a service id that merely resembles ours", () => {
 		for (const serviceId of ["svc1 ", "SVC1", "svc10", 1, null]) {
 			expect(
-				parseDeploymentPayload(payload({ serviceId, image: IMAGE }), "svc1")
-					.kind,
+				parseDeploymentPayload(
+					payload({ serviceId, image: IMAGE }),
+					"svc1",
+					WATCHED,
+				).kind,
 			).toBe("ignore");
 		}
 	});
@@ -152,6 +192,7 @@ describe("parseDeploymentPayload", () => {
 			const result = parseDeploymentPayload(
 				payload({ serviceId: "svc1", image }),
 				"svc1",
+				WATCHED,
 			);
 			expect(result.kind).toBe("invalid");
 		}

@@ -1,5 +1,5 @@
 {
-  "id": "452dd618-7899-43b8-bc44-b8fcb537fcb9",
+  "id": "63b1c68f-e397-47d0-92d1-ee6a4f1d5ebf",
   "prevId": "c76aa1ca-d116-462a-9691-4b19b471edac",
   "version": "7",
   "dialect": "postgresql",
@@ -5980,6 +5980,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "sharedWithOrganization": {
+          "name": "sharedWithOrganization",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "githubLogin": {
           "name": "githubLogin",
           "type": "text",
@@ -6183,8 +6190,8 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "github_deployment_watch_connectionId_github_deployment_connection_connectionId_fk": {
-          "name": "github_deployment_watch_connectionId_github_deployment_connection_connectionId_fk",
+        "github_deployment_watch_connectionId_fk": {
+          "name": "github_deployment_watch_connectionId_fk",
           "tableFrom": "github_deployment_watch",
           "tableTo": "github_deployment_connection",
           "columnsFrom": [

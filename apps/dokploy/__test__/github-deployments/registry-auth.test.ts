@@ -38,6 +38,7 @@ vi.mock("@dokploy/server/db", () => ({
 
 import {
 	composeHasImageOfOwner,
+	getGhcrConfigDirRemovalCommandForPath,
 	getGhcrConfigSeedCommand,
 	getGhcrWatchConfigDir,
 	getGhcrWatchConfigDirRemovalCommand,
@@ -45,6 +46,7 @@ import {
 	isImageOfOwner,
 	loginGhcrForApplication,
 	loginGhcrForCompose,
+	removeGhcrConfigDir,
 	removeGhcrWatchConfigDirs,
 } from "@dokploy/server/services/github-deployments/registry-auth";
 import { getRegistryConfigDir } from "@dokploy/server/utils/process/dockerConfig";
@@ -271,6 +273,58 @@ describe("the config dir is removed with the watch or the connection", () => {
 		).resolves.toBeUndefined();
 		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(2);
 		error.mockRestore();
+	});
+});
+
+describe("the config dir is removed as soon as the pull / up that used it has ended", () => {
+	const DIR = "/etc/dokploy/docker-config/ghcr-w_1-Abc";
+
+	it("builds an rm of exactly a watch's dir and nothing else", () => {
+		expect(getGhcrConfigDirRemovalCommandForPath(DIR)).toBe(
+			`rm -rf -- '${DIR}'`,
+		);
+		for (const odd of [
+			undefined,
+			null,
+			"",
+			"/etc/dokploy/docker-config",
+			"/etc/dokploy/docker-config/",
+			"/etc/dokploy/docker-config/registry-1",
+			"/etc/dokploy/docker-config/ghcr-",
+			"/etc/dokploy/docker-config/ghcr-a/..",
+			"/etc/dokploy/docker-config/ghcr-a b",
+			"/etc/dokploy/docker-config/ghcr-a;rm -rf /",
+			"docker-config/ghcr-w1",
+			"/",
+		]) {
+			expect(
+				getGhcrConfigDirRemovalCommandForPath(odd),
+				String(odd),
+			).toBeNull();
+		}
+	});
+
+	it("removes the dir on this host, or on the stack's server", async () => {
+		await removeGhcrConfigDir(DIR, null);
+		expect(mocks.execAsync).toHaveBeenCalledWith(`rm -rf -- '${DIR}'`);
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+		await removeGhcrConfigDir(DIR, "server-1");
+		expect(mocks.execAsyncRemote).toHaveBeenCalledWith(
+			"server-1",
+			`rm -rf -- '${DIR}'`,
+		);
+	});
+
+	it("does nothing without a dir, and never throws when the host cannot be reached", async () => {
+		await removeGhcrConfigDir(undefined, "server-1");
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		mocks.execAsyncRemote.mockRejectedValueOnce(new Error("ssh down"));
+		await expect(removeGhcrConfigDir(DIR, "server-1")).resolves.toBeUndefined();
+		expect(warn).toHaveBeenCalled();
+		expect(JSON.stringify(warn.mock.calls)).not.toContain(TOKEN);
+		warn.mockRestore();
 	});
 });
 

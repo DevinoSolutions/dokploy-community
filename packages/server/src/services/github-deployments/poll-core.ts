@@ -437,7 +437,7 @@ const pollWatchInner = async (
 	const parsedById = new Map(
 		fresh.map((d) => [
 			d.id,
-			parseDeploymentPayload(d.payload, watch.serviceId),
+			parseDeploymentPayload(d.payload, watch.serviceId, watch),
 		]),
 	);
 	let targetId: number | undefined;
