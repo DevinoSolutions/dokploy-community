@@ -68,7 +68,7 @@ DO $$ BEGIN
 	ALTER TABLE "gha_connection" ADD CONSTRAINT "gha_connection_organizationId_organization_id_fk" FOREIGN KEY ("organizationId") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
 EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
 DO $$ BEGIN
-	ALTER TABLE "gha_connection" ADD CONSTRAINT "gha_connection_github_connection_fk" FOREIGN KEY ("githubConnectionId") REFERENCES "public"."github_deployment_connection"("connectionId") ON DELETE cascade ON UPDATE no action;
+	ALTER TABLE "gha_connection" ADD CONSTRAINT "gha_connection_github_connection_fk" FOREIGN KEY ("githubConnectionId") REFERENCES "public"."github_deployment_connection"("connectionId") ON DELETE restrict ON UPDATE no action;
 EXCEPTION WHEN duplicate_object THEN null; END $$;--> statement-breakpoint
 DO $$ BEGIN
 	ALTER TABLE "gha_release" ADD CONSTRAINT "gha_release_ghaConnectionId_gha_connection_ghaConnectionId_fk" FOREIGN KEY ("ghaConnectionId") REFERENCES "public"."gha_connection"("ghaConnectionId") ON DELETE cascade ON UPDATE no action;

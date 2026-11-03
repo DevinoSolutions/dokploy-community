@@ -175,8 +175,35 @@ describe.skipIf(!ready)("the constraints", () => {
 		expect(await count("gha_connection")).toBe(3);
 	});
 
-	it("deleting the organization or the GitHub connection removes the connection and its releases", async () => {
+	it("refuses to delete a GitHub account that a connection uses, and counts them", async () => {
 		const row = await store.createGhaConnection(baseRow());
+		expect(await store.countGhaConnectionsForGithubConnection("gh-1")).toBe(1);
+		expect(await store.countGhaConnectionsForGithubConnection("gh-none")).toBe(
+			0,
+		);
+		await expect(
+			client?.exec(
+				`DELETE FROM "github_deployment_connection" WHERE "connectionId" = 'gh-1'`,
+			),
+		).rejects.toMatchObject({ code: "23503" });
+		expect(await count("github_deployment_connection")).toBe(1);
+		expect(await count("gha_connection")).toBe(1);
+		// Once the service is disconnected the account can go.
+		await store.deleteGhaConnection("compose", "compose-1");
+		expect(row.ghaConnectionId).toBeTruthy();
+		await client?.exec(
+			`DELETE FROM "github_deployment_connection" WHERE "connectionId" = 'gh-1'`,
+		);
+		expect(await count("github_deployment_connection")).toBe(0);
+	});
+
+	it("deleting the organization still removes its connections, releases and GitHub accounts together", async () => {
+		await client?.exec(
+			`INSERT INTO "github_deployment_connection" ("connectionId","organizationId","githubLogin","githubUserId","accessToken") VALUES ('gh-2','org-b','x','2','t')`,
+		);
+		const row = await store.createGhaConnection(
+			baseRow({ organizationId: "org-b", githubConnectionId: "gh-2" }),
+		);
 		await store.recordRelease({
 			ghaConnectionId: row.ghaConnectionId,
 			manifestReleaseId: "gh-1.1",
@@ -190,20 +217,28 @@ describe.skipIf(!ready)("the constraints", () => {
 			digests: [],
 		});
 		expect(await count("gha_release")).toBe(1);
-		await client?.exec(
-			`DELETE FROM "github_deployment_connection" WHERE "connectionId" = 'gh-1'`,
-		);
-		expect(await count("gha_connection")).toBe(0);
-		expect(await count("gha_release")).toBe(0);
-
-		await client?.exec(
-			`INSERT INTO "github_deployment_connection" ("connectionId","organizationId","githubLogin","githubUserId","accessToken") VALUES ('gh-2','org-b','x','2','t')`,
-		);
-		await store.createGhaConnection(
-			baseRow({ organizationId: "org-b", githubConnectionId: "gh-2" }),
-		);
 		await client?.exec(`DELETE FROM "organization" WHERE "id" = 'org-b'`);
 		expect(await count("gha_connection")).toBe(0);
+		expect(await count("gha_release")).toBe(0);
+		expect(await count("github_deployment_connection")).toBe(1);
+	});
+
+	it("deleting a connection removes its releases", async () => {
+		const row = await store.createGhaConnection(baseRow());
+		await store.recordRelease({
+			ghaConnectionId: row.ghaConnectionId,
+			manifestReleaseId: "gh-1.1",
+			sha: "a".repeat(40),
+			runId: 1,
+			runAttempt: 1,
+			delivery: "pull",
+			status: "accepted",
+			githubDeploymentId: 10,
+			images: [],
+			digests: [],
+		});
+		await store.deleteGhaConnection("compose", "compose-1");
+		expect(await count("gha_release")).toBe(0);
 	});
 
 	it("refuses a connection that names a GitHub account which does not exist", async () => {

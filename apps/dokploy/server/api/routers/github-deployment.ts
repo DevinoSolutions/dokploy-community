@@ -24,7 +24,10 @@ import {
 	visibleGithubConnections,
 } from "@dokploy/server";
 import { GITHUB_DEVICE_SCOPE_PRIVATE } from "@dokploy/server/db/schema";
-import { findGhaConnection } from "@dokploy/server/services/gha-connect";
+import {
+	countGhaConnectionsForGithubConnection,
+	findGhaConnection,
+} from "@dokploy/server/services/gha-connect";
 import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
@@ -269,6 +272,18 @@ export const githubDeploymentRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "FORBIDDEN",
 					message: "You can only remove your own GitHub connections",
+				});
+			}
+			// Services that follow GitHub Actions releases through this account keep
+			// their saved source and watch cursor in their own rows: removing the
+			// account would orphan them (the database refuses it too).
+			const connected = await countGhaConnectionsForGithubConnection(
+				input.connectionId,
+			);
+			if (connected > 0) {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: `Disconnect the ${connected} service${connected === 1 ? "" : "s"} connected to GitHub Actions through this account first (ghaConnection-disconnect).`,
 				});
 			}
 			await audit(ctx, {

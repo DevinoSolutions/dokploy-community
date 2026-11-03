@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 	deleteGithubWatch: vi.fn(),
 	findApplicationById: vi.fn(),
 	findComposeById: vi.fn(),
+	countGhaConnectionsForGithubConnection: vi.fn(),
 	findGhaConnection: vi.fn(),
 	findGithubConnectionInOrganization: vi.fn(),
 	findGithubWatch: vi.fn(),
@@ -33,6 +34,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@dokploy/server/db", () => ({ db: {} }));
 vi.mock("@dokploy/server/services/gha-connect", () => ({
+	countGhaConnectionsForGithubConnection:
+		mocks.countGhaConnectionsForGithubConnection,
 	findGhaConnection: mocks.findGhaConnection,
 }));
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
@@ -202,6 +205,7 @@ beforeEach(() => {
 	mocks.removeGhcrWatchConfigDirs.mockResolvedValue(undefined);
 	mocks.findGithubWatch.mockResolvedValue(watchRow());
 	mocks.findGhaConnection.mockResolvedValue(null);
+	mocks.countGhaConnectionsForGithubConnection.mockResolvedValue(0);
 });
 
 describe("watchSet and watchRemove need to be allowed to manage git providers AND to deploy", () => {
@@ -721,12 +725,16 @@ describe("a service that follows GitHub Actions releases keeps its watch", () =>
 		mocks.findGhaConnection.mockResolvedValue({ ghaConnectionId: "gc-1" });
 	});
 
-	it("watchSet refuses to edit it and writes nothing", async () => {
-		await expect(callerFor("admin").watchSet(setInput)).rejects.toMatchObject({
-			code: "CONFLICT",
-		});
-		expect(mocks.upsertGithubWatch).not.toHaveBeenCalled();
-	});
+	it.each([true, false])(
+		"watchSet refuses to edit it or turn it %s and writes nothing",
+		async (enabled) => {
+			await expect(
+				callerFor("admin").watchSet({ ...setInput, enabled }),
+			).rejects.toMatchObject({ code: "CONFLICT" });
+			expect(mocks.upsertGithubWatch).not.toHaveBeenCalled();
+			expect(mocks.removeGhcrWatchConfigDirs).not.toHaveBeenCalled();
+		},
+	);
 
 	it("watchRemove refuses to delete it", async () => {
 		await expect(
@@ -736,5 +744,37 @@ describe("a service that follows GitHub Actions releases keeps its watch", () =>
 			}),
 		).rejects.toMatchObject({ code: "CONFLICT" });
 		expect(mocks.deleteGithubWatch).not.toHaveBeenCalled();
+	});
+});
+
+describe("disconnect refuses an account that services follow GitHub Actions through", () => {
+	it("is a conflict that names how many, and removes nothing", async () => {
+		mocks.countGhaConnectionsForGithubConnection.mockResolvedValue(2);
+		await expect(
+			callerFor("owner").disconnect({ connectionId: "conn-1" }),
+		).rejects.toMatchObject({
+			code: "CONFLICT",
+			message: expect.stringContaining("Disconnect the 2 services"),
+		});
+		expect(mocks.deleteGithubConnection).not.toHaveBeenCalled();
+		expect(mocks.removeGhcrWatchConfigDirs).not.toHaveBeenCalled();
+	});
+
+	it("says service for a single one", async () => {
+		mocks.countGhaConnectionsForGithubConnection.mockResolvedValue(1);
+		await expect(
+			callerFor("owner").disconnect({ connectionId: "conn-1" }),
+		).rejects.toMatchObject({
+			message: expect.stringContaining("Disconnect the 1 service "),
+		});
+	});
+
+	it("still removes an account no service uses", async () => {
+		mocks.countGhaConnectionsForGithubConnection.mockResolvedValue(0);
+		await callerFor("owner").disconnect({ connectionId: "conn-1" });
+		expect(mocks.deleteGithubConnection).toHaveBeenCalledWith(
+			"conn-1",
+			"org-a",
+		);
 	});
 });

@@ -123,7 +123,10 @@ const persistConnection = async (
 		owner: input.owner,
 		repo: input.repo,
 		environment: input.environment,
-		enabled: true,
+		// Off until the connection poll takes over (the #577 loop would otherwise
+		// answer Deployments it cannot parse as a plain watch). Turning a disabled
+		// watch on resets its starting point, which is what the first poll wants.
+		enabled: false,
 	});
 	try {
 		return await db.transaction(async (tx) => {

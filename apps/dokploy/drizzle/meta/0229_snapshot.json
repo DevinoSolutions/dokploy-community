@@ -5913,7 +5913,7 @@
           "columnsTo": [
             "connectionId"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },

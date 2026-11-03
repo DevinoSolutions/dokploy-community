@@ -135,12 +135,14 @@ export const ghaConnection = pgTable(
 	},
 	(table) => [
 		// Named by hand: the generated name would be 78 characters, and
-		// PostgreSQL silently cuts identifiers at 63.
+		// PostgreSQL silently cuts identifiers at 63. Restrict, not cascade: removing
+		// a GitHub account must never drop the saved source of a flipped service
+		// (githubDeployment.disconnect refuses while a connection uses the account).
 		foreignKey({
 			columns: [table.githubConnectionId],
 			foreignColumns: [githubDeploymentConnection.connectionId],
 			name: "gha_connection_github_connection_fk",
-		}).onDelete("cascade"),
+		}).onDelete("restrict"),
 		unique("gha_connection_service_unique").on(
 			table.serviceType,
 			table.serviceId,

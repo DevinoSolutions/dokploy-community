@@ -317,9 +317,16 @@ describe("connect and whose GitHub token it may spend (the githubDeployment.watc
 				connectionId: "gh-1",
 				serviceId: "compose-1",
 				organizationId: "org-a",
-				enabled: true,
 			}),
 		);
+	});
+
+	it("creates the #577 watch disabled: nothing polls it until the connection poll takes over", async () => {
+		await callerFor("owner").connect(connectInput);
+		expect(mocks.upsertGithubWatch).toHaveBeenCalledTimes(1);
+		expect(mocks.upsertGithubWatch.mock.calls[0]?.[0]).toMatchObject({
+			enabled: false,
+		});
 	});
 
 	it("refuses a member another member's account that is not shared, before any GitHub read", async () => {

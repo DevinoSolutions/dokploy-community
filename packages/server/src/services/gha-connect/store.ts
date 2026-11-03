@@ -45,6 +45,17 @@ export const findGhaConnectionById = async (ghaConnectionId: string) => {
 
 export const listGhaConnections = async () => db.select().from(ghaConnection);
 
+/** How many services follow GitHub Actions releases through this GitHub account. */
+export const countGhaConnectionsForGithubConnection = async (
+	githubConnectionId: string,
+) =>
+	(
+		await db
+			.select({ id: ghaConnection.ghaConnectionId })
+			.from(ghaConnection)
+			.where(eq(ghaConnection.githubConnectionId, githubConnectionId))
+	).length;
+
 export const createGhaConnection = async (
 	input: typeof ghaConnection.$inferInsert,
 	executor: Pick<typeof db, "insert"> = db,
