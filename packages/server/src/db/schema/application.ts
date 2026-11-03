@@ -83,6 +83,8 @@ export const sourceType = pgEnum("sourceType", [
 	"bitbucket",
 	"gitea",
 	"drop",
+	// A service that follows GitHub Actions releases (T-13879): its image comes from the repository's workflow.
+	"github-actions",
 ]);
 
 export const buildType = pgEnum("buildType", [
@@ -387,7 +389,16 @@ const createSchema = createInsertSchema(applications, {
 	dockerContextPath: checkoutPathSchema("the Docker context path").optional(),
 	environmentId: z.string(),
 	sourceType: z
-		.enum(["github", "docker", "git", "gitlab", "bitbucket", "gitea", "drop"])
+		.enum([
+			"github",
+			"docker",
+			"git",
+			"gitlab",
+			"bitbucket",
+			"gitea",
+			"drop",
+			"github-actions",
+		])
 		.optional(),
 	triggerType: z.enum(["push", "tag"]).optional(),
 	applicationStatus: z.enum(["idle", "running", "done", "error"]),

@@ -1,4 +1,5 @@
 import { githubActionsPushTarget } from "@dokploy/server/services/build-origin-shared";
+import { isGhaSourceType } from "@dokploy/server/services/gha-connect/provider";
 import {
 	Ban,
 	CheckCircle2,
@@ -28,6 +29,7 @@ import {
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
 import { DockerTerminalModal } from "../../settings/web-server/docker-terminal-modal";
+import { redeployCopy } from "../shared/gha-provider-model";
 
 interface Props {
 	applicationId: string;
@@ -58,7 +60,15 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 	const { mutateAsync: redeploy } = api.application.redeploy.useMutation();
 
 	// Built in GitHub Actions: Dokploy only pulls and starts the image (T-12424).
-	const isGithubActions = data?.buildOrigin === "github-actions";
+	// A service whose provider is GitHub Actions (T-13879) counts too, before its first release is built.
+	const isGhaProvider = isGhaSourceType(data?.sourceType);
+	const isGithubActions =
+		data?.buildOrigin === "github-actions" || isGhaProvider;
+	const { data: ghaConnection } = api.ghaConnection.one.useQuery(
+		{ serviceType: "application", serviceId: applicationId },
+		{ enabled: isGhaProvider && !!applicationId, retry: false },
+	);
+	const redeployLabels = redeployCopy(ghaConnection?.trackedBranch);
 
 	const rebuildAction = canDeploy && (
 		<DialogAction
@@ -119,12 +129,12 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 								<DialogAction
 									title={
 										isGithubActions
-											? "Redeploy current version"
+											? redeployLabels.label
 											: "Deploy Application"
 									}
 									description={
 										isGithubActions
-											? "Dokploy will pull the current image again and restart this application. Nothing is built."
+											? redeployLabels.confirm
 											: "Are you sure you want to deploy this application?"
 									}
 									type="default"
@@ -157,9 +167,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 											<TooltipTrigger asChild>
 												<div className="flex items-center">
 													<Rocket className="size-4 mr-1" />
-													{isGithubActions
-														? "Redeploy current version"
-														: "Deploy"}
+													{isGithubActions ? redeployLabels.label : "Deploy"}
 												</div>
 											</TooltipTrigger>
 											<TooltipPrimitive.Portal>
@@ -176,11 +184,14 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 								</DialogAction>
 								{isGithubActions && (
 									<GithubActionsRedeployHint
-										target={githubActionsPushTarget({
-											branch: data?.branch,
-											sourceType: data?.sourceType,
-											buildRepository: data?.buildRepository,
-										})}
+										target={
+											ghaConnection?.trackedBranch ??
+											githubActionsPushTarget({
+												branch: data?.branch,
+												sourceType: data?.sourceType,
+												buildRepository: data?.buildRepository,
+											})
+										}
 									/>
 								)}
 							</div>
@@ -370,7 +381,9 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 					)}
 				</CardContent>
 			</Card>
-			{isGithubActions ? (
+			{isGhaProvider ? (
+				<ShowProviderForm applicationId={applicationId} />
+			) : isGithubActions ? (
 				<GithubActionsAdvanced description="The image and where it comes from. Build, cache and autodeploy settings are hidden because GitHub Actions builds this service.">
 					<ShowProviderForm applicationId={applicationId} />
 				</GithubActionsAdvanced>

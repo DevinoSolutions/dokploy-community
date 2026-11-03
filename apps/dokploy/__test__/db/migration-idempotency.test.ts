@@ -64,6 +64,8 @@ const NON_IDEMPOTENT_DDL: { label: string; pattern: RegExp }[] = [
 	{ label: "CREATE INDEX", pattern: /CREATE\s+(UNIQUE\s+)?INDEX/i },
 	{ label: "ADD COLUMN", pattern: /ADD\s+COLUMN/i },
 	{ label: "ADD CONSTRAINT", pattern: /ADD\s+CONSTRAINT/i },
+	// An enum value (T-13879): Postgres has the IF NOT EXISTS form, so a replay is a no-op.
+	{ label: "ADD VALUE", pattern: /ADD\s+VALUE/i },
 ];
 
 describe("fork-delta migration idempotency (idx >= 174)", () => {

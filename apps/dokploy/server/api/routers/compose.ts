@@ -57,7 +57,6 @@ import {
 	updateDeploymentStatus,
 	withdrawLiveBuildDeploy,
 } from "@dokploy/server";
-import { removeGhaConnectionsForServices } from "@dokploy/server/services/gha-connect/store";
 import { db } from "@dokploy/server/db";
 import { getBuildOriginsByService } from "@dokploy/server/services/build-origin";
 import {
@@ -73,6 +72,7 @@ import {
 	assertCommandSaveable,
 	assertComposeFileVolumesBound,
 } from "@dokploy/server/services/compose-volume-binding";
+import { removeGhaConnectionsForServices } from "@dokploy/server/services/gha-connect/store";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
@@ -103,6 +103,7 @@ import { parse } from "toml";
 import { stringify } from "yaml";
 import { z } from "zod";
 import { slugify } from "@/lib/slug";
+import { assertSourceChangeAllowed } from "@/server/api/utils/gha-provider-guard";
 import { resolveHostIpForOrg } from "@/server/api/utils/local-host-access";
 import {
 	apiCreateCompose,
@@ -334,6 +335,11 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
+			await assertSourceChangeAllowed({
+				serviceType: "compose",
+				serviceId: input.composeId,
+				nextSourceType: input.sourceType,
+			});
 
 			// Registries, git providers and the SSH key give the build credentials: each
 			// one that is set has to be the caller's organization's (T-6895).
@@ -464,7 +470,10 @@ export const composeRouter = createTRPCRouter({
 			if (input.composeFile) {
 				const existing = await findComposeById(input.composeId);
 				const effective = { ...existing, ..._.omitBy(input, _.isUndefined) };
-				if (effective.sourceType === "raw") {
+				if (
+					effective.sourceType === "raw" ||
+					effective.sourceType === "github-actions"
+				) {
 					try {
 						await assertComposeFileVolumesBound(effective, input.composeFile);
 					} catch (error) {
@@ -1548,6 +1557,11 @@ export const composeRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
+			});
+			await assertSourceChangeAllowed({
+				serviceType: "compose",
+				serviceId: input.composeId,
+				nextSourceType: "github",
 			});
 
 			await updateCompose(input.composeId, {

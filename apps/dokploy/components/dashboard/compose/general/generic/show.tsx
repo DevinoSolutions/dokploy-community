@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { toast } from "sonner";
 import { UnauthorizedGitProvider } from "@/components/dashboard/application/general/generic/unauthorized-git-provider";
+import { GhaProviderPanel } from "@/components/dashboard/shared/gha-provider-panel";
 import {
 	BitbucketIcon,
 	GiteaIcon,
@@ -21,7 +22,14 @@ import { SaveGiteaProviderCompose } from "./save-gitea-provider-compose";
 import { SaveGithubProviderCompose } from "./save-github-provider-compose";
 import { SaveGitlabProviderCompose } from "./save-gitlab-provider-compose";
 
-type TabState = "github" | "git" | "raw" | "gitlab" | "bitbucket" | "gitea";
+type TabState =
+	| "github"
+	| "git"
+	| "raw"
+	| "gitlab"
+	| "bitbucket"
+	| "gitea"
+	| "github-actions";
 interface Props {
 	composeId: string;
 }
@@ -91,7 +99,8 @@ export const ShowProviderFormCompose = ({ composeId }: Props) => {
 	if (
 		compose &&
 		!compose.hasGitProviderAccess &&
-		compose.sourceType !== "raw"
+		compose.sourceType !== "raw" &&
+		compose.sourceType !== "github-actions"
 	) {
 		return (
 			<Card className="group relative w-full bg-transparent">
@@ -180,6 +189,13 @@ export const ShowProviderFormCompose = ({ composeId }: Props) => {
 							>
 								<GitIcon />
 								Git
+							</TabsTrigger>
+							<TabsTrigger
+								value="github-actions"
+								className="rounded-none border-b-2 gap-2 border-b-transparent data-[state=active]:border-b-2 data-[state=active]:border-b-border"
+							>
+								<GithubIcon className="size-4 text-current fill-current" />
+								GitHub Actions
 							</TabsTrigger>
 							<TabsTrigger
 								value="raw"
@@ -273,6 +289,23 @@ export const ShowProviderFormCompose = ({ composeId }: Props) => {
 					</TabsContent>
 					<TabsContent value="git" className="w-full p-2">
 						<SaveGitProviderCompose composeId={composeId} />
+					</TabsContent>
+
+					<TabsContent value="github-actions" className="w-full p-2">
+						<GhaProviderPanel
+							id={composeId}
+							type="compose"
+							defaults={{
+								repository:
+									compose?.sourceType === "github" &&
+									compose.owner &&
+									compose.repository
+										? `${compose.owner}/${compose.repository}`
+										: null,
+								branch:
+									compose?.sourceType === "github" ? compose.branch : null,
+							}}
+						/>
 					</TabsContent>
 
 					<TabsContent value="raw" className="w-full p-2 flex flex-col gap-4">

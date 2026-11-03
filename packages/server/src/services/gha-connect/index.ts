@@ -12,5 +12,7 @@ export * from "./namespace";
 export * from "./ordering";
 export * from "./present";
 export * from "./processed";
+export * from "./provider";
 export * from "./state-machine";
 export * from "./store";
+export * from "./workflow-snippet";

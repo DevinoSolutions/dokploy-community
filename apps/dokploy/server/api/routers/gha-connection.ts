@@ -11,11 +11,17 @@ import {
 	upsertGithubWatch,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
-import { applications, registry } from "@dokploy/server/db/schema";
+import {
+	applications,
+	compose as composeTable,
+	registry,
+} from "@dokploy/server/db/schema";
 import {
 	applyConnectionEvent,
+	buildWorkflowSnippet,
 	type ConnectPlan,
 	type ConnectReads,
+	type ConnectServiceDeps,
 	type ConnectServiceError,
 	type ConnectServiceInput,
 	connectGhaService,
@@ -29,6 +35,7 @@ import {
 	getRepositoryByName,
 	listReleases,
 	overrideGate,
+	planSourceRestore,
 	presentGhaConnection,
 	type ServiceFacts,
 	serviceRowExists,
@@ -38,16 +45,49 @@ import {
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
+import { z } from "zod";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
 	apiGhaCheckNow,
+	apiGhaConnect,
 	apiGhaConnectInput,
 	apiGhaConnectionOne,
 	apiGhaDeployAnyway,
 	apiGhaDisconnect,
 	apiGhaUpdate,
 } from "@/server/db/schema";
+
+const JOB_ID = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+const SAFE_PATH = /^[A-Za-z0-9._/-]+$/;
+
+/** The input of `snippet`: which file to generate, and the few facts it needs. */
+const apiGhaSnippetInput = z.discriminatedUnion("mode", [
+	z.object({
+		mode: z.literal("build"),
+		serviceKey: apiGhaConnect.shape.serviceKey,
+		trackedBranch: apiGhaConnect.shape.trackedBranch,
+		environment: apiGhaConnect.shape.environment,
+		dockerfile: z
+			.string()
+			.trim()
+			.regex(SAFE_PATH, "Not a valid file path")
+			.default("Dockerfile"),
+		context: z
+			.string()
+			.trim()
+			.regex(SAFE_PATH, "Not a valid directory")
+			.default("."),
+	}),
+	z.object({
+		mode: z.literal("existing"),
+		serviceKey: apiGhaConnect.shape.serviceKey,
+		trackedBranch: apiGhaConnect.shape.trackedBranch,
+		environment: apiGhaConnect.shape.environment,
+		buildJob: z.string().regex(JOB_ID, "Not a valid job id"),
+		imageOutput: z.string().regex(JOB_ID, "Not a valid output name"),
+	}),
+]);
 
 /**
  * "Build on GitHub Actions", connected natively (T-13719). The GitHub token is
@@ -142,11 +182,18 @@ const persistConnection = async (
 			},
 			tx,
 		);
-		if (plan.serviceUpdate && input.serviceType === "application") {
+		// The provider switch (T-13879): the service now has the github-actions source type. The git settings
+		// are not touched, so Disconnect can put them back.
+		if (input.serviceType === "application") {
 			await tx
 				.update(applications)
 				.set(plan.serviceUpdate)
 				.where(eq(applications.applicationId, input.serviceId));
+		} else {
+			await tx
+				.update(composeTable)
+				.set({ sourceType: plan.serviceUpdate.sourceType })
+				.where(eq(composeTable.composeId, input.serviceId));
 		}
 		return createGhaConnection(
 			{
@@ -174,6 +221,72 @@ const persistConnection = async (
 			tx,
 		);
 	});
+
+type ConnectCtx = {
+	session: { activeOrganizationId: string };
+	user: { id: string; role: string };
+};
+
+/** The reads Connect and "Test connection" share: the same checks, in the same order, with the same messages. */
+const connectDeps = <Saved>(
+	ctx: ConnectCtx,
+	persist: ConnectServiceDeps<Saved>["persist"],
+): ConnectServiceDeps<Saved> => {
+	const organizationId = ctx.session.activeOrganizationId;
+	return {
+		githubConnection: async (id) => {
+			const account = await findGithubConnectionInOrganization(
+				id,
+				organizationId,
+			);
+			if (!account) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "GitHub connection not found",
+				});
+			}
+			// Same model as githubDeployment.watchSet: being allowed to connect a
+			// service is not being allowed to spend another member's GitHub
+			// token (own connection, one shared with the organization, or any
+			// for an owner or admin).
+			if (
+				!canUseGithubConnection(account, {
+					userId: ctx.user.id,
+					role: ctx.user.role,
+				})
+			) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message:
+						"This GitHub connection belongs to another member and is not shared with the organization",
+				});
+			}
+			return { scopes: account.scopes, status: account.status };
+		},
+		token: loadConnectionToken,
+		service: (type, id) => loadServiceFacts(type, id, organizationId),
+		existing: async (type, id) => ({
+			connection: (await findGhaConnection(type, id)) !== null,
+			plainWatch: (await findGithubWatch(type, id)) !== null,
+		}),
+		reads: githubReads,
+		// The Dokploy registry (Settings, Registry) whose URL and login check the digests.
+		registry: async (id) => {
+			const [row] = await db
+				.select({ registryUrl: registry.registryUrl })
+				.from(registry)
+				.where(
+					and(
+						eq(registry.registryId, id),
+						eq(registry.organizationId, organizationId),
+					),
+				);
+			return row ?? null;
+		},
+		persist,
+		isUniqueViolation,
+	};
+};
 
 const trpcCode = (code: ConnectServiceError["code"]) =>
 	code === "not-found"
@@ -227,7 +340,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 				method: "POST",
 				path: "/ghaConnection.connect",
 				description:
-					"Make an application or compose stack follow the GitHub Actions releases of a repository. Dokploy never receives a call from GitHub: it polls GitHub for GitHub Deployments whose task is dokploy:<serviceKey>, reads the run artifact dokploy-release, checks it against the run, the registry and the environment's deployment branch policy, and deploys the image digest. Needs the service's create access, a GitHub connection (githubDeployment-connections) authorized with repo_deployment plus public_repo (public repositories) or repo (private ones), and a GitHub environment whose deployment branches allow only the tracked branch. An application built from git keeps its settings and has git autodeploy turned off now; it moves to the image at the first release (a public GHCR image only). For images mirrored to a private registry give registryPrefix (host[:port][/path] exactly as in the release, for example localhost:5000/registry.devino.ca) and registryId, the Dokploy registry whose URL and login check the digests; a compose stack stored in Dokploy (raw) is the supported shape. The workflow file is not created: copy the one the dashboard shows. Refuses a service that already follows GitHub Deployments.",
+					"Make an application or compose stack follow the GitHub Actions releases of a repository. Dokploy never receives a call from GitHub: it polls GitHub for GitHub Deployments whose task is dokploy:<serviceKey>, reads the run artifact dokploy-release, checks it against the run, the registry and the environment's deployment branch policy, and deploys the image digest. Needs the service's create access, a GitHub connection (githubDeployment-connections) authorized with repo_deployment plus public_repo (public repositories) or repo (private ones), and a GitHub environment whose deployment branches allow only the tracked branch. The service gets the source type github-actions (the Provider tab shows GitHub Actions): an application keeps its git settings, has git autodeploy turned off and runs the image of the latest release; a manual deploy only redeploys that image, a new version comes from a push to the tracked branch (a public GHCR image only for an application built from git). Disconnect puts the previous source back. For images mirrored to a private registry give registryPrefix (host[:port][/path] exactly as in the release, for example localhost:5000/registry.devino.ca) and registryId, the Dokploy registry whose URL and login check the digests; a compose stack stored in Dokploy (raw) is the supported shape. The workflow file is not created: copy the one the dashboard shows. Refuses a service that already follows GitHub Deployments.",
 			},
 		})
 		.input(apiGhaConnectInput)
@@ -238,60 +351,12 @@ export const ghaConnectionRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const organizationId = ctx.session.activeOrganizationId;
-			const result = await connectGhaService(input, {
-				githubConnection: async (id) => {
-					const account = await findGithubConnectionInOrganization(
-						id,
-						organizationId,
-					);
-					if (!account) {
-						throw new TRPCError({
-							code: "NOT_FOUND",
-							message: "GitHub connection not found",
-						});
-					}
-					// Same model as githubDeployment.watchSet: being allowed to connect a
-					// service is not being allowed to spend another member's GitHub
-					// token (own connection, one shared with the organization, or any
-					// for an owner or admin).
-					if (
-						!canUseGithubConnection(account, {
-							userId: ctx.user.id,
-							role: ctx.user.role,
-						})
-					) {
-						throw new TRPCError({
-							code: "FORBIDDEN",
-							message:
-								"This GitHub connection belongs to another member and is not shared with the organization",
-						});
-					}
-					return { scopes: account.scopes, status: account.status };
-				},
-				token: loadConnectionToken,
-				service: (type, id) => loadServiceFacts(type, id, organizationId),
-				existing: async (type, id) => ({
-					connection: (await findGhaConnection(type, id)) !== null,
-					plainWatch: (await findGithubWatch(type, id)) !== null,
-				}),
-				reads: githubReads,
-				// The Dokploy registry (Settings, Registry) whose URL and login check the digests.
-				registry: async (id) => {
-					const [row] = await db
-						.select({ registryUrl: registry.registryUrl })
-						.from(registry)
-						.where(
-							and(
-								eq(registry.registryId, id),
-								eq(registry.organizationId, organizationId),
-							),
-						);
-					return row ?? null;
-				},
-				persist: (plan, request, mirror) =>
+			const result = await connectGhaService(
+				input,
+				connectDeps(ctx, (plan, request, mirror) =>
 					persistConnection(organizationId, plan, request, mirror),
-				isUniqueViolation,
-			});
+				),
+			);
 			if (!result.ok) {
 				throw new TRPCError({
 					code: trpcCode(result.code),
@@ -307,13 +372,79 @@ export const ghaConnectionRouter = createTRPCRouter({
 			return presentGhaConnection(result.saved);
 		}),
 
+	testConnection: withPermission("gitProviders", "create")
+		.meta({
+			openapi: {
+				method: "POST",
+				path: "/ghaConnection.testConnection",
+				description:
+					"Run every check Connect runs (the GitHub account and its scopes, the repository, the tracked branch, the GitHub environment's deployment branch policy, the registry) and change nothing. Returns ok true with the repository and the commit the first release should carry, or ok false with the sentence that says what to fix. Takes the same input as connect.",
+			},
+		})
+		.input(apiGhaConnectInput)
+		.mutation(async ({ ctx, input }) => {
+			assertSelfHosted();
+			await checkServicePermissionAndAccess(ctx, input.serviceId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const result = await connectGhaService(
+				input,
+				connectDeps(ctx, async () => null),
+			);
+			if (!result.ok) {
+				return { ok: false as const, message: result.message };
+			}
+			return {
+				ok: true as const,
+				repository: result.plan.repoFullName,
+				branchHead: result.plan.expectedSha,
+			};
+		}),
+
+	snippet: withPermission("gitProviders", "read")
+		.meta({
+			openapi: {
+				method: "GET",
+				path: "/ghaConnection.snippet",
+				description:
+					"The GitHub Actions file that publishes releases for this service. mode build returns a whole workflow (.github/workflows/dokploy.yml) that builds the image from a Dockerfile; mode existing returns one job to add to the workflow that already builds the image (needs buildJob and imageOutput). Neither holds a Dokploy address or key. Returns the YAML text, whether it is a file or a job, and the path of the file to create. Nothing is written to the repository.",
+			},
+		})
+		.input(apiGhaSnippetInput)
+		.query(({ input }) => {
+			const built = buildWorkflowSnippet(
+				input.mode === "build"
+					? {
+							mode: "build",
+							branch: input.trackedBranch,
+							environment: input.environment,
+							serviceKey: input.serviceKey,
+							dockerfile: input.dockerfile,
+							context: input.context,
+						}
+					: {
+							mode: "existing",
+							branch: input.trackedBranch,
+							environment: input.environment,
+							serviceKey: input.serviceKey,
+							buildJob: input.buildJob,
+							imageOutput: input.imageOutput,
+						},
+			);
+			if (!built.ok) {
+				throw new TRPCError({ code: "BAD_REQUEST", message: built.error });
+			}
+			return { kind: built.kind, path: built.path, yaml: built.yaml };
+		}),
+
 	disconnect: withPermission("gitProviders", "create")
 		.meta({
 			openapi: {
 				method: "POST",
 				path: "/ghaConnection.disconnect",
 				description:
-					"Stop a service from following GitHub Actions releases. By default an application goes back to the git source it had before it was connected (restoreSource false leaves it on its current image). The service keeps running its current deployment. Removes the connection, its release history and its watch.",
+					"Stop a service from following GitHub Actions releases. By default the service goes back to the source it had before it was connected (restoreSource false leaves it on its current image or stored compose file, with the source type docker or raw). The service keeps running its current deployment. Removes the connection, its release history and its watch.",
 			},
 		})
 		.input(apiGhaDisconnect)
@@ -345,18 +476,37 @@ export const ghaConnectionRouter = createTRPCRouter({
 			if (!row || row.organizationId !== organizationId) return true;
 			const watch = await findGithubWatch(input.serviceType, input.serviceId);
 			await db.transaction(async (tx) => {
-				if (
-					!serviceGone &&
-					input.restoreSource &&
-					input.serviceType === "application" &&
-					row.previousSource
-				) {
-					await tx
-						.update(applications)
-						.set(
-							row.previousSource as Partial<typeof applications.$inferInsert>,
-						)
-						.where(eq(applications.applicationId, input.serviceId));
+				if (!serviceGone) {
+					const restore = planSourceRestore({
+						kind: input.serviceType,
+						previousSource: row.previousSource,
+						restoreSource: input.restoreSource,
+					});
+					if (input.serviceType === "application") {
+						await tx
+							.update(applications)
+							.set(restore.values as Partial<typeof applications.$inferInsert>)
+							.where(
+								restore.onlyWhenGha
+									? and(
+											eq(applications.applicationId, input.serviceId),
+											eq(applications.sourceType, "github-actions"),
+										)
+									: eq(applications.applicationId, input.serviceId),
+							);
+					} else {
+						await tx
+							.update(composeTable)
+							.set(restore.values as Partial<typeof composeTable.$inferInsert>)
+							.where(
+								restore.onlyWhenGha
+									? and(
+											eq(composeTable.composeId, input.serviceId),
+											eq(composeTable.sourceType, "github-actions"),
+										)
+									: eq(composeTable.composeId, input.serviceId),
+							);
+					}
 				}
 				await deleteGhaConnection(input.serviceType, input.serviceId, tx);
 				await deleteGithubWatch(input.serviceType, input.serviceId, tx);

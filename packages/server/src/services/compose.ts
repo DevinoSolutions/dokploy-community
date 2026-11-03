@@ -102,6 +102,7 @@ import {
 } from "./deployment-cancel";
 import { recordVaultFailureReason } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
+import { asDeployable } from "./gha-connect/provider";
 import {
 	loginGhcrForCompose,
 	removeGhcrConfigDir,
@@ -921,7 +922,7 @@ export const deployCompose = async ({
 	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
 	deploymentId?: string | null;
 }) => {
-	const compose = await findComposeById(composeId);
+	const compose = asDeployable("compose", await findComposeById(composeId));
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${
 		compose.environment.projectId
@@ -1108,7 +1109,7 @@ export const rebuildCompose = async ({
 	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
 	deploymentId?: string | null;
 }) => {
-	const compose = await findComposeById(composeId);
+	const compose = asDeployable("compose", await findComposeById(composeId));
 
 	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
 	const liveDeployment = deploymentId
@@ -1488,7 +1489,7 @@ const assertComposeDirectoryExists = async (
 };
 
 export const startCompose = async (composeId: string) => {
-	const compose = await findComposeById(composeId);
+	const compose = asDeployable("compose", await findComposeById(composeId));
 	assertSafeComposePath(compose.composePath);
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const projectPath = join(COMPOSE_PATH, compose.appName, "code");

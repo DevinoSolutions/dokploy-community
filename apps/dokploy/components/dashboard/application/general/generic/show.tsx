@@ -6,6 +6,7 @@ import { SaveDockerProvider } from "@/components/dashboard/application/general/g
 import { SaveGitProvider } from "@/components/dashboard/application/general/generic/save-git-provider";
 import { SaveGiteaProvider } from "@/components/dashboard/application/general/generic/save-gitea-provider";
 import { SaveGithubProvider } from "@/components/dashboard/application/general/generic/save-github-provider";
+import { GhaProviderPanel } from "@/components/dashboard/shared/gha-provider-panel";
 import {
 	BitbucketIcon,
 	DockerIcon,
@@ -31,7 +32,8 @@ type TabState =
 	| "drop"
 	| "gitlab"
 	| "bitbucket"
-	| "gitea";
+	| "gitea"
+	| "github-actions";
 
 interface Props {
 	applicationId: string;
@@ -118,7 +120,8 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 		application &&
 		!application.hasGitProviderAccess &&
 		application.sourceType !== "docker" &&
-		application.sourceType !== "drop"
+		application.sourceType !== "drop" &&
+		application.sourceType !== "github-actions"
 	) {
 		return (
 			<Card className="group relative w-full bg-transparent">
@@ -200,6 +203,13 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 							>
 								<GiteaIcon className="size-4 text-current fill-current" />
 								Gitea
+							</TabsTrigger>
+							<TabsTrigger
+								value="github-actions"
+								className="rounded-none border-b-2 gap-2 border-b-transparent data-[state=active]:border-b-2 data-[state=active]:border-b-border"
+							>
+								<GithubIcon className="size-4 text-current fill-current" />
+								GitHub Actions
 							</TabsTrigger>
 							<TabsTrigger
 								value="docker"
@@ -311,6 +321,24 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 								</span>
 							</div>
 						)}
+					</TabsContent>
+					<TabsContent value="github-actions" className="w-full p-2">
+						<GhaProviderPanel
+							id={applicationId}
+							type="application"
+							defaults={{
+								repository:
+									application?.sourceType === "github" &&
+									application.owner &&
+									application.repository
+										? `${application.owner}/${application.repository}`
+										: null,
+								branch:
+									application?.sourceType === "github"
+										? application.branch
+										: null,
+							}}
+						/>
 					</TabsContent>
 					<TabsContent value="docker" className="w-full p-2">
 						<SaveDockerProvider applicationId={applicationId} />

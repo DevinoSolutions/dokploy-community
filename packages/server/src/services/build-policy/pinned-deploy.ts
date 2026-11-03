@@ -18,6 +18,7 @@ import {
 	updateDeploymentStatus,
 } from "../deployment";
 import { recordVaultFailureReason } from "../deployment-error-message";
+import { asDeployable } from "../gha-connect/provider";
 import { findAllRegistryByOrganizationId } from "../registry";
 import { registryForAuth } from "./apply";
 import { recordBuildPolicyAudit } from "./audit";
@@ -53,7 +54,11 @@ export const deployPinnedApplicationImage = async ({
 	/** First line of the deployment log, saying why there is no build. */
 	introLog?: string;
 }) => {
-	const application = await findApplicationById(applicationId);
+	// A GitHub Actions service pulls the pinned image like a Docker image service (T-13879).
+	const application = asDeployable(
+		"application",
+		await findApplicationById(applicationId),
+	);
 	const organizationId = application.environment.project.organizationId;
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 

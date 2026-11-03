@@ -547,8 +547,12 @@ describe("connect writes the watch and the connection", () => {
 			}),
 			expect.anything(),
 		);
-		// A raw compose has nothing to flip: no service row is changed.
-		expect(mocks.updates).toEqual([]);
+		// The provider switch (T-13879): the stack gets the github-actions source type, nothing else changes.
+		expect(mocks.updates).toEqual([{ sourceType: "github-actions" }]);
+		expect(mocks.createGhaConnection).toHaveBeenCalledWith(
+			expect.objectContaining({ previousSource: { sourceType: "raw" } }),
+			expect.anything(),
+		);
 		expect(saved).not.toHaveProperty("previousSource");
 		expect(saved).not.toHaveProperty("processed");
 		expect(JSON.stringify(saved)).not.toContain("gho_secret_token");
@@ -571,7 +575,9 @@ describe("connect writes the watch and the connection", () => {
 			registryPrefix: null,
 			registryId: null,
 		});
-		expect(mocks.updates).toEqual([{ autoDeploy: false }]);
+		expect(mocks.updates).toEqual([
+			{ autoDeploy: false, sourceType: "github-actions" },
+		]);
 		expect(mocks.createGhaConnection).toHaveBeenCalledWith(
 			expect.objectContaining({
 				previousSource: expect.objectContaining({ sourceType: "github" }),
@@ -724,8 +730,46 @@ describe("disconnect", () => {
 			serviceId: "app-1",
 			restoreSource: false,
 		});
-		expect(mocks.updates).toEqual([]);
+		// Not restoring means staying on the image: the source type is no longer github-actions (the write
+		// only touches a service that still is).
+		expect(mocks.updates).toEqual([{ sourceType: "docker" }]);
 		expect(mocks.deleteGhaConnection).toHaveBeenCalled();
+	});
+
+	it("puts a compose stack back on its stored file, or leaves it on the file when not restoring", async () => {
+		mocks.findGhaConnection.mockResolvedValue(
+			storedRow({ previousSource: { sourceType: "raw" } }),
+		);
+		await callerFor("owner").disconnect({
+			serviceType: "compose",
+			serviceId: "compose-1",
+			restoreSource: true,
+		});
+		await callerFor("owner").disconnect({
+			serviceType: "compose",
+			serviceId: "compose-1",
+			restoreSource: false,
+		});
+		expect(mocks.updates).toEqual([
+			{ sourceType: "raw" },
+			{ sourceType: "raw" },
+		]);
+	});
+
+	it("a connection saved without a source type only gets the fallback write", async () => {
+		mocks.findGhaConnection.mockResolvedValue(
+			storedRow({
+				serviceType: "application",
+				serviceId: "app-1",
+				previousSource: { autoDeploy: true },
+			}),
+		);
+		await callerFor("owner").disconnect({
+			serviceType: "application",
+			serviceId: "app-1",
+			restoreSource: true,
+		});
+		expect(mocks.updates).toEqual([{ sourceType: "docker" }]);
 	});
 
 	it("does nothing for a connection of another organization", async () => {
@@ -1331,5 +1375,88 @@ describe("one shows the gate of each release", () => {
 			gateMode: "checks",
 			gateTimeoutMinutes: 60,
 		});
+	});
+});
+
+describe("testConnection (Test connection in the Connect flow)", () => {
+	it("runs the Connect checks and writes nothing", async () => {
+		const result = await callerFor("owner").testConnection(connectInput);
+		expect(result).toEqual({
+			ok: true,
+			repository: "DevinoSolutions/voicelabs",
+			branchHead: "a".repeat(40),
+		});
+		nothingWritten();
+	});
+
+	it("answers a failed check with the sentence that says what to fix, not an error", async () => {
+		mocks.getEnvironmentPolicy.mockResolvedValue({
+			kind: "ok",
+			etag: null,
+			value: {
+				customBranchPolicies: false,
+				protectedBranches: false,
+				policies: [],
+			},
+		});
+		const result = await callerFor("owner").testConnection(connectInput);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toContain("development");
+		nothingWritten();
+	});
+
+	it("needs the same access as connect", async () => {
+		await expect(
+			callerFor("member").testConnection(connectInput),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.getRepositoryByName).not.toHaveBeenCalled();
+	});
+
+	it("refuses a GitHub account of another member like connect does", async () => {
+		mocks.memberGitProviderActions = ["create"];
+		mocks.findGithubConnectionInOrganization.mockResolvedValue(
+			account({ createdByUserId: "someone-else" }),
+		);
+		await expect(
+			callerFor("member", "user-1").testConnection(connectInput),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+	});
+});
+
+describe("snippet", () => {
+	const input = {
+		mode: "build" as const,
+		serviceKey: "web",
+		trackedBranch: "dev",
+		environment: "development",
+	};
+
+	it("returns the workflow to create, and writes nothing", async () => {
+		mocks.memberGitProviderActions = ["read"];
+		const result = await callerFor("member").snippet(input);
+		expect(result.kind).toBe("file");
+		expect(result.path).toBe(".github/workflows/dokploy.yml");
+		expect(result.yaml).toContain("dokploy-release@v1");
+		nothingWritten();
+	});
+
+	it("returns the job to add to the user's own workflow", async () => {
+		const result = await callerFor("owner").snippet({
+			mode: "existing",
+			serviceKey: "web",
+			trackedBranch: "dev",
+			environment: "development",
+			buildJob: "compose",
+			imageOutput: "image",
+		});
+		expect(result.kind).toBe("job");
+		expect(result.yaml).toContain("needs: compose");
+	});
+
+	it("is refused as bad input when a value could change the workflow", async () => {
+		await expect(
+			callerFor("owner").snippet({ ...input, trackedBranch: "dev; x" }),
+		).rejects.toBeInstanceOf(TRPCError);
 	});
 });

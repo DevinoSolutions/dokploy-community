@@ -63,6 +63,8 @@ export const sourceTypeCompose = pgEnum("sourceTypeCompose", [
 	"bitbucket",
 	"gitea",
 	"raw",
+	// A stack that follows GitHub Actions releases (T-13879): its file stays stored in Dokploy.
+	"github-actions",
 ]);
 
 export const composeType = pgEnum("composeType", ["docker-compose", "stack"]);
@@ -308,7 +310,15 @@ const createSchema = createInsertSchema(compose, {
 	// build-policy hook: array column, needs the same explicit zod shape.
 	requiredChecks: z.array(z.string()).optional(),
 	sourceType: z
-		.enum(["git", "github", "gitlab", "bitbucket", "gitea", "raw"])
+		.enum([
+			"git",
+			"github",
+			"gitlab",
+			"bitbucket",
+			"gitea",
+			"raw",
+			"github-actions",
+		])
 		.optional(),
 	triggerType: z.enum(["push", "tag"]).optional(),
 	composeStatus: z.enum(["idle", "running", "done", "error"]).optional(),

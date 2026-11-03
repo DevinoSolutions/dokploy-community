@@ -86,6 +86,7 @@ import {
 	withDeployLogHeartbeat,
 } from "./deployment-heartbeat";
 import { type Domain, getDomainHost } from "./domain";
+import { asDeployable, checkRedeployable } from "./gha-connect/provider";
 import { getIssueComment } from "./github";
 import { claimLiveGithubBuild } from "./live-build-claim";
 import { generateApplyPatchesCommand } from "./patch";
@@ -278,6 +279,20 @@ const withBuildHeartbeat = <T>(
 		wallLimitMinutes: () => getDeploymentWallLimitMinutes(deploymentId),
 	});
 
+/**
+ * The application as a deploy reads it. A service that follows GitHub Actions (T-13879) runs the image its release
+ * set, so for the deploy it is a Docker image source: a manual deploy pulls that image again and builds nothing. With
+ * no release yet there is no image, and the deploy is refused before it creates a deployment.
+ */
+const loadDeployableApplication = async (applicationId: string) => {
+	const loaded = await findApplicationById(applicationId);
+	const redeploy = checkRedeployable("application", loaded);
+	if (!redeploy.ok) {
+		throw new TRPCError({ code: "BAD_REQUEST", message: redeploy.message });
+	}
+	return asDeployable("application", loaded);
+};
+
 export const deployApplication = async ({
 	applicationId,
 	titleLog = "Manual deployment",
@@ -295,7 +310,7 @@ export const deployApplication = async ({
 	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
 	deploymentId?: string | null;
 }) => {
-	const application = await findApplicationById(applicationId);
+	const application = await loadDeployableApplication(applicationId);
 	// >>> build-policy hook 1/4: enforced remote builds. Runs before
 	// `createDeployment` because the deployment log has to be created on the
 	// host that will build. A refusal still produces a deployment row, an error
@@ -596,7 +611,7 @@ export const rebuildApplication = async ({
 	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
 	deploymentId?: string | null;
 }) => {
-	const application = await findApplicationById(applicationId);
+	const application = await loadDeployableApplication(applicationId);
 	// >>> build-policy hook 1/4 (rebuild). See services/build-policy/README.md
 	let buildPolicy: BuildPolicyPlan;
 	try {
