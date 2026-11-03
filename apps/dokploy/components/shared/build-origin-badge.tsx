@@ -11,6 +11,7 @@ import {
 	type GithubActionsRunRow,
 	type GithubActionsRunService,
 } from "@/components/shared/github-actions-run-dialog";
+import { Logo } from "@/components/shared/logo";
 import { OpensInNewTab } from "@/components/shared/opens-in-new-tab";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -68,13 +69,17 @@ export const BuildOriginBadge = ({
 };
 
 /**
- * The mark of a deployment Dokploy built or deployed on its own: quiet, so the GitHub rows next to it stand out
- * without a row having no mark at all.
+ * The origin pill of a deployment Dokploy built or deployed on its own. Same outlined pill as the GitHub Actions
+ * one (same height, padding and font), with the Dokploy mark; it is not clickable (T-13877).
  */
 export const DokployDeploymentMark = () => (
-	<span className="flex items-center gap-1 text-[10px] normal-case text-muted-foreground">
-		<Hammer className="size-3" />
-		Dokploy
+	<span className="flex items-center normal-case">
+		<Badge variant="outline" className="gap-1 text-[10px]">
+			<span aria-hidden="true" className="contents">
+				<Logo className="size-3" />
+			</span>
+			Dokploy
+		</Badge>
 	</span>
 );
 

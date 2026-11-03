@@ -1,4 +1,5 @@
 import {
+	displayDeploymentTitle,
 	isGithubActionsDeployment,
 	isLiveGithubBuild,
 } from "@dokploy/server/services/build-origin-shared";
@@ -443,7 +444,8 @@ export const ShowDeployments = ({
 				) : (
 					<div className="flex flex-col gap-4">
 						{deployments?.map((deployment, index) => {
-							const titleText = deployment?.title?.trim() || "";
+							const titleText =
+								displayDeploymentTitle(deployment?.title)?.trim() || "";
 							const needsTruncation = titleText.length > MAX_DESCRIPTION_LENGTH;
 							const isExpanded = expandedDescriptions.has(
 								deployment.deploymentId,
