@@ -27,6 +27,8 @@ const input: ConnectServiceInput = {
 	registryId: null,
 	protectionMode: "environment",
 	gateMode: "image",
+	gateWorkflows: [],
+	gateTimeoutMinutes: 60,
 };
 
 const docker: ServiceFacts = {
@@ -261,7 +263,10 @@ describe("registryHostOf: the host digests are checked at, taken from the URL", 
 	it.each([
 		["https://Registry.Devino.CA/", "registry.devino.ca"],
 		["registry.devino.ca", "registry.devino.ca"],
-		["http://registry.devino.ca:5000/some/path?x=1#frag", "registry.devino.ca:5000"],
+		[
+			"http://registry.devino.ca:5000/some/path?x=1#frag",
+			"registry.devino.ca:5000",
+		],
 		["  https://registry.devino.ca/v2/  ", "registry.devino.ca"],
 	])("%s -> %s", (url, host) => {
 		expect(registryHostOf(url)).toBe(host);

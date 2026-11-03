@@ -41,6 +41,7 @@ import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/
 import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignNetworks } from "@/components/dashboard/networks/assign-networks";
 import { TransferService } from "@/components/dashboard/shared/transfer-service";
+import { GhaDeployGate } from "@/components/dashboard/shared/gha-deploy-gate";
 import { GithubDeploymentsWatch } from "@/components/dashboard/shared/github-deployments-watch";
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -440,6 +441,7 @@ const Service = (
 													id={applicationId}
 													type="application"
 												/>
+												<GhaDeployGate id={applicationId} type="application" />
 												<ShowClusterSettings
 													id={applicationId}
 													type="application"

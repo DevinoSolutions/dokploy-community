@@ -48,6 +48,35 @@ export type GhaConnectionState = (typeof GHA_CONNECTION_STATES)[number];
 export const GHA_GATE_MODES = ["image", "checks", "workflows"] as const;
 export type GhaGateMode = (typeof GHA_GATE_MODES)[number];
 
+/** Where a release stands at the deploy gate (T-13720). Null: not looked at yet, or the gate is off. */
+export const GHA_GATE_STATES = [
+	"waiting",
+	"blocked",
+	"passed",
+	"overridden",
+] as const;
+export type GhaGateState = (typeof GHA_GATE_STATES)[number];
+
+/** The checks a release waits for, decided once per release so the answer cannot drift while it waits. */
+export interface GhaGateExpected {
+	source: "required" | "last-green" | "fallback";
+	names: string[];
+}
+
+/** Who deployed a gated release anyway, when and why. */
+export interface GhaGateOverride {
+	by: string;
+	at: string;
+	reason: string | null;
+}
+
+export const GHA_GATE_TIMEOUT_MINUTES = {
+	min: 5,
+	max: 720,
+	default: 60,
+} as const;
+export const GHA_GATE_WORKFLOWS_MAX = 20;
+
 export const GHA_PROTECTION_MODES = [
 	"environment",
 	"repository-secret",
@@ -106,6 +135,10 @@ export const ghaConnection = pgTable(
 		 */
 		registryProbeHost: text("registryProbeHost"),
 		gateMode: text("gateMode").$type<GhaGateMode>().notNull().default("image"),
+		/** Workflow names (or file names without .yml) the release waits for in the `workflows` gate mode. */
+		gateWorkflows: text("gateWorkflows").array().notNull().default([]),
+		/** How long a check or workflow may take to report before the release is blocked. */
+		gateTimeoutMinutes: integer("gateTimeoutMinutes").notNull().default(60),
 		gateStartedAt: timestamp("gateStartedAt"),
 		state: text("state")
 			.$type<GhaConnectionState>()
@@ -197,6 +230,12 @@ export const ghaRelease = pgTable(
 		 * the same transaction as the change. The record a rollback or a "take over" reads.
 		 */
 		sourceBackup: jsonb("sourceBackup").$type<Record<string, unknown>>(),
+		/** The deploy gate: waiting, blocked, passed or overridden (T-13720). */
+		gateState: text("gateState").$type<GhaGateState>(),
+		gateReason: text("gateReason"),
+		gateCheckedAt: timestamp("gateCheckedAt"),
+		gateExpected: jsonb("gateExpected").$type<GhaGateExpected>(),
+		gateOverride: jsonb("gateOverride").$type<GhaGateOverride>(),
 		/** Kept by retention and never garbage collected. */
 		pinned: boolean("pinned").notNull().default(false),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),
@@ -236,6 +275,25 @@ export const ghaReleaseRelations = relations(ghaRelease, ({ one }) => ({
 		references: [ghaConnection.ghaConnectionId],
 	}),
 }));
+
+const GATE_MODE_HELP =
+	"When a release is deployed: image (as soon as the image is accepted), checks (when every check on the commit passes) or workflows (when the workflows named in gateWorkflows pass).";
+
+const gateWorkflowsSchema = z
+	.array(z.string().trim().min(1).max(100))
+	.max(GHA_GATE_WORKFLOWS_MAX)
+	.describe(
+		"Workflows that must pass on the commit when gateMode is workflows: the workflow's name or its file name without .yml. 1 to 20 names.",
+	);
+
+const gateTimeoutSchema = z
+	.number()
+	.int()
+	.min(GHA_GATE_TIMEOUT_MINUTES.min)
+	.max(GHA_GATE_TIMEOUT_MINUTES.max)
+	.describe(
+		"Minutes a check or workflow may take to report before the release is blocked. 5 to 720, default 60.",
+	);
 
 const REGISTRY_PREFIX =
 	/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
@@ -308,7 +366,37 @@ export const apiGhaConnect = z.object({
 			"The Dokploy registry (Settings, Registry) whose URL and login are used to check the digests. Required with registryPrefix.",
 		),
 	protectionMode: z.enum(GHA_PROTECTION_MODES).default("environment"),
-	gateMode: z.enum(GHA_GATE_MODES).default("image"),
+	gateMode: z.enum(GHA_GATE_MODES).default("image").describe(GATE_MODE_HELP),
+	gateWorkflows: gateWorkflowsSchema.default([]),
+	gateTimeoutMinutes: gateTimeoutSchema.default(
+		GHA_GATE_TIMEOUT_MINUTES.default,
+	),
+});
+
+/** The connect input as the router takes it: the workflows gate needs workflows to wait for. */
+export const apiGhaConnectInput = apiGhaConnect.superRefine((value, ctx) => {
+	if (value.gateMode === "workflows" && value.gateWorkflows.length === 0) {
+		ctx.addIssue({
+			code: "custom",
+			path: ["gateWorkflows"],
+			message: "Name at least one workflow to wait for",
+		});
+	}
+});
+
+export const apiGhaUpdate = apiGhaConnectionOne.extend({
+	gateMode: z.enum(GHA_GATE_MODES).optional().describe(GATE_MODE_HELP),
+	gateWorkflows: gateWorkflowsSchema.optional(),
+	gateTimeoutMinutes: gateTimeoutSchema.optional(),
+});
+
+export const apiGhaDeployAnyway = apiGhaConnectionOne.extend({
+	reason: z
+		.string()
+		.trim()
+		.max(300)
+		.optional()
+		.describe("Why the checks are skipped. Kept in the audit log."),
 });
 
 export const apiGhaDisconnect = apiGhaConnectionOne.extend({

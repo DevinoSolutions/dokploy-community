@@ -15,7 +15,7 @@ import {
 } from "../helpers/pglite-deployments";
 
 /**
- * Migration 0229 and the gha-connect store against a real Postgres (PGlite): the real 0228 and 0229
+ * Migrations 0229 and 0230 and the gha-connect store against a real Postgres (PGlite): the real 0228, 0229 and 0230
  * files create the tables with their constraints (0229 is applied twice, as an update that replays
  * it would), then the cascades, the unique keys and the store's real SQL run.
  */
@@ -45,9 +45,11 @@ const ready = PGliteClass !== null;
 const ALL_FILES = [
 	"0228_github_deployment_watch.sql",
 	"0229_gha_connection.sql",
+	"0230_gha_deploy_gate.sql",
 	// A second run of each: every statement is guarded, a replay is a no-op.
 	"0228_github_deployment_watch.sql",
 	"0229_gha_connection.sql",
+	"0230_gha_deploy_gate.sql",
 ];
 
 beforeAll(async () => {
