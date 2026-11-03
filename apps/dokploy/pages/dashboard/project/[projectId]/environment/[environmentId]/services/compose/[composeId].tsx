@@ -48,8 +48,8 @@ import { ComposeFreeMonitoring } from "@/components/dashboard/monitoring/free/co
 import { ComposePaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-compose-monitoring";
 import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignComposeNetworks } from "@/components/dashboard/networks/assign-compose-networks";
-import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { ComposePolicyAuditExclusion } from "@/components/dashboard/shared/compose-policy-audit-exclusion";
+import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -269,8 +269,7 @@ const Service = (
 										</Badge>
 										<BuildOriginBadge
 											buildOrigin={data?.buildOrigin}
-											buildRunUrl={data?.buildRunUrl}
-											linkToRun
+											service={{ type: "compose", id: composeId }}
 										/>
 										{data?.server?.serverStatus === "inactive" && (
 											<TooltipProvider>

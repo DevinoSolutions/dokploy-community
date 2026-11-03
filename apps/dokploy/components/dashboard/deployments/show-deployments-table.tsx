@@ -418,12 +418,19 @@ export function ShowDeploymentsTable() {
 				enableSorting: false,
 				cell: ({ row }: { row: { original: DeploymentRow } }) => {
 					const d = row.original;
+					const info = getServiceInfo(d);
 					return isGithubActionsDeployment(d) ? (
 						<GithubActionsDeploymentMark
-							buildRunUrl={d.buildRunUrl}
-							buildRepository={d.buildRepository}
-							buildCommitSha={d.buildCommitSha}
-							buildRunId={d.buildRunId}
+							service={
+								info
+									? {
+											type:
+												info.type === "Application" ? "application" : "compose",
+											id: info.serviceId,
+										}
+									: null
+							}
+							deployment={d}
 						/>
 					) : (
 						<DokployDeploymentMark />

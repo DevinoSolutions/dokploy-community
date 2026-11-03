@@ -571,10 +571,12 @@ export const ShowDeployments = ({
 												serviceBuildOrigin,
 											) ? (
 												<GithubActionsDeploymentMark
-													buildRunUrl={deployment.buildRunUrl}
-													buildRepository={deployment.buildRepository}
-													buildCommitSha={deployment.buildCommitSha}
-													buildRunId={deployment.buildRunId}
+													service={
+														type === "application" || type === "compose"
+															? { type, id }
+															: null
+													}
+													deployment={deployment}
 												/>
 											) : (
 												(type === "application" || type === "compose") && (

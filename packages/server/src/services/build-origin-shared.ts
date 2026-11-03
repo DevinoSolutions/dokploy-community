@@ -515,6 +515,113 @@ export const withGithubActionsRunDetails = <
 			: describeGithubActionsRun(row)),
 	}));
 
+/**
+ * What the action's deployment title says besides the environment, commit and run id: the commit subject
+ * ("GHA production b4f509d2: fix login [run 41376332164.2]" gives "fix login") and the run attempt ("2").
+ * Both null when the title has none, and for a title without the action's "GHA " marker.
+ */
+export const describeGithubActionsTitle = (
+	title: string | null | undefined,
+): { subject: string | null; attempt: string | null } => {
+	const none = { subject: null, attempt: null };
+	if (typeof title !== "string" || !hasGithubActionsTitleMarker(title)) {
+		return none;
+	}
+	const attempt = /\[run\s+\d{1,20}\.(\d{1,6})\]/i.exec(title)?.[1] ?? null;
+	const firstLine = title.split("\n", 1)[0] ?? "";
+	const subject =
+		/^GHA\s+[^:]*?:\s*(.+?)\s*(?:\[run\s+\d{1,20}(?:\.\d{1,6})?\])?\s*$/i
+			.exec(firstLine)?.[1]
+			?.trim() || null;
+	return { subject, attempt };
+};
+
+export type GithubActionsRunTone =
+	| "running"
+	| "success"
+	| "failed"
+	| "cancelled"
+	| "unknown";
+
+/**
+ * One word and a colour for a GitHub Actions deployment row, and the live detail line while GitHub still builds.
+ * GitHub's own conclusion is not stored, so "Failed" means the row ended in error (the run, or the deploy that
+ * followed it, failed) and "Deployed" means Dokploy pulled the image and started it.
+ */
+export const describeGithubActionsRunState = (row: {
+	status?: string | null;
+	buildOrigin?: string | null;
+	buildRunStatus?: string | null;
+	buildRunStep?: string | null;
+	externalBuildOnly?: boolean | null;
+	deployQueuedAt?: string | null;
+}): { label: string; tone: GithubActionsRunTone; detail: string | null } => {
+	const detail = describeLiveGithubBuild(row);
+	if (detail) return { label: "In progress", tone: "running", detail };
+	switch (row.status) {
+		case "done":
+			return row.externalBuildOnly
+				? { label: "Build finished", tone: "success", detail: null }
+				: { label: "Deployed", tone: "success", detail: null };
+		case "error":
+			return { label: "Failed", tone: "failed", detail: null };
+		case "cancelled":
+			return { label: "Cancelled", tone: "cancelled", detail: null };
+		case "running":
+			return { label: "Deploying", tone: "running", detail: null };
+		default:
+			return { label: row.status || "Unknown", tone: "unknown", detail: null };
+	}
+};
+
+/**
+ * The deployment of a service that runs now: the newest finished one, a rollback deploy included, ignoring rows
+ * that only follow a GitHub build and schedule, backup and preview runs. Null when nothing finished.
+ */
+export const pickServingDeployment = <T extends BuildOriginDeploymentRow>(
+	deployments: readonly T[],
+): T | null =>
+	[...deployments.filter(isServiceDeployment)]
+		.sort((a, b) => createdAtMs(b) - createdAtMs(a))
+		.find((row) => row.status === "done") ?? null;
+
+/**
+ * The image reference a deployment row pinned (`repository@sha256:...`), from the tag it pushed and the digest the
+ * service was pinned to. Null when the row recorded no digest (most GitHub Actions rows: the service's image is
+ * the reference there).
+ */
+export const deploymentImageReference = (row: {
+	imageTag?: string | null;
+	imageDigest?: string | null;
+}): string | null => {
+	const digest = row.imageDigest?.trim();
+	if (!digest || !/^sha256:[0-9a-f]{12,64}$/i.test(digest)) return null;
+	const tag = row.imageTag?.trim();
+	if (!tag) return null;
+	const at = tag.indexOf("@");
+	const base = at === -1 ? tag : tag.slice(0, at);
+	const lastSlash = base.lastIndexOf("/");
+	const colon = base.indexOf(":", lastSlash + 1);
+	const repository = colon === -1 ? base : base.slice(0, colon);
+	return repository ? `${repository}@${digest}` : null;
+};
+
+/**
+ * How long a deployment ran, "45s" or "3m 12s", from its start and finish times. Null while it has not finished
+ * and for times that do not parse or run backwards.
+ */
+export const describeDeploymentDuration = (
+	startedAt: string | null | undefined,
+	finishedAt: string | null | undefined,
+): string | null => {
+	if (!startedAt || !finishedAt) return null;
+	const ms = new Date(finishedAt).getTime() - new Date(startedAt).getTime();
+	if (!Number.isFinite(ms) || ms < 0) return null;
+	const seconds = Math.floor(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+};
+
 export type ServiceBuildDescription = ResolvedBuildOrigin &
 	GithubActionsRunDetails & {
 		/** When the deployment the value was read from finished (else was created); null for none. */
@@ -643,7 +750,7 @@ export const describeServiceBuild = (
 };
 
 /**
- * The one plain line the "Deployed from GitHub Actions" panel shows after the action's rollback deploy. The commit
+ * The one plain line the GitHub Actions run modal shows after the action's rollback deploy. The commit
  * part is left out when the rollback title names none, the run part says "the latest run" when the id is unknown,
  * and the reason is "failed its checks" for a run that deployed, else "failed to deploy".
  */
@@ -673,22 +780,27 @@ const GIT_PROVIDER_SOURCE_TYPES: readonly string[] = [
 ];
 
 /**
+ * The branch of a service set up with a git provider, else null: a docker-source service can still carry the
+ * branch of an earlier git setup, and that is not what GitHub Actions deploys from.
+ */
+export const githubActionsBranch = (input: {
+	branch?: string | null;
+	sourceType?: string | null;
+}) =>
+	(input.sourceType && GIT_PROVIDER_SOURCE_TYPES.includes(input.sourceType)
+		? input.branch?.trim()
+		: null) || null;
+
+/**
  * What "push to ..." names in the hint under the deploy button: the branch the service was set up with, else
  * the repository (`owner/repo`). An environment name is never a branch, so it is not used. The branch counts only
- * while the source is a git provider: a docker-source service can still carry the branch of an earlier git setup,
- * and that must not win over the repository. Null when neither is known.
+ * while the source is a git provider (see `githubActionsBranch`). Null when neither is known.
  */
 export const githubActionsPushTarget = (input: {
 	branch?: string | null;
 	sourceType?: string | null;
 	buildRepository?: string | null;
-}) => {
-	const branch =
-		input.sourceType && GIT_PROVIDER_SOURCE_TYPES.includes(input.sourceType)
-			? input.branch?.trim()
-			: null;
-	return branch || input.buildRepository?.trim() || null;
-};
+}) => githubActionsBranch(input) || input.buildRepository?.trim() || null;
 
 /** The commit page of a GitHub repository, or null when the repository or the sha is unknown. */
 export const githubCommitUrl = (

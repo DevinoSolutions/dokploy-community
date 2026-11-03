@@ -1,13 +1,19 @@
 import {
 	type BuildOriginDeploymentRow,
+	deploymentImageReference,
+	describeDeploymentDuration,
 	describeGithubActionsRollback,
 	describeGithubActionsRun,
+	describeGithubActionsRunState,
+	describeGithubActionsTitle,
 	describeImageReference,
 	describeServiceBuild,
 	extractComposeImages,
+	githubActionsBranch,
 	githubActionsPushTarget,
 	githubCommitUrl,
 	parseGithubActionsTitle,
+	pickServingDeployment,
 	renderBuildStartMarker,
 	withGithubActionsRunDetails,
 } from "@dokploy/server/services/build-origin";
@@ -787,5 +793,211 @@ describe("extractComposeImages", () => {
 		expect(extractComposeImages("services:\n  web:\n    build: .\n")).toEqual(
 			[],
 		);
+	});
+});
+
+describe("describeGithubActionsTitle", () => {
+	test("reads the commit subject and the run attempt", () => {
+		expect(
+			describeGithubActionsTitle(
+				"GHA production b4f509d2: fix: login redirect [run 41376332164.2]",
+			),
+		).toEqual({ subject: "fix: login redirect", attempt: "2" });
+	});
+
+	test("has no subject for a bare title and no attempt without one", () => {
+		expect(describeGithubActionsTitle(TITLE)).toEqual({
+			subject: null,
+			attempt: null,
+		});
+		expect(
+			describeGithubActionsTitle("GHA production b4f509d2: ship it"),
+		).toEqual({ subject: "ship it", attempt: null });
+	});
+
+	test("reads only the first line", () => {
+		expect(
+			describeGithubActionsTitle("GHA staging aaaaaaaa: first\nsecond: line"),
+		).toEqual({ subject: "first", attempt: null });
+	});
+
+	test("is empty for a title without the marker and for no title", () => {
+		const none = { subject: null, attempt: null };
+		expect(describeGithubActionsTitle("Manual deployment: x")).toEqual(none);
+		expect(describeGithubActionsTitle(null)).toEqual(none);
+		expect(describeGithubActionsTitle(undefined)).toEqual(none);
+	});
+});
+
+describe("describeGithubActionsRunState", () => {
+	const base = { buildOrigin: "github-actions" };
+
+	test("names the outcome of a finished row", () => {
+		expect(
+			describeGithubActionsRunState({ ...base, status: "done" }),
+		).toMatchObject({ label: "Deployed", tone: "success", detail: null });
+		expect(
+			describeGithubActionsRunState({ ...base, status: "error" }),
+		).toMatchObject({ label: "Failed", tone: "failed" });
+		expect(
+			describeGithubActionsRunState({ ...base, status: "cancelled" }),
+		).toMatchObject({ label: "Cancelled", tone: "cancelled" });
+		expect(
+			describeGithubActionsRunState({ ...base, status: "running" }),
+		).toMatchObject({ label: "Deploying", tone: "running" });
+	});
+
+	test("a finished row nothing deployed is a finished build, not a deploy", () => {
+		expect(
+			describeGithubActionsRunState({
+				...base,
+				status: "done",
+				externalBuildOnly: true,
+			}),
+		).toMatchObject({ label: "Build finished", tone: "success" });
+	});
+
+	test("a row that still waits for its run carries the live step", () => {
+		expect(
+			describeGithubActionsRunState({
+				...base,
+				status: "running",
+				buildRunStatus: "in_progress",
+				buildRunStep: "build · Build image (3/7)",
+			}),
+		).toEqual({
+			label: "In progress",
+			tone: "running",
+			detail: "Building on GitHub Actions · build · Build image (3/7)",
+		});
+	});
+
+	test("keeps an unknown status readable", () => {
+		expect(describeGithubActionsRunState({ status: "weird" })).toMatchObject({
+			label: "weird",
+			tone: "unknown",
+		});
+		expect(describeGithubActionsRunState({})).toMatchObject({
+			label: "Unknown",
+			tone: "unknown",
+		});
+	});
+});
+
+describe("pickServingDeployment", () => {
+	test("is the newest finished deployment, a rollback included", () => {
+		const rows = [
+			row({
+				title: "GHA rollback production to 1111111",
+				createdAt: "2026-11-02T12:00:00.000Z",
+			}),
+			row({
+				title: "newest, failed",
+				status: "error",
+				createdAt: "2026-11-02T13:00:00.000Z",
+			}),
+			row({ title: "older", createdAt: "2026-11-02T09:00:00.000Z" }),
+		];
+		expect(pickServingDeployment(rows)?.title).toBe(
+			"GHA rollback production to 1111111",
+		);
+	});
+
+	test("ignores rows that only follow a GitHub build and non-deploy runs", () => {
+		const rows = [
+			row({
+				title: "following",
+				externalBuildOnly: true,
+				createdAt: "2026-11-02T13:00:00.000Z",
+			}),
+			row({
+				title: "backup",
+				backupId: "b1",
+				createdAt: "2026-11-02T12:00:00.000Z",
+			}),
+			row({ title: "deploy", createdAt: "2026-11-02T10:00:00.000Z" }),
+		];
+		expect(pickServingDeployment(rows)?.title).toBe("deploy");
+	});
+
+	test("is null when nothing finished", () => {
+		expect(pickServingDeployment([])).toBeNull();
+		expect(pickServingDeployment([row({ status: "running" })])).toBeNull();
+	});
+});
+
+describe("deploymentImageReference", () => {
+	const digest = `sha256:${"a".repeat(64)}`;
+
+	test("joins the repository of the pushed tag with the pinned digest", () => {
+		expect(
+			deploymentImageReference({
+				imageTag: "localhost:5000/devino/app:abc123",
+				imageDigest: digest,
+			}),
+		).toBe(`localhost:5000/devino/app@${digest}`);
+		expect(
+			deploymentImageReference({ imageTag: "app", imageDigest: digest }),
+		).toBe(`app@${digest}`);
+	});
+
+	test("is null without a valid digest or without a tag", () => {
+		expect(
+			deploymentImageReference({ imageTag: "app:1", imageDigest: null }),
+		).toBeNull();
+		expect(
+			deploymentImageReference({ imageTag: "app:1", imageDigest: "latest" }),
+		).toBeNull();
+		expect(
+			deploymentImageReference({ imageTag: null, imageDigest: digest }),
+		).toBeNull();
+	});
+});
+
+describe("githubActionsBranch", () => {
+	test("is the branch only for a git provider source", () => {
+		expect(
+			githubActionsBranch({ branch: " main ", sourceType: "github" }),
+		).toBe("main");
+		expect(
+			githubActionsBranch({ branch: "main", sourceType: "docker" }),
+		).toBeNull();
+		expect(githubActionsBranch({ branch: "", sourceType: "git" })).toBeNull();
+		expect(githubActionsBranch({})).toBeNull();
+	});
+});
+
+describe("describeDeploymentDuration", () => {
+	test("reads seconds and minutes", () => {
+		expect(
+			describeDeploymentDuration(
+				"2026-11-02T10:00:00.000Z",
+				"2026-11-02T10:00:45.900Z",
+			),
+		).toBe("45s");
+		expect(
+			describeDeploymentDuration(
+				"2026-11-02T10:00:00.000Z",
+				"2026-11-02T10:03:12.000Z",
+			),
+		).toBe("3m 12s");
+	});
+
+	test("is null until the deployment finished and for bad times", () => {
+		expect(
+			describeDeploymentDuration("2026-11-02T10:00:00.000Z", null),
+		).toBeNull();
+		expect(
+			describeDeploymentDuration(null, "2026-11-02T10:00:00.000Z"),
+		).toBeNull();
+		expect(
+			describeDeploymentDuration("nope", "2026-11-02T10:00:00.000Z"),
+		).toBeNull();
+		expect(
+			describeDeploymentDuration(
+				"2026-11-02T10:05:00.000Z",
+				"2026-11-02T10:00:00.000Z",
+			),
+		).toBeNull();
 	});
 });

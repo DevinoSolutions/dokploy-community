@@ -176,8 +176,7 @@ const Service = (
 									</Badge>
 									<BuildOriginBadge
 										buildOrigin={data?.buildOrigin}
-										buildRunUrl={data?.buildRunUrl}
-										linkToRun
+										service={{ type: "application", id: applicationId }}
 									/>
 									{data?.server?.serverStatus === "inactive" && (
 										<TooltipProvider delayDuration={0}>
@@ -263,7 +262,9 @@ const Service = (
 												</TabsTrigger>
 											)}
 											{permissions?.deployment.read &&
-												supportsApplicationPreviewDeployments(data?.sourceType) && (
+												supportsApplicationPreviewDeployments(
+													data?.sourceType,
+												) && (
 													<TabsTrigger value="preview-deployments">
 														Preview Deployments
 													</TabsTrigger>
@@ -445,7 +446,10 @@ const Service = (
 												)}
 												{/* build-policy */}
 												<ShowRequiredChecks applicationId={applicationId} />
-												<WatchdogExclusion id={applicationId} type="application" />
+												<WatchdogExclusion
+													id={applicationId}
+													type="application"
+												/>
 												<ShowResources id={applicationId} type="application" />
 												<ShowVolumes id={applicationId} type="application" />
 												<AssignNetworks id={applicationId} type="application" />

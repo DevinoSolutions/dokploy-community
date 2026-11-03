@@ -1,17 +1,13 @@
-import {
-	isGithubActionsDeployment,
-	normalizeBuildRunUrl,
-} from "@dokploy/server/services/build-origin-shared";
+import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
 import { formatDistanceToNow } from "date-fns";
 import { ArrowRight, Rocket, Server } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
-import { GithubIcon } from "@/components/icons/data-tools-icons";
 import {
 	DokployDeploymentMark,
+	GithubActionsDeploymentMark,
 	LiveGithubBuildStatus,
 } from "@/components/shared/build-origin-badge";
-import { OpensInNewTab } from "@/components/shared/opens-in-new-tab";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api } from "@/utils/api";
@@ -53,6 +49,10 @@ function getServiceInfo(d: any) {
 			environment: app.environment.name as string,
 			projectName: app.environment.project.name as string,
 			serverName,
+			service: {
+				type: "application" as const,
+				id: app.applicationId as string,
+			},
 			href: `/dashboard/project/${app.environment.project.projectId}/environment/${app.environment.environmentId}/services/application/${app.applicationId}`,
 		};
 	}
@@ -62,6 +62,7 @@ function getServiceInfo(d: any) {
 			environment: comp.environment.name as string,
 			projectName: comp.environment.project.name as string,
 			serverName,
+			service: { type: "compose" as const, id: comp.composeId as string },
 			href: `/dashboard/project/${comp.environment.project.projectId}/environment/${comp.environment.environmentId}/services/compose/${comp.composeId}`,
 		};
 	}
@@ -333,26 +334,10 @@ export const ShowHome = () => {
 											</Link>
 											<span className="flex shrink-0 items-center pr-5 text-xs">
 												{isGithubActionsDeployment(d) ? (
-													<span className="flex items-center gap-2">
-														<GithubIcon />
-														<span className="hidden text-muted-foreground md:inline">
-															GitHub Actions
-														</span>
-														{normalizeBuildRunUrl(d.buildRunUrl) && (
-															<a
-																href={
-																	normalizeBuildRunUrl(d.buildRunUrl) ??
-																	undefined
-																}
-																target="_blank"
-																rel="noopener noreferrer"
-																className="text-primary hover:underline"
-															>
-																Open run
-																<OpensInNewTab />
-															</a>
-														)}
-													</span>
+													<GithubActionsDeploymentMark
+														service={info.service}
+														deployment={d}
+													/>
 												) : (
 													<DokployDeploymentMark />
 												)}
