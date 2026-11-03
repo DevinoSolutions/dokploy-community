@@ -48,6 +48,7 @@ import {
 	writeConfig,
 	writeConfigRemote,
 } from "@dokploy/server";
+import { removeGhaConnectionsForServices } from "@dokploy/server/services/gha-connect/store";
 import { db } from "@dokploy/server/db";
 import { getBuildOriginsByService } from "@dokploy/server/services/build-origin";
 import {
@@ -487,10 +488,19 @@ export const applicationRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			const result = await db
-				.delete(applications)
-				.where(eq(applications.applicationId, input.applicationId))
-				.returning();
+			// A service that follows GitHub Actions releases owns a connection row and
+			// a watch: they go with it, in the same transaction.
+			const result = await db.transaction(async (tx) => {
+				const deleted = await tx
+					.delete(applications)
+					.where(eq(applications.applicationId, input.applicationId))
+					.returning();
+				await removeGhaConnectionsForServices(
+					[{ serviceType: "application", serviceId: input.applicationId }],
+					tx,
+				);
+				return deleted;
+			});
 
 			await removeUptimelyServiceRows([
 				{ serviceType: "application", serviceId: input.applicationId },

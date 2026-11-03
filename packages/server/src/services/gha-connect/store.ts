@@ -1,12 +1,15 @@
 import { db } from "@dokploy/server/db";
 import {
+	applications,
+	compose,
 	type GhaProcessedRun,
 	type GhaReleaseStatus,
 	type GithubWatchServiceType,
 	ghaConnection,
 	ghaRelease,
+	githubDeploymentWatch,
 } from "@dokploy/server/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { mergeProcessed } from "./processed";
 import {
 	type ConnectionEvent,
@@ -45,6 +48,81 @@ export const findGhaConnectionById = async (ghaConnectionId: string) => {
 
 export const listGhaConnections = async () => db.select().from(ghaConnection);
 
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Forget the connections of services that are being deleted, with their
+ * #577 watches (which the connection owns). Pass the transaction that deletes
+ * the services so both happen or neither does.
+ */
+export const removeGhaConnectionsForServices = async (
+	services: Array<{ serviceType: GithubWatchServiceType; serviceId: string }>,
+	executor: Pick<Tx, "delete"> = db,
+) => {
+	for (const serviceType of new Set(services.map((s) => s.serviceType))) {
+		const ids = services
+			.filter((s) => s.serviceType === serviceType)
+			.map((s) => s.serviceId);
+		if (ids.length === 0) continue;
+		await executor
+			.delete(ghaConnection)
+			.where(
+				and(
+					eq(ghaConnection.serviceType, serviceType),
+					inArray(ghaConnection.serviceId, ids),
+				),
+			);
+		await executor
+			.delete(githubDeploymentWatch)
+			.where(
+				and(
+					eq(githubDeploymentWatch.serviceType, serviceType),
+					inArray(githubDeploymentWatch.serviceId, ids),
+				),
+			);
+	}
+};
+
+export const serviceRowExists = async (
+	serviceType: GithubWatchServiceType,
+	serviceId: string,
+) => {
+	const rows =
+		serviceType === "application"
+			? await db
+					.select({ id: applications.applicationId })
+					.from(applications)
+					.where(eq(applications.applicationId, serviceId))
+			: await db
+					.select({ id: compose.composeId })
+					.from(compose)
+					.where(eq(compose.composeId, serviceId));
+	return rows.length > 0;
+};
+
+/**
+ * Drop the connections (and watches) of this GitHub account whose service no
+ * longer exists, so they cannot block removing the account. Returns how many.
+ */
+export const pruneOrphanedGhaConnections = async (githubConnectionId: string) => {
+	const rows = await db
+		.select({
+			serviceType: ghaConnection.serviceType,
+			serviceId: ghaConnection.serviceId,
+		})
+		.from(ghaConnection)
+		.where(eq(ghaConnection.githubConnectionId, githubConnectionId));
+	const orphans: typeof rows = [];
+	for (const row of rows) {
+		if (!(await serviceRowExists(row.serviceType, row.serviceId))) {
+			orphans.push(row);
+		}
+	}
+	if (orphans.length === 0) return 0;
+	await db.transaction((tx) => removeGhaConnectionsForServices(orphans, tx));
+	return orphans.length;
+};
+
 /** How many services follow GitHub Actions releases through this GitHub account. */
 export const countGhaConnectionsForGithubConnection = async (
 	githubConnectionId: string,
@@ -68,8 +146,9 @@ export const createGhaConnection = async (
 export const deleteGhaConnection = async (
 	serviceType: GithubWatchServiceType,
 	serviceId: string,
+	executor: Pick<typeof db, "delete"> = db,
 ) => {
-	await db
+	await executor
 		.delete(ghaConnection)
 		.where(
 			and(

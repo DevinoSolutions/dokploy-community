@@ -176,10 +176,18 @@ export const planConnect = async (
 
 	const repository = await reads.repository();
 	if (repository.kind !== "ok") {
-		return failure(
+		const refusal = failure(
 			repository,
 			`The repository ${request.owner}/${request.repo}`,
 		);
+		// GitHub answers 404 for a private repository a token cannot see.
+		if (repository.kind === "not-found" && !input.scopes.includes("repo")) {
+			return {
+				...refusal,
+				message: `${refusal.message} If it is a private repository, reconnect GitHub with private repository access (the repo scope).`,
+			};
+		}
+		return refusal;
 	}
 	const problem = scopeProblem(input.scopes, repository.value.isPrivate);
 	if (problem) return refuse("scope", problem);

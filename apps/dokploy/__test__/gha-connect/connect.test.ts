@@ -261,6 +261,27 @@ describe("planConnect", () => {
 		expect(plan).toMatchObject({ ok: false, code: "github" });
 	});
 
+	it("hints at the repo scope when a repository is not found for a token without it (GitHub's 404 for a private repository)", async () => {
+		const notFound = reads({ repository: async () => ({ kind: "not-found" }) });
+		const withPublic = await planConnect(
+			{ scopes: SCOPES, service: githubApp, request },
+			notFound,
+		);
+		expect(withPublic).toMatchObject({
+			ok: false,
+			code: "github",
+			message: expect.stringContaining("repo scope"),
+		});
+		const withRepo = await planConnect(
+			{ scopes: ["repo_deployment", "repo"], service: githubApp, request },
+			notFound,
+		);
+		expect(withRepo).toMatchObject({
+			ok: false,
+			message: expect.not.stringContaining("repo scope"),
+		});
+	});
+
 	it("reports an unauthorized token as a reconnect", async () => {
 		const plan = await planConnect(
 			{ scopes: SCOPES, service: githubApp, request },

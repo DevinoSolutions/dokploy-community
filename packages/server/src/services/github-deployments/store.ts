@@ -190,11 +190,15 @@ export const markGithubConnectionRevoked = async (connectionId: string) => {
 		.where(eq(githubDeploymentConnection.connectionId, connectionId));
 };
 
+/** What the watch writes accept in place of the shared client: a transaction. */
+export type WatchExecutor = Pick<typeof db, "select" | "insert" | "delete">;
+
 export const findGithubWatch = async (
 	serviceType: GithubWatchServiceType,
 	serviceId: string,
+	executor: WatchExecutor = db,
 ) => {
-	const [row] = await db
+	const [row] = await executor
 		.select()
 		.from(githubDeploymentWatch)
 		.where(
@@ -265,8 +269,12 @@ export const upsertGithubWatch = async (input: {
 	environment: string;
 	enabled: boolean;
 	postLogUrl?: boolean;
-}) => {
-	const existing = await findGithubWatch(input.serviceType, input.serviceId);
+}, executor: WatchExecutor = db) => {
+	const existing = await findGithubWatch(
+		input.serviceType,
+		input.serviceId,
+		executor,
+	);
 	const moved =
 		!existing ||
 		existing.owner !== input.owner ||
@@ -282,7 +290,7 @@ export const upsertGithubWatch = async (input: {
 				inflightStartedAt: null,
 			}
 		: {};
-	const [row] = await db
+	const [row] = await executor
 		.insert(githubDeploymentWatch)
 		.values({ ...input, lastError: null })
 		.onConflictDoUpdate({
@@ -311,8 +319,9 @@ export const upsertGithubWatch = async (input: {
 export const deleteGithubWatch = async (
 	serviceType: GithubWatchServiceType,
 	serviceId: string,
+	executor: WatchExecutor = db,
 ) => {
-	await db
+	await executor
 		.delete(githubDeploymentWatch)
 		.where(
 			and(
@@ -385,6 +394,16 @@ export const patchGithubWatch = async (
 	return true;
 };
 
+const warnedNoPackagesScope = new Set<string>();
+/** Once per watch and process: a private GHCR pull that follows will fail, and this says why. */
+const warnNoPackagesScope = (watchId: string) => {
+	if (warnedNoPackagesScope.has(watchId)) return;
+	warnedNoPackagesScope.add(watchId);
+	console.warn(
+		`GitHub deployments: the GitHub connection of watch ${watchId} was not authorized for read:packages, so no ghcr.io login is made and a private package fails to pull. Reconnect GitHub with "also pull private GHCR packages" (Settings, Git).`,
+	);
+};
+
 /**
  * The ghcr.io login for a service that follows GitHub Deployments, or null.
  * Used at pull time only; the token is never stored on the service itself.
@@ -409,7 +428,10 @@ export const loadGhcrCredentials = async (
 	if (!row || row.status !== "active" || !row.accessToken) return null;
 	// Only a connection that was authorized for packages may log in to GHCR.
 	// A GitHub Actions connection never asks for it: prod holds no GHCR token.
-	if (!row.scopes.split(",").includes("read:packages")) return null;
+	if (!row.scopes.split(",").includes("read:packages")) {
+		warnNoPackagesScope(watch.watchId);
+		return null;
+	}
 	return {
 		watchId: watch.watchId,
 		owner: watch.owner,

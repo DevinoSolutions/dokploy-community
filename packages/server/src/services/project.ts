@@ -15,6 +15,7 @@ import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import { deprovisionCloudflareForDomains } from "./cloudflare-provisioning";
 import { createProductionEnvironment } from "./environment";
+import { removeGhaConnectionsForServices } from "./gha-connect/store";
 import { removeUptimelyServiceRows } from "./uptimely-deploy";
 
 export type Project = typeof projects.$inferSelect;
@@ -196,11 +197,29 @@ export const deleteProject = async (projectId: string) => {
 	]);
 	await deprovisionCloudflareForDomains(cloudflareDomains);
 
-	const project = await db
-		.delete(projects)
-		.where(eq(projects.projectId, projectId))
-		.returning()
-		.then((value) => value[0]);
+	// The cascade drops the services; their GitHub Actions connections and
+	// watches go in the same transaction (the watch has no foreign key).
+	const project = await db.transaction(async (tx) => {
+		const deleted = await tx
+			.delete(projects)
+			.where(eq(projects.projectId, projectId))
+			.returning()
+			.then((value) => value[0]);
+		await removeGhaConnectionsForServices(
+			(projectTree?.environments ?? []).flatMap((env) => [
+				...env.applications.map((application) => ({
+					serviceType: "application" as const,
+					serviceId: application.applicationId,
+				})),
+				...env.compose.map((compose) => ({
+					serviceType: "compose" as const,
+					serviceId: compose.composeId,
+				})),
+			]),
+			tx,
+		);
+		return deleted;
+	});
 
 	// The cascade drops the services without a hook: forget their Uptimely rows.
 	await removeUptimelyServiceRows(

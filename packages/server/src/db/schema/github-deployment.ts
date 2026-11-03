@@ -31,6 +31,19 @@ export const GITHUB_DEVICE_DEFAULT_CLIENT_ID = "Ov23liBkg97sIGx9nKb6";
 /** Scopes asked for in the device flow. `public_repo` reads public repositories; `repo` is needed for private ones. */
 export const GITHUB_DEVICE_SCOPE = "repo_deployment public_repo";
 export const GITHUB_DEVICE_SCOPE_PRIVATE = "repo_deployment repo";
+/** Opt-in: also pull the owner's private GHCR packages (what #577 asked for before T-13719). */
+export const GITHUB_PACKAGES_SCOPE = "read:packages";
+
+/** The scope string for a connect request: the default, the private-repository one, each with or without packages. */
+export const githubDeviceScope = (options: {
+	repositoryAccess?: "public" | "private";
+	pullPrivatePackages?: boolean;
+}) =>
+	`${
+		options.repositoryAccess === "private"
+			? GITHUB_DEVICE_SCOPE_PRIVATE
+			: GITHUB_DEVICE_SCOPE
+	}${options.pullPrivatePackages ? ` ${GITHUB_PACKAGES_SCOPE}` : ""}`;
 
 export const GITHUB_CONNECTION_STATUSES = ["active", "revoked"] as const;
 export type GithubConnectionStatus =
@@ -173,7 +186,13 @@ export const apiGithubDeploymentStartConnect = z.object({
 		.enum(["public", "private"])
 		.default("public")
 		.describe(
-			"public asks GitHub for the public_repo scope, private for the broader repo scope that private repositories need. Classic OAuth has no read-only Actions scope.",
+			"public asks GitHub for the public_repo scope (read AND write access to the account's public repositories, which classic OAuth cannot narrow), private for the repo scope that private repositories need (full control of the account's private repositories, including their code).",
+		),
+	pullPrivatePackages: z
+		.boolean()
+		.default(false)
+		.describe(
+			"Also ask for read:packages, so services that follow plain GitHub Deployments can pull the account's private GHCR packages. Off by default: a GitHub Actions connection never needs it.",
 		),
 });
 

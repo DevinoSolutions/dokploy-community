@@ -7,6 +7,7 @@ import {
 	type ConnectServiceDeps,
 	type ConnectServiceInput,
 	connectGhaService,
+	registryHostOf,
 } from "@dokploy/server/services/gha-connect/connect-service";
 import { describe, expect, it, vi } from "vitest";
 
@@ -253,5 +254,26 @@ describe("connectGhaService", () => {
 				}),
 			),
 		).rejects.toThrow("disk full");
+	});
+});
+
+describe("registryHostOf: the host digests are checked at, taken from the URL", () => {
+	it.each([
+		["https://Registry.Devino.CA/", "registry.devino.ca"],
+		["registry.devino.ca", "registry.devino.ca"],
+		["http://registry.devino.ca:5000/some/path?x=1#frag", "registry.devino.ca:5000"],
+		["  https://registry.devino.ca/v2/  ", "registry.devino.ca"],
+	])("%s -> %s", (url, host) => {
+		expect(registryHostOf(url)).toBe(host);
+	});
+
+	it.each([
+		"",
+		"  /  ",
+		"https://user:pw@registry.devino.ca",
+		"ftp://registry.devino.ca",
+		"https://",
+	])("refuses %j", (url) => {
+		expect(registryHostOf(url)).toBeNull();
 	});
 });

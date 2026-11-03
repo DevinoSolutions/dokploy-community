@@ -27,6 +27,7 @@ import {
 	getRepositoryByName,
 	listReleases,
 	presentGhaConnection,
+	serviceRowExists,
 	type ServiceFacts,
 	touchConnectionActivity,
 } from "@dokploy/server/services/gha-connect";
@@ -111,62 +112,60 @@ const persistConnection = async (
 	plan: ConnectPlan,
 	input: ConnectServiceInput,
 	mirror: { registryProbeHost: string | null },
-) => {
-	// The watch is #577's: it carries the cursor, the ETag and the in-flight
-	// mark. It starts with no cursor, so the first poll baselines and the
-	// backlog of old Deployments never runs.
-	await upsertGithubWatch({
-		organizationId,
-		serviceType: input.serviceType,
-		serviceId: input.serviceId,
-		connectionId: input.githubConnectionId,
-		owner: input.owner,
-		repo: input.repo,
-		environment: input.environment,
-		// Off until the connection poll takes over (the #577 loop would otherwise
-		// answer Deployments it cannot parse as a plain watch). Turning a disabled
-		// watch on resets its starting point, which is what the first poll wants.
-		enabled: false,
-	});
-	try {
-		return await db.transaction(async (tx) => {
-			if (plan.serviceUpdate && input.serviceType === "application") {
-				await tx
-					.update(applications)
-					.set(plan.serviceUpdate)
-					.where(eq(applications.applicationId, input.serviceId));
-			}
-			return createGhaConnection(
-				{
-					organizationId,
-					serviceType: input.serviceType,
-					serviceId: input.serviceId,
-					githubConnectionId: input.githubConnectionId,
-					repoId: plan.repoId,
-					repoFullName: plan.repoFullName,
-					workflowPath: input.workflowPath,
-					trackedBranch: input.trackedBranch,
-					environment: input.environment,
-					serviceKey: input.serviceKey,
-					protectionMode: input.protectionMode,
-					registryPrefix: input.registryPrefix,
-					registryId: input.registryId,
-					registryProbeHost: mirror.registryProbeHost,
-					gateMode: input.gateMode,
-					state: "waiting",
-					expectedSha: plan.expectedSha,
-					previousSource: plan.previousSource,
-				},
-				tx,
-			);
-		});
-	} catch (error) {
-		await deleteGithubWatch(input.serviceType, input.serviceId).catch(
-			() => undefined,
+) =>
+	// One transaction: the watch, the service change and the connection row
+	// happen together or not at all, so a failure (or a concurrent connect that
+	// loses the unique key) leaves nothing behind, and never removes a watch it
+	// did not create.
+	db.transaction(async (tx) => {
+		// The watch is #577's: it carries the cursor, the ETag and the in-flight
+		// mark. It is created DISABLED: the connection poll (PR 4) enables it, and
+		// until then the #577 loop must not answer Deployments it cannot parse as a
+		// plain watch. Turning a disabled watch on resets its starting point, so the
+		// first poll baselines and the backlog of old Deployments never runs.
+		await upsertGithubWatch(
+			{
+				organizationId,
+				serviceType: input.serviceType,
+				serviceId: input.serviceId,
+				connectionId: input.githubConnectionId,
+				owner: input.owner,
+				repo: input.repo,
+				environment: input.environment,
+				enabled: false,
+			},
+			tx,
 		);
-		throw error;
-	}
-};
+		if (plan.serviceUpdate && input.serviceType === "application") {
+			await tx
+				.update(applications)
+				.set(plan.serviceUpdate)
+				.where(eq(applications.applicationId, input.serviceId));
+		}
+		return createGhaConnection(
+			{
+				organizationId,
+				serviceType: input.serviceType,
+				serviceId: input.serviceId,
+				githubConnectionId: input.githubConnectionId,
+				repoId: plan.repoId,
+				repoFullName: plan.repoFullName,
+				workflowPath: input.workflowPath,
+				trackedBranch: input.trackedBranch,
+				environment: input.environment,
+				serviceKey: input.serviceKey,
+				protectionMode: input.protectionMode,
+				registryPrefix: input.registryPrefix,
+				registryId: input.registryId,
+				registryProbeHost: mirror.registryProbeHost,
+				gateMode: input.gateMode,
+				state: "waiting",
+				expectedSha: plan.expectedSha,
+				previousSource: plan.previousSource,
+			},
+			tx,
+		);
+	});
 
 const trpcCode = (code: ConnectServiceError["code"]) =>
 	code === "not-found"
@@ -309,26 +308,49 @@ export const ghaConnectionRouter = createTRPCRouter({
 		})
 		.input(apiGhaDisconnect)
 		.mutation(async ({ ctx, input }) => {
-			await checkServicePermissionAndAccess(ctx, input.serviceId, {
-				service: ["create"],
-				deployment: ["create"],
-			});
+			assertSelfHosted();
 			const organizationId = ctx.session.activeOrganizationId;
 			const row = await findGhaConnection(input.serviceType, input.serviceId);
+			// The service may be gone (deleted before this hook existed, or by a
+			// path that skips it): an owner or admin can still clear the row, which
+			// holds a GitHub token's binding and blocks removing the account.
+			const serviceGone =
+				row !== null &&
+				row.organizationId === organizationId &&
+				!(await serviceRowExists(input.serviceType, input.serviceId));
+			if (serviceGone) {
+				if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message:
+							"The service no longer exists; an organization owner or admin must clear its GitHub Actions connection",
+					});
+				}
+			} else {
+				await checkServicePermissionAndAccess(ctx, input.serviceId, {
+					service: ["create"],
+					deployment: ["create"],
+				});
+			}
 			if (!row || row.organizationId !== organizationId) return true;
 			const watch = await findGithubWatch(input.serviceType, input.serviceId);
-			if (
-				input.restoreSource &&
-				input.serviceType === "application" &&
-				row.previousSource
-			) {
-				await db
-					.update(applications)
-					.set(row.previousSource as Partial<typeof applications.$inferInsert>)
-					.where(eq(applications.applicationId, input.serviceId));
-			}
-			await deleteGhaConnection(input.serviceType, input.serviceId);
-			await deleteGithubWatch(input.serviceType, input.serviceId);
+			await db.transaction(async (tx) => {
+				if (
+					!serviceGone &&
+					input.restoreSource &&
+					input.serviceType === "application" &&
+					row.previousSource
+				) {
+					await tx
+						.update(applications)
+						.set(
+							row.previousSource as Partial<typeof applications.$inferInsert>,
+						)
+						.where(eq(applications.applicationId, input.serviceId));
+				}
+				await deleteGhaConnection(input.serviceType, input.serviceId, tx);
+				await deleteGithubWatch(input.serviceType, input.serviceId, tx);
+			});
 			if (watch) {
 				await removeGhcrWatchConfigDirs([watch.watchId], organizationId);
 			}
@@ -341,19 +363,22 @@ export const ghaConnectionRouter = createTRPCRouter({
 			return true;
 		}),
 
-	checkNow: withPermission("gitProviders", "read")
+	checkNow: withPermission("gitProviders", "create")
 		.meta({
 			openapi: {
 				method: "POST",
 				path: "/ghaConnection.checkNow",
 				description:
-					"Ask Dokploy to look at GitHub for this service now: resets the idle slow-down, and retries a blocked connection.",
+					"Ask Dokploy to look at GitHub for this service now: resets the idle slow-down, and retries a blocked connection. Needs the same access as disconnect.",
 			},
 		})
 		.input(apiGhaCheckNow)
 		.mutation(async ({ ctx, input }) => {
+			// It changes state (activity time, unblocks the connection), so it is
+			// gated like disconnect, not like a read.
 			await checkServicePermissionAndAccess(ctx, input.serviceId, {
-				service: ["read"],
+				service: ["create"],
+				deployment: ["create"],
 			});
 			const row = await findGhaConnection(input.serviceType, input.serviceId);
 			if (!row || row.organizationId !== ctx.session.activeOrganizationId) {

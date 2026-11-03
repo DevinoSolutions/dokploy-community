@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
 	findGhaConnection: vi.fn(),
 	createGhaConnection: vi.fn(),
 	deleteGhaConnection: vi.fn(),
+	serviceRowExists: vi.fn(),
 	listReleases: vi.fn(),
 	applyConnectionEvent: vi.fn(),
 	touchConnectionActivity: vi.fn(),
@@ -126,6 +127,7 @@ vi.mock("@dokploy/server/services/gha-connect", async () => ({
 	getEnvironmentPolicy: mocks.getEnvironmentPolicy,
 	getRepositoryByName: mocks.getRepositoryByName,
 	listReleases: mocks.listReleases,
+	serviceRowExists: mocks.serviceRowExists,
 	touchConnectionActivity: mocks.touchConnectionActivity,
 }));
 
@@ -258,6 +260,7 @@ beforeEach(() => {
 	});
 	mocks.listReleases.mockResolvedValue([]);
 	mocks.deleteGhaConnection.mockResolvedValue(undefined);
+	mocks.serviceRowExists.mockResolvedValue(true);
 	mocks.deleteGithubWatch.mockResolvedValue(true);
 	mocks.removeGhcrWatchConfigDirs.mockResolvedValue(undefined);
 });
@@ -318,6 +321,7 @@ describe("connect and whose GitHub token it may spend (the githubDeployment.watc
 				serviceId: "compose-1",
 				organizationId: "org-a",
 			}),
+			expect.anything(),
 		);
 	});
 
@@ -386,7 +390,32 @@ describe("connect and whose GitHub token it may spend (the githubDeployment.watc
 });
 
 describe("connect refuses what the design says it refuses, and writes nothing", () => {
-	it("a repository that is private to a connection that only has public_repo", async () => {
+	it("a private repository a public_repo-only connection cannot see (GitHub answers 404) hints at reconnecting with the repo scope", async () => {
+		mocks.findGithubConnectionInOrganization.mockResolvedValue(
+			account({ scopes: ["repo_deployment", "public_repo"] }),
+		);
+		mocks.getRepositoryByName.mockResolvedValue({ kind: "not-found" });
+		await expect(
+			callerFor("owner").connect(connectInput),
+		).rejects.toMatchObject({
+			code: "BAD_GATEWAY",
+			message: expect.stringContaining(
+				"reconnect GitHub with private repository access",
+			),
+		});
+		nothingWritten();
+	});
+
+	it("a 404 with the repo scope is a plain not-found, without that hint", async () => {
+		mocks.getRepositoryByName.mockResolvedValue({ kind: "not-found" });
+		await expect(
+			callerFor("owner").connect(connectInput),
+		).rejects.toMatchObject({
+			message: expect.not.stringContaining("reconnect GitHub"),
+		});
+	});
+
+	it("a readable private repository whose connection lacks the repo scope", async () => {
 		mocks.findGithubConnectionInOrganization.mockResolvedValue(
 			account({ scopes: ["repo_deployment", "public_repo"] }),
 		);
@@ -541,15 +570,19 @@ describe("connect writes the watch and the connection", () => {
 		);
 	});
 
-	it("removes the watch again when the connection row cannot be saved", async () => {
+	it("writes the watch inside the same transaction as the connection row, and never deletes a watch itself", async () => {
+		await callerFor("owner").connect(connectInput);
+		const txOfWatch = mocks.upsertGithubWatch.mock.calls[0]?.[1];
+		const txOfRow = mocks.createGhaConnection.mock.calls[0]?.[1];
+		expect(txOfWatch).toBeDefined();
+		expect(txOfWatch).toBe(txOfRow);
 		mocks.createGhaConnection.mockRejectedValue(new Error("db is down"));
 		await expect(callerFor("owner").connect(connectInput)).rejects.toThrow(
 			"db is down",
 		);
-		expect(mocks.deleteGithubWatch).toHaveBeenCalledWith(
-			"compose",
-			"compose-1",
-		);
+		// The rollback removes what this call wrote; a watch it did not create
+		// (a concurrent connect's) is never touched.
+		expect(mocks.deleteGithubWatch).not.toHaveBeenCalled();
 	});
 
 	it("answers a unique violation as a conflict", async () => {
@@ -560,8 +593,9 @@ describe("connect writes the watch and the connection", () => {
 			callerFor("owner").connect(connectInput),
 		).rejects.toMatchObject({
 			code: "CONFLICT",
+			message: expect.stringContaining("is already connected"),
 		});
-		expect(mocks.deleteGithubWatch).toHaveBeenCalled();
+		expect(mocks.deleteGithubWatch).not.toHaveBeenCalled();
 	});
 });
 
@@ -654,10 +688,12 @@ describe("disconnect", () => {
 		expect(mocks.deleteGhaConnection).toHaveBeenCalledWith(
 			"application",
 			"app-1",
+			expect.anything(),
 		);
 		expect(mocks.deleteGithubWatch).toHaveBeenCalledWith(
 			"application",
 			"app-1",
+			expect.anything(),
 		);
 		expect(mocks.removeGhcrWatchConfigDirs).toHaveBeenCalledWith(
 			["w1"],
@@ -706,6 +742,107 @@ describe("disconnect", () => {
 			}),
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 		expect(mocks.deleteGhaConnection).not.toHaveBeenCalled();
+	});
+});
+
+describe("disconnect when the service is gone", () => {
+	const gone = {
+		serviceType: "application" as const,
+		serviceId: "app-1",
+		restoreSource: true,
+	};
+	beforeEach(() => {
+		mocks.serviceRowExists.mockResolvedValue(false);
+		mocks.findGhaConnection.mockResolvedValue(
+			storedRow({
+				serviceType: "application",
+				serviceId: "app-1",
+				previousSource: { sourceType: "github" },
+			}),
+		);
+		mocks.findGithubWatch.mockResolvedValue({ watchId: "w1" });
+	});
+
+	it.each(["owner", "admin"] as const)(
+		"lets an %s clear the connection and its watch without a service permission check, and restores nothing",
+		async (role) => {
+			await callerFor(role).disconnect(gone);
+			expect(mocks.checkServicePermissionAndAccess).not.toHaveBeenCalled();
+			expect(mocks.updates).toEqual([]);
+			expect(mocks.deleteGhaConnection).toHaveBeenCalledWith(
+				"application",
+				"app-1",
+				expect.anything(),
+			);
+			expect(mocks.deleteGithubWatch).toHaveBeenCalledWith(
+				"application",
+				"app-1",
+				expect.anything(),
+			);
+		},
+	);
+
+	it("leaves it to an owner or admin for a member", async () => {
+		mocks.memberGitProviderActions = ["create"];
+		await expect(callerFor("member").disconnect(gone)).rejects.toMatchObject({
+			code: "FORBIDDEN",
+		});
+		expect(mocks.deleteGhaConnection).not.toHaveBeenCalled();
+	});
+
+	it("never touches a connection of another organization", async () => {
+		mocks.findGhaConnection.mockResolvedValue(
+			storedRow({ organizationId: "org-b" }),
+		);
+		mocks.checkServicePermissionAndAccess.mockRejectedValue(
+			new TRPCError({ code: "NOT_FOUND", message: "Service not found" }),
+		);
+		await expect(callerFor("admin").disconnect(gone)).rejects.toMatchObject({
+			code: "NOT_FOUND",
+		});
+		expect(mocks.deleteGhaConnection).not.toHaveBeenCalled();
+	});
+});
+
+describe("checkNow is gated like disconnect, not like a read", () => {
+	it("needs service create and deployment create on the service", async () => {
+		mocks.findGhaConnection.mockResolvedValue(storedRow());
+		await callerFor("admin").checkNow({
+			serviceType: "compose",
+			serviceId: "compose-1",
+		});
+		expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledWith(
+			expect.anything(),
+			"compose-1",
+			{ service: ["create"], deployment: ["create"] },
+		);
+	});
+
+	it("refuses a read-only member before anything changes", async () => {
+		mocks.memberGitProviderActions = ["read"];
+		await expect(
+			callerFor("member").checkNow({
+				serviceType: "compose",
+				serviceId: "compose-1",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.touchConnectionActivity).not.toHaveBeenCalled();
+		expect(mocks.applyConnectionEvent).not.toHaveBeenCalled();
+	});
+
+	it("refuses a member who may manage git providers but has no create access to the service", async () => {
+		mocks.memberGitProviderActions = ["create"];
+		mocks.findGhaConnection.mockResolvedValue(storedRow());
+		mocks.checkServicePermissionAndAccess.mockRejectedValue(
+			new TRPCError({ code: "FORBIDDEN", message: "no access" }),
+		);
+		await expect(
+			callerFor("member").checkNow({
+				serviceType: "compose",
+				serviceId: "compose-1",
+			}),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(mocks.touchConnectionActivity).not.toHaveBeenCalled();
 	});
 });
 

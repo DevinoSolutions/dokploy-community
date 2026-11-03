@@ -439,8 +439,11 @@ export const getEnvironmentPolicy = async (
 			for (const item of items) {
 				const o = asObject(item);
 				const name = str(o?.name);
-				if (!name) continue;
-				policies.push({ name, type: str(o?.type) ?? "branch" });
+				const type = str(o?.type);
+				// An entry we cannot read is not skipped: skipping could leave one
+				// allowed branch looking like the only one. Fail closed.
+				if (!name || !type) return null;
+				policies.push({ name, type });
 			}
 			return policies;
 		},

@@ -2,6 +2,7 @@ import {
 	GITHUB_DEVICE_DEFAULT_CLIENT_ID,
 	GITHUB_DEVICE_SCOPE,
 	GITHUB_DEVICE_SCOPE_PRIVATE,
+	githubDeviceScope,
 } from "@dokploy/server/db/schema/github-deployment";
 import {
 	ACCESS_TOKEN_URL,
@@ -81,6 +82,22 @@ describe("startDeviceFlow", () => {
 		});
 		const body = new URLSearchParams(calls[0]?.body);
 		expect(body.get("scope")).toBe("repo_deployment repo");
+	});
+
+	it("builds the scope string from the repository access and the packages opt-in", () => {
+		expect(githubDeviceScope({})).toBe("repo_deployment public_repo");
+		expect(githubDeviceScope({ repositoryAccess: "private" })).toBe(
+			"repo_deployment repo",
+		);
+		expect(githubDeviceScope({ pullPrivatePackages: true })).toBe(
+			"repo_deployment public_repo read:packages",
+		);
+		expect(
+			githubDeviceScope({
+				repositoryAccess: "private",
+				pullPrivatePackages: true,
+			}),
+		).toBe("repo_deployment repo read:packages");
 	});
 
 	it("reports a network failure and an unexpected body without throwing", async () => {

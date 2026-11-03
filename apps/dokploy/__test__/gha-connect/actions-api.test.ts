@@ -381,6 +381,24 @@ describe("environment policy", () => {
 		).toEqual({
 			kind: "not-found",
 		});
+		for (const entry of [{ type: "branch" }, { name: "main" }]) {
+			const unreadable = deps([
+				[
+					"/deployment-branch-policies",
+					{ json: { branch_policies: [{ name: "main", type: "branch" }, entry] } },
+				],
+				[
+					"/environments/production",
+					{
+						json: { deployment_branch_policy: { custom_branch_policies: true } },
+					},
+				],
+			]);
+			expect(
+				(await getEnvironmentPolicy(unreadable.deps, "t", REPO, "production"))
+					.kind,
+			).toBe("error");
+		}
 		const broken = deps([
 			["/deployment-branch-policies", { status: 500 }],
 			[

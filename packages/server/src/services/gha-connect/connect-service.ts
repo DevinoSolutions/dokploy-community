@@ -57,6 +57,24 @@ export interface ConnectServiceDeps<Saved> {
 	isUniqueViolation(error: unknown): boolean;
 }
 
+/**
+ * The host (and port) of a Dokploy registry record's URL, where digests are
+ * checked. Parsed, not stripped: a path, query, fragment or userinfo in the
+ * stored value never becomes part of the host the probe sends credentials to.
+ */
+export const registryHostOf = (registryUrl: string): string | null => {
+	const raw = registryUrl.trim();
+	if (raw === "") return null;
+	try {
+		const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+		if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+		if (url.username !== "" || url.password !== "") return null;
+		return url.host === "" ? null : url.host.toLowerCase();
+	} catch {
+		return null;
+	}
+};
+
 const refuse = (
 	code: ConnectServiceError["code"],
 	message: string,
@@ -120,13 +138,12 @@ export const connectGhaService = async <Saved>(
 				"Choose the Dokploy registry (Settings, Registry) that serves the mirror. Its login is used to check the image digests.",
 			);
 		}
-		registryProbeHost = record.registryUrl
-			.trim()
-			.toLowerCase()
-			.replace(/^https?:\/\//, "")
-			.replace(/\/+$/, "");
-		if (registryProbeHost === "") {
-			return refuse("registry", "That registry has no URL set.");
+		registryProbeHost = registryHostOf(record.registryUrl);
+		if (registryProbeHost === null) {
+			return refuse(
+				"registry",
+				"That registry has no usable URL set (Settings, Registry).",
+			);
 		}
 	}
 
@@ -146,7 +163,7 @@ export const connectGhaService = async <Saved>(
 		if (deps.isUniqueViolation(error)) {
 			return refuse(
 				"conflict",
-				`Another service already follows ${plan.repoFullName} for environment ${input.environment} with the key ${input.serviceKey}. Pick another key.`,
+				`${plan.repoFullName}, environment ${input.environment}, key ${input.serviceKey} is already connected. Pick another key.`,
 			);
 		}
 		throw error;
