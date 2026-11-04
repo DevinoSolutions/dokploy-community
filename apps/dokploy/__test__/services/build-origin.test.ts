@@ -3,6 +3,8 @@ import {
 	buildOriginJobFields,
 	composeFileHasBuildSection,
 	computeServiceBuildOrigins,
+	describeGithubActionsOriginPill,
+	describeServiceBuild,
 	hasGithubActionsTitleMarker,
 	inferBuildOriginFromSource,
 	isGithubActionsDeployment,

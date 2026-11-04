@@ -30,6 +30,8 @@ interface Props {
 	 * run modal. Leave it off where the badge sits inside another link (the service cards): it stays a plain badge.
 	 */
 	service?: GithubActionsRunService;
+	/** The service is connected to GitHub Actions but has no release yet (`describeGithubActionsOriginPill`). */
+	waitingForFirstRelease?: boolean;
 	className?: string;
 }
 
@@ -41,6 +43,7 @@ interface Props {
 export const BuildOriginBadge = ({
 	buildOrigin,
 	service,
+	waitingForFirstRelease,
 	className,
 }: Props) => {
 	if (!isBuildOrigin(buildOrigin)) return null;
