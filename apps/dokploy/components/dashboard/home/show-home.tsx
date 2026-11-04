@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api } from "@/utils/api";
+import { getDeploymentCommitMeta } from "./deployment-commit-meta";
 
 type DeploymentStatus = "idle" | "running" | "done" | "error";
 
@@ -20,23 +21,6 @@ const statusDotClass: Record<string, string> = {
 	error: "bg-red-500",
 	idle: "bg-muted-foreground/40",
 };
-
-function getDeploymentCommitMeta(d: {
-	title?: string | null;
-	description?: string | null;
-}) {
-	const commitMessage = d.title
-		?.split("\n")
-		.map((line) => line.trim())
-		.find(Boolean);
-	const commitHash = d.description?.replace(/^Commit:\s*/i, "").trim();
-
-	if (!commitMessage || !commitHash) {
-		return null;
-	}
-
-	return `${commitMessage} (${commitHash.slice(0, 7)})`;
-}
 
 function getServiceInfo(d: any) {
 	const app = d.application;
@@ -316,23 +300,23 @@ export const ShowHome = () => {
 													</span>
 													<LiveGithubBuildStatus row={d} />
 												</div>
-												<span className="text-xs text-muted-foreground w-36 hidden lg:flex items-center justify-end gap-1.5 truncate">
+												<span className="text-xs text-muted-foreground w-36 shrink-0 hidden xl:flex items-center justify-end gap-1.5">
 													<Server className="size-3 shrink-0" />
 													<span className="truncate">{info.serverName}</span>
 												</span>
-												<span className="text-xs text-muted-foreground w-20 text-right hidden sm:inline">
+												<span className="text-xs text-muted-foreground w-20 shrink-0 text-right hidden sm:inline">
 													{status}
 												</span>
-												<span className="text-xs text-muted-foreground w-24 text-right hidden md:inline">
+												<span className="text-xs text-muted-foreground w-28 shrink-0 whitespace-nowrap text-right hidden md:inline">
 													{formatDistanceToNow(new Date(d.createdAt), {
 														addSuffix: true,
 													})}
 												</span>
-												<span className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+												<span className="hidden w-12 shrink-0 text-right text-xs sm:inline text-muted-foreground hover:text-foreground transition-colors">
 													logs →
 												</span>
 											</Link>
-											<span className="flex shrink-0 items-center pr-5 text-xs">
+											<span className="flex w-36 shrink-0 items-center justify-end pr-5 text-xs">
 												{isGithubActionsDeployment(d) ? (
 													<GithubActionsDeploymentMark
 														service={info.service}

@@ -396,6 +396,62 @@ describe("startDeploy: compose", () => {
 	});
 });
 
+describe("startDeploy: a service whose provider is GitHub Actions (T-13879)", () => {
+	it("deploys an application of that source type like a Docker image service", async () => {
+		mocks.findApplicationById.mockResolvedValue(
+			app({ sourceType: "github-actions" }),
+		);
+		const outcome = await deps().startDeploy(watchRow(), deployment, payload);
+		expect(outcome.kind).toBe("started");
+		const image = mocks.updates.find((u) => u.table === applications);
+		expect(image?.values).toEqual({ dockerImage: payload.image });
+		expect(mocks.queueAdd).toHaveBeenCalledTimes(1);
+	});
+
+	it("still refuses an image of another repository for that application", async () => {
+		mocks.findApplicationById.mockResolvedValue(
+			app({ sourceType: "github-actions" }),
+		);
+		const outcome = await deps().startDeploy(watchRow(), deployment, {
+			...payload,
+			repository: "ghcr.io/other/app",
+			image: `ghcr.io/other/app@${DIGEST_NEW}`,
+		});
+		expect(outcome.kind).toBe("rejected");
+		expect(mocks.queueAdd).not.toHaveBeenCalled();
+	});
+
+	it("still refuses an application that builds from git", async () => {
+		mocks.findApplicationById.mockResolvedValue(app({ sourceType: "github" }));
+		const outcome = await deps().startDeploy(watchRow(), deployment, payload);
+		expect(outcome.kind).toBe("rejected");
+		expect(mocks.updates).toEqual([]);
+	});
+
+	it("pins the digest in the file of a compose stack of that source type", async () => {
+		const watch = watchRow({ serviceType: "compose", serviceId: "c-1" });
+		mocks.lockedRow = lockedFor(watch);
+		mocks.findComposeById.mockResolvedValue(
+			stack({ sourceType: "github-actions" }),
+		);
+		const outcome = await deps().startDeploy(watch, deployment, payload);
+		expect(outcome.kind).toBe("started");
+		const written = mocks.updates.find((u) => u.table === compose);
+		expect(written?.values.composeFile).toBe(
+			COMPOSE_FILE.replace(DIGEST_OLD, DIGEST_NEW),
+		);
+	});
+
+	it("still refuses a compose stack that builds from git", async () => {
+		const watch = watchRow({ serviceType: "compose", serviceId: "c-1" });
+		mocks.lockedRow = lockedFor(watch);
+		mocks.findComposeById.mockResolvedValue(stack({ sourceType: "github" }));
+		const outcome = await deps().startDeploy(watch, deployment, payload);
+		expect(outcome.kind).toBe("rejected");
+		expect(mocks.updates).toEqual([]);
+	});
+});
+
 describe("inspectInflight", () => {
 	const inflight = (overrides: Partial<WatchRow> = {}) =>
 		watchRow({

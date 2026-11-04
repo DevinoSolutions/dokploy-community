@@ -1,4 +1,5 @@
 import { findComposeById } from "@dokploy/server/services/compose";
+import { asDeployable } from "@dokploy/server/services/gha-connect/provider";
 import { stringify } from "yaml";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import { addAppNameToAllServiceNames } from "./collision/root-network";
@@ -29,7 +30,7 @@ export const randomizeIsolatedDeploymentComposeFile = async (
 	composeId: string,
 	suffix?: string,
 ) => {
-	const compose = await findComposeById(composeId);
+	const compose = asDeployable("compose", await findComposeById(composeId));
 
 	const command = await cloneCompose(compose);
 	if (compose.serverId) {

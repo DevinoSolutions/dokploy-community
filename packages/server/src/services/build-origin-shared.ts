@@ -588,6 +588,92 @@ export const describeGithubActionsTitle = (
 	return { subject, attempt };
 };
 
+// What the action and the poller append to the stored title (T-13877): "[run <id>.<n>]" (deploy.sh) and the
+// poller's "[deployment #<id>]" handle, in either order. Stripped from the end of the first line, and only
+// when one of them is there, so a subject's own trailing "(...)" or "[...]" is never cut.
+const TITLE_TRAILER = /\s*(\[run\s[^\]]*\]|\[deployment\s+#\d+\])\s*$/i;
+// "GHA [<env>] <sha>[:] [<subject>]"; the sha has a boundary like TITLE_DEPLOY, the environment may be missing.
+const GHA_TITLE_BODY =
+	/^GHA\s+(?:(\S+)\s+)?([0-9a-f]{7,40})(?![0-9A-Za-z]):?\s*(.*)$/i;
+const GHA_TITLE_ENV_ONLY = /^GHA\s+(\S+)$/i;
+
+export type PresentedGithubActionsTitle = {
+	/** What a list shows: the commit subject and ` (<sha8>)`, like a Dokploy row's `subject (sha)`. */
+	text: string;
+	subject: string | null;
+	environment: string | null;
+	sha: string | null;
+	/** The `[run N.A]` / `[deployment #N]` suffixes as stored, kept for the run modal and tooltips. */
+	run: string | null;
+	rollback: boolean;
+};
+
+/**
+ * Reads a stored GitHub Actions deployment title (old and new rows alike) into its parts and the clean text a list
+ * shows: "<subject> (<sha8>)", "Rolled back to <sha8>" for the action's rollback deploy. Null when the title does
+ * not start with the action's "GHA " marker or has no shape to read, so callers keep showing it as it is. Nothing
+ * is removed from the stored title; only the display drops the plumbing.
+ */
+export const presentGithubActionsTitle = (
+	title: string | null | undefined,
+): PresentedGithubActionsTitle | null => {
+	if (typeof title !== "string") return null;
+	let line = title.split("\n", 1)[0]?.trim() ?? "";
+	if (!/^GHA\s/i.test(line)) return null;
+	const trailers: string[] = [];
+	for (;;) {
+		const trailer = TITLE_TRAILER.exec(line);
+		if (!trailer?.[1]) break;
+		trailers.unshift(trailer[1]);
+		line = line.slice(0, trailer.index).trimEnd();
+	}
+	const run = trailers.length ? trailers.join(" ") : null;
+	if (/^GHA\s+rollback\b/.test(line)) {
+		const sha =
+			TITLE_ROLLBACK.exec(line)?.[2]?.slice(0, 8).toLowerCase() ?? null;
+		return {
+			text: sha ? `Rolled back to ${sha}` : "Rolled back",
+			subject: null,
+			environment: null,
+			sha,
+			run,
+			rollback: true,
+		};
+	}
+	const body = GHA_TITLE_BODY.exec(line);
+	if (body) {
+		const sha = (body[2] ?? "").slice(0, 8).toLowerCase();
+		const subject = body[3]?.trim() || null;
+		return {
+			text: subject
+				? `${subject} (${sha})`
+				: `Deployed from GitHub Actions (${sha})`,
+			subject,
+			environment: body[1] ?? null,
+			sha,
+			run,
+			rollback: false,
+		};
+	}
+	const envOnly = GHA_TITLE_ENV_ONLY.exec(line);
+	if (envOnly && trailers.length) {
+		return {
+			text: "Deployed from GitHub Actions",
+			subject: null,
+			environment: envOnly[1] ?? null,
+			sha: null,
+			run,
+			rollback: false,
+		};
+	}
+	return null;
+};
+
+/** The title a list should show: the clean GitHub Actions text, else the stored title unchanged. */
+export const displayDeploymentTitle = <T extends string | null | undefined>(
+	title: T,
+): T | string => presentGithubActionsTitle(title)?.text ?? title;
+
 export type GithubActionsRunTone =
 	| "running"
 	| "success"

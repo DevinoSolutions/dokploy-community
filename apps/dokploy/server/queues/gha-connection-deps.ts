@@ -42,7 +42,7 @@ import {
 	supersedeReleases,
 	toPendingRelease,
 } from "@dokploy/server/services/gha-connect";
-import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/deploy-source";
+import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/provider";
 import {
 	connectionKey,
 	listPinnedComposeRepositories,

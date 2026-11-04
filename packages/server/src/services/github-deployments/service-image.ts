@@ -1,3 +1,4 @@
+import { deploySourceTypeOf } from "../gha-connect/provider";
 import type { ParsedPayload } from "./payload";
 
 /**
@@ -34,7 +35,8 @@ export const decideApplicationImage = (
 	payload: Deploy,
 	owner: string,
 ): ImageDecision => {
-	if (application.sourceType !== "docker") {
+	// A service that follows GitHub Actions (T-13879) deploys an image like a Docker image service.
+	if (deploySourceTypeOf("application", application.sourceType) !== "docker") {
 		return {
 			ok: false,
 			reason:
@@ -59,6 +61,13 @@ export const decideApplicationImage = (
 	}
 	return { ok: true, dockerImage: payload.image };
 };
+
+/**
+ * Whether a compose stack keeps its file in Dokploy, so a release may move the digest in it: a stored (raw) file, or a
+ * stack that follows GitHub Actions (T-13879), whose file stays stored.
+ */
+export const isStoredComposeSource = (sourceType: string): boolean =>
+	deploySourceTypeOf("compose", sourceType) === "raw";
 
 const escapeRegExp = (value: string) =>
 	value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

@@ -187,6 +187,12 @@ void app
 				// (deployment.registerExternalBuild): one loop, one cheap query when none.
 				const { startGithubRunPoller } = await import("@dokploy/server");
 				startGithubRunPoller();
+				// Services connected before GitHub Actions became a provider (T-13879) get its
+				// source type, once; a no-op when there are none. Never throws.
+				const { adoptConnectedServicesAtStart } = await import(
+					"@dokploy/server/services/gha-connect"
+				);
+				await adoptConnectedServicesAtStart();
 				// Services that follow GitHub Deployments (T-12166): one poll every
 				// 20s, started after the restore so a restart never replays a deploy
 				// it already queued.

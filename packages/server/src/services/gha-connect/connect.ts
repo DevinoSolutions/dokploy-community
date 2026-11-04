@@ -2,6 +2,7 @@ import type { ApiResult, RepositoryInfo } from "./actions-api";
 import type { EnvironmentPolicy } from "./environment-policy";
 import { evaluateEnvironmentPolicy } from "./environment-policy";
 import { type PreviousSource, snapshotPreviousSource } from "./flip";
+import { GHA_SOURCE_TYPE, isGhaSourceType } from "./provider";
 
 /**
  * Connect: every check that has to pass before a service starts following
@@ -55,9 +56,13 @@ export interface ConnectPlan {
 	repoFullName: string;
 	/** Head of the tracked branch at Connect: the commit the first release should carry. */
 	expectedSha: string;
-	/** Applications built from git: settings to keep and the change to make now. */
+	/** What the service was before it became a github-actions one, so Disconnect can put it back. */
 	previousSource: PreviousSource | null;
-	serviceUpdate: { autoDeploy: false } | null;
+	/**
+	 * The change made at Connect (T-13879): the service gets the github-actions source type. Git settings are left
+	 * untouched, and git autodeploy is turned off for an application, so only one thing deploys it.
+	 */
+	serviceUpdate: { sourceType: typeof GHA_SOURCE_TYPE; autoDeploy?: false };
 }
 
 const refuse = (code: ConnectCode, message: string): ConnectRefusal => ({
@@ -147,14 +152,22 @@ export const planConnect = async (
 		);
 	}
 
-	if (service.kind === "compose" && service.sourceType !== "raw") {
+	if (
+		service.kind === "compose" &&
+		service.sourceType !== "raw" &&
+		!isGhaSourceType(service.sourceType)
+	) {
 		return refuse(
 			"service",
 			"Only compose stacks whose file is stored in Dokploy can follow GitHub Actions releases for now.",
 		);
 	}
 	if (service.kind === "application") {
-		if (service.sourceType !== "github" && service.sourceType !== "docker") {
+		if (
+			service.sourceType !== "github" &&
+			service.sourceType !== "docker" &&
+			!isGhaSourceType(service.sourceType)
+		) {
 			return refuse(
 				"service",
 				"Only applications built from GitHub, or running a Docker image, can follow GitHub Actions releases for now.",
@@ -223,16 +236,27 @@ export const planConnect = async (
 		);
 	}
 
-	const git = service.kind === "application" && service.sourceType === "github";
+	// A service already marked github-actions without a connection (an orphan) has nothing to go back to.
+	const orphan = isGhaSourceType(service.sourceType);
+	let previousSource: PreviousSource | null = null;
+	if (!orphan) {
+		previousSource =
+			service.kind === "application"
+				? snapshotPreviousSource({
+						...service.fields,
+						sourceType: service.sourceType,
+					})
+				: { sourceType: service.sourceType };
+	}
 	return {
 		ok: true,
 		repoId: repository.value.id,
 		repoFullName: repository.value.fullName,
 		expectedSha: head.value.sha,
-		previousSource:
-			git && service.kind === "application"
-				? snapshotPreviousSource(service.fields)
-				: null,
-		serviceUpdate: git ? { autoDeploy: false } : null,
+		previousSource,
+		serviceUpdate:
+			service.kind === "application"
+				? { sourceType: GHA_SOURCE_TYPE, autoDeploy: false }
+				: { sourceType: GHA_SOURCE_TYPE },
 	};
 };

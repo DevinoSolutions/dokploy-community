@@ -1,4 +1,4 @@
-import { deploySourceTypeOf } from "./deploy-source";
+import { deploySourceTypeOf } from "./provider";
 
 /**
  * The flip: the one change a connection makes to a service, at the moment its

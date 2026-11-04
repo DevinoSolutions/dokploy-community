@@ -1,0 +1,1 @@
+dokploy-release action.yml at efafd804 (DevinoSolutions/dokploy-release), vendored so the generated workflow is checked against the inputs the action really declares.

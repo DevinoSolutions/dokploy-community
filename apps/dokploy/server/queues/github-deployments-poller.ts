@@ -25,7 +25,7 @@ import {
 	planApplicationFlip,
 	snapshotPreviousSource,
 } from "@dokploy/server/services/gha-connect";
-import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/deploy-source";
+import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/provider";
 import {
 	createGithubFetch,
 	type DeployPayload,
@@ -36,6 +36,7 @@ import {
 	GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS,
 	type GithubDeployment,
 	type InflightState,
+	isStoredComposeSource,
 	listEnabledGithubWatches,
 	loadConnectionToken,
 	markGithubConnectionRevoked,
@@ -261,7 +262,7 @@ const preparePlainDeploy = async (
 			reason: "The compose stack belongs to another organization.",
 		};
 	}
-	if (stack.sourceType !== "raw") {
+	if (!isStoredComposeSource(stack.sourceType)) {
 		return {
 			kind: "rejected",
 			reason:
@@ -545,7 +546,7 @@ const prepareReleaseDeploy = async (
 			reason: "The compose stack belongs to another organization.",
 		};
 	}
-	if (deploySourceTypeOf("compose", stack.sourceType) !== "raw") {
+	if (!isStoredComposeSource(stack.sourceType)) {
 		return {
 			kind: "rejected",
 			reason:

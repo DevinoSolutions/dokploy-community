@@ -1,5 +1,6 @@
 import {
 	decideApplicationImage,
+	isStoredComposeSource,
 	pinComposeImage,
 	repositoryOfReference,
 } from "@dokploy/server/services/github-deployments/service-image";
@@ -134,5 +135,41 @@ describe("pinComposeImage", () => {
 	it("does not treat a longer repository name as a match", () => {
 		const text = `image: ${REPO}-admin@${OLD}\n`;
 		expect(pinComposeImage(text, REPO, NEW).ok).toBe(false);
+	});
+});
+
+describe("a service whose provider is GitHub Actions (T-13879)", () => {
+	it("takes a new digest of the image it runs, like a Docker image application", () => {
+		expect(
+			decideApplicationImage(
+				{ sourceType: "github-actions", dockerImage: `${REPO}@${OLD}` },
+				payload(),
+				"DevinoSolutions",
+			),
+		).toEqual({ ok: true, dockerImage: `${REPO}@${NEW}` });
+		expect(
+			decideApplicationImage(
+				{ sourceType: "github-actions", dockerImage: `${REPO}@${OLD}` },
+				payload("ghcr.io/other/app"),
+				"DevinoSolutions",
+			).ok,
+		).toBe(false);
+	});
+
+	it("keeps refusing an application built from git", () => {
+		expect(
+			decideApplicationImage(
+				{ sourceType: "github", dockerImage: null },
+				payload(),
+				"DevinoSolutions",
+			).ok,
+		).toBe(false);
+	});
+
+	it("treats a stack of that type as a stored compose file", () => {
+		expect(isStoredComposeSource("raw")).toBe(true);
+		expect(isStoredComposeSource("github-actions")).toBe(true);
+		expect(isStoredComposeSource("github")).toBe(false);
+		expect(isStoredComposeSource("git")).toBe(false);
 	});
 });

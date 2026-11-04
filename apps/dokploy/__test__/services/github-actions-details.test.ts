@@ -11,6 +11,7 @@ import {
 	describeGithubActionsTitle,
 	describeImageReference,
 	describeServiceBuild,
+	displayDeploymentTitle,
 	extractComposeImages,
 	githubActionsBranch,
 	githubActionsPushTarget,
@@ -18,6 +19,7 @@ import {
 	parseGithubActionsTitle,
 	pickNewerLiveGithubDeployment,
 	pickServingDeployment,
+	presentGithubActionsTitle,
 	renderBuildStartMarker,
 	withGithubActionsRunDetails,
 } from "@dokploy/server/services/build-origin";
@@ -1182,5 +1184,86 @@ describe("pickNewerLiveGithubDeployment", () => {
 	test("skips rows that are not live", () => {
 		const rows = [{ ...live("x", "2026-11-02T12:00:00.000Z"), status: "done" }];
 		expect(pickNewerLiveGithubDeployment(rows, serving)).toBeNull();
+	});
+});
+
+describe("presentGithubActionsTitle (T-13877)", () => {
+	test("drops the run suffix of a stored title", () => {
+		const presented = presentGithubActionsTitle(
+			"GHA production 61c3c874: Flag bulk-import rows whose time has passed as publish [run 41729774159.1]",
+		);
+		expect(presented?.text).toBe(
+			"Flag bulk-import rows whose time has passed as publish (61c3c874)",
+		);
+		expect(presented).toMatchObject({
+			environment: "production",
+			sha: "61c3c874",
+			run: "[run 41729774159.1]",
+			rollback: false,
+		});
+	});
+
+	test("a title without a subject, an uppercase sha and a subject's own brackets", () => {
+		expect(
+			presentGithubActionsTitle("GHA development 59F1F166 [run 41726493887.1]")
+				?.text,
+		).toBe("Deployed from GitHub Actions (59f1f166)");
+		expect(
+			presentGithubActionsTitle("GHA production b4f509d2: fix (#83)")?.text,
+		).toBe("fix (#83) (b4f509d2)");
+		expect(
+			presentGithubActionsTitle("GHA production b4f509d2: fix (#83) [run 1.2]")
+				?.text,
+		).toBe("fix (#83) (b4f509d2)");
+		expect(
+			presentGithubActionsTitle("GHA production b4f509dxyz: x")?.text,
+		).toBeUndefined();
+	});
+
+	test("poller titles, with or without environment and sha, either suffix order", () => {
+		expect(
+			presentGithubActionsTitle("GHA staging abcdef12 [deployment #7]")?.text,
+		).toBe("Deployed from GitHub Actions (abcdef12)");
+		expect(
+			presentGithubActionsTitle("GHA abcdef12 [deployment #7]")?.text,
+		).toBe("Deployed from GitHub Actions (abcdef12)");
+		expect(
+			presentGithubActionsTitle("GHA production [deployment #7]")?.text,
+		).toBe("Deployed from GitHub Actions");
+		expect(
+			presentGithubActionsTitle(
+				"GHA production abcdef12: ship [deployment #7] [run 9.1]",
+			),
+		).toMatchObject({
+			text: "ship (abcdef12)",
+			run: "[deployment #7] [run 9.1]",
+		});
+		expect(
+			presentGithubActionsTitle(
+				"GHA production abcdef12: ship [run 9.1] [deployment #7]",
+			)?.text,
+		).toBe("ship (abcdef12)");
+	});
+
+	test("rollback titles", () => {
+		expect(
+			presentGithubActionsTitle(
+				"GHA rollback production to 61c3c874 [run 41729774159.1]",
+			),
+		).toMatchObject({ text: "Rolled back to 61c3c874", rollback: true });
+		expect(
+			presentGithubActionsTitle("GHA rollback: redeploy the last image")?.text,
+		).toBe("Rolled back");
+	});
+
+	test("leaves other titles alone", () => {
+		expect(presentGithubActionsTitle("play: reads (#83) (390a3b6)")).toBeNull();
+		expect(presentGithubActionsTitle("GHA production old")).toBeNull();
+		expect(presentGithubActionsTitle(null)).toBeNull();
+		expect(displayDeploymentTitle("Manual deploy")).toBe("Manual deploy");
+		expect(displayDeploymentTitle(null)).toBeNull();
+		expect(
+			displayDeploymentTitle("GHA production b4f509d2: ship it [run 1.1]"),
+		).toBe("ship it (b4f509d2)");
 	});
 });

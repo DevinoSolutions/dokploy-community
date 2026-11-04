@@ -14,8 +14,8 @@ export const GithubActionsRedeployHint = ({
 	target?: string | null;
 }) => (
 	<p className="text-sm text-muted-foreground">
-		To ship a new version, push to {target || "your repository"}. GitHub Actions
-		builds and deploys it.
+		To build a new version, push to {target || "your repository"}; GitHub
+		Actions deploys it.
 	</p>
 );
 
