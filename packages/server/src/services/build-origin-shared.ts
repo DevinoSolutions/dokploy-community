@@ -608,10 +608,10 @@ export const describeGithubActionsTitle = (
 // What the action and the poller append to the stored title (T-13877): "[run <id>.<n>]" (deploy.sh) and the
 // poller's "[deployment #<id>]" handle, in either order. Stripped from the end of the first line, and only
 // when one of them is there, so a subject's own trailing "(...)" or "[...]" is never cut.
-const TITLE_TRAILER = /\s*(\[run\s[^\]]*\]|\[deployment\s+#\d+\])\s*$/i;
+const TITLE_TRAILER = /\s*(\[run\s+\d+(?:\.\d+)?\]|\[deployment\s+#\d+\])\s*$/i;
 // "GHA [<env>] <sha>[:] [<subject>]"; the sha has a boundary like TITLE_DEPLOY, the environment may be missing.
 const GHA_TITLE_BODY =
-	/^GHA\s+(?:(\S+)\s+)?([0-9a-f]{7,40})(?![0-9A-Za-z]):?\s*(.*)$/i;
+	/^GHA\s+(?:(\S+)\s+)?([0-9a-f]{7,40})(?=[:\s]|$):?\s*(.*)$/i;
 const GHA_TITLE_ENV_ONLY = /^GHA\s+(\S+)$/i;
 
 export type PresentedGithubActionsTitle = {

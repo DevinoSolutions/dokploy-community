@@ -1220,6 +1220,31 @@ describe("presentGithubActionsTitle (T-13877)", () => {
 		).toBeUndefined();
 	});
 
+	test("only a numeric [run N.M] suffix is plumbing; a subject's own [run ...] stays", () => {
+		expect(
+			presentGithubActionsTitle("GHA production b4f509d2: ship [run 12.3]")?.text,
+		).toBe("ship (b4f509d2)");
+		expect(
+			presentGithubActionsTitle("GHA production b4f509d2: ship [run 12]")?.text,
+		).toBe("ship (b4f509d2)");
+		expect(
+			presentGithubActionsTitle("GHA production b4f509d2: ship [run tests]")
+				?.text,
+		).toBe("ship [run tests] (b4f509d2)");
+	});
+
+	test("the commit sha ends at a colon, a space or the end of the title", () => {
+		expect(
+			presentGithubActionsTitle("GHA production b4f509d2:ship")?.sha,
+		).toBe("b4f509d2");
+		expect(presentGithubActionsTitle("GHA production b4f509d2")?.sha).toBe(
+			"b4f509d2",
+		);
+		expect(
+			presentGithubActionsTitle("GHA production b4f509d2-rc1: x")?.text,
+		).toBeUndefined();
+	});
+
 	test("poller titles, with or without environment and sha, either suffix order", () => {
 		expect(
 			presentGithubActionsTitle("GHA staging abcdef12 [deployment #7]")?.text,
