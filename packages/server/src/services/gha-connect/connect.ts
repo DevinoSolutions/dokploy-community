@@ -142,6 +142,18 @@ export const planConnect = async (
 	}
 
 	if (
+		service.kind === "application" &&
+		service.sourceType === "github" &&
+		(!service.owner?.trim() || !service.repository?.trim())
+	) {
+		// The application has no repository selected yet: there is nothing to compare the request with.
+		return refuse(
+			"repository",
+			"Pick a repository first. This application has no repository selected: choose one in its GitHub source, save it, then connect GitHub Actions.",
+		);
+	}
+
+	if (
 		request.registryPrefix !== null &&
 		service.kind === "application" &&
 		service.sourceType === "github"
@@ -171,16 +183,6 @@ export const planConnect = async (
 			return refuse(
 				"service",
 				"Only applications built from GitHub, or running a Docker image, can follow GitHub Actions releases for now.",
-			);
-		}
-		if (
-			service.sourceType === "github" &&
-			(!service.owner?.trim() || !service.repository?.trim())
-		) {
-			// The application has no repository selected yet: there is nothing to compare the request with.
-			return refuse(
-				"repository",
-				"Pick a repository first. This application has no repository selected: choose one in its GitHub source, save it, then connect GitHub Actions.",
 			);
 		}
 		if (
