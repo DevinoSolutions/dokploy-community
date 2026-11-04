@@ -736,20 +736,20 @@ describe("githubActionsRunsOf", () => {
 });
 
 describe("isGithubActionsPillInteractive", () => {
-	it("is inert while the service waits for its first release", () => {
+	test("is inert while the service waits for its first release", () => {
 		expect(
 			isGithubActionsPillInteractive({ waitingForFirstRelease: true }),
 		).toBe(false);
 	});
 
-	it("is clickable once a run exists", () => {
+	test("is clickable once a run exists", () => {
 		expect(
 			isGithubActionsPillInteractive({ waitingForFirstRelease: false }),
 		).toBe(true);
 		expect(isGithubActionsPillInteractive({})).toBe(true);
 	});
 
-	it("follows describeGithubActionsOriginPill", () => {
+	test("follows describeGithubActionsOriginPill", () => {
 		const waiting = describeGithubActionsOriginPill({
 			buildOrigin: "github-actions",
 		});
