@@ -118,7 +118,11 @@ export const planApplicationFlip = (
 	dockerImage: string,
 ): FlipPlan => {
 	// A service already on an image (or on the GitHub Actions provider, which deploys as one) is not flipped.
-	if (deploySourceTypeOf("application", application.sourceType) === "docker") {
+	const { sourceType } = application;
+	if (
+		typeof sourceType === "string" &&
+		deploySourceTypeOf("application", sourceType) === "docker"
+	) {
 		return { flip: false };
 	}
 	return {
