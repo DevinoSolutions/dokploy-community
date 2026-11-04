@@ -54,6 +54,7 @@ import {
 } from "@/components/ui/table";
 import type { AppRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
+import { describeHostedOn } from "./hosted-on";
 
 type DeploymentRow =
 	inferRouterOutputs<AppRouter>["deployment"]["allCentralized"][number];
@@ -177,11 +178,7 @@ export function ShowDeploymentsTable() {
 			const q = globalFilter.toLowerCase();
 			list = list.filter((d) => {
 				const info = getServiceInfo(d);
-				const serverName =
-					d.server?.name ??
-					d.application?.server?.name ??
-					d.compose?.server?.name ??
-					"";
+				const hosted = describeHostedOn(d);
 				const buildServerName =
 					d.buildServer?.name ?? d.application?.buildServer?.name ?? "";
 				if (!info) return false;
@@ -192,7 +189,8 @@ export function ShowDeploymentsTable() {
 					(d.title?.toLowerCase().includes(q) ?? false) ||
 					(displayDeploymentTitle(d.title)?.toLowerCase().includes(q) ??
 						false) ||
-					serverName.toLowerCase().includes(q) ||
+					hosted.hostName.toLowerCase().includes(q) ||
+					(hosted.builtOn?.name.toLowerCase().includes(q) ?? false) ||
 					buildServerName.toLowerCase().includes(q)
 				);
 			});
@@ -310,11 +308,7 @@ export function ShowDeploymentsTable() {
 			},
 			{
 				id: "serverName",
-				accessorFn: (row: DeploymentRow) =>
-					row.server?.name ??
-					row.application?.server?.name ??
-					row.compose?.server?.name ??
-					"",
+				accessorFn: (row: DeploymentRow) => describeHostedOn(row).hostName,
 				header: ({
 					column,
 				}: {
@@ -328,59 +322,35 @@ export function ShowDeploymentsTable() {
 						className="-ml-3 h-8"
 						onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
 					>
-						Server
+						Hosted on
 						<ArrowUpDown className="ml-2 size-4" />
 					</Button>
 				),
 				cell: ({ row }: { row: { original: DeploymentRow } }) => {
-					const d = row.original;
-					const serverName =
-						d.server?.name ??
-						d.application?.server?.name ??
-						d.compose?.server?.name ??
-						null;
-					const serverType =
-						d.server?.serverType ??
-						d.application?.server?.serverType ??
-						d.compose?.server?.serverType ??
-						null;
-					const buildServerName =
-						d.buildServer?.name ?? d.application?.buildServer?.name ?? null;
-					const buildServerType =
-						d.buildServer?.serverType ??
-						d.application?.buildServer?.serverType ??
-						null;
-					const showBuild =
-						buildServerName != null && buildServerName !== serverName;
-					if (!serverName && !showBuild) {
-						return <span className="text-muted-foreground">—</span>;
-					}
+					const { hostName, hostType, builtOn } = describeHostedOn(
+						row.original,
+					);
 					return (
 						<div className="flex flex-col gap-0.5 text-sm">
-							{serverName && (
-								<div className="flex items-center gap-1.5 flex-wrap">
-									<Server className="size-3.5 text-muted-foreground shrink-0" />
-									<span className="truncate">{serverName}</span>
-									{serverType && (
-										<Badge
-											variant="outline"
-											className="text-[10px] font-normal"
-										>
-											{serverType}
-										</Badge>
-									)}
-								</div>
-							)}
-							{showBuild && buildServerName && (
+							<div className="flex items-center gap-1.5 flex-wrap">
+								<Server className="size-3.5 text-muted-foreground shrink-0" />
+								<span className="truncate">{hostName}</span>
+								{hostType && (
+									<Badge variant="outline" className="text-[10px] font-normal">
+										{hostType}
+									</Badge>
+								)}
+							</div>
+							{builtOn && (
 								<div className="flex items-center gap-1.5 text-muted-foreground flex-wrap">
-									<span className="text-[10px]">Build:</span>
-									<span className="truncate text-xs">{buildServerName}</span>
-									{buildServerType && (
+									<span className="text-[10px]">built on</span>
+									<span className="truncate text-xs">{builtOn.name}</span>
+									{builtOn.type && (
 										<Badge
 											variant="outline"
 											className="text-[10px] font-normal"
 										>
-											{buildServerType}
+											{builtOn.type}
 										</Badge>
 									)}
 								</div>
@@ -420,7 +390,7 @@ export function ShowDeploymentsTable() {
 			},
 			{
 				id: "source",
-				header: "Source",
+				header: "Built by",
 				enableSorting: false,
 				cell: ({ row }: { row: { original: DeploymentRow } }) => {
 					const d = row.original;
@@ -571,7 +541,7 @@ export function ShowDeploymentsTable() {
 				</Select>
 				<Select value={serverFilter} onValueChange={setServerFilter}>
 					<SelectTrigger className="w-[160px]">
-						<SelectValue placeholder="Server" />
+						<SelectValue placeholder="Hosted on" />
 					</SelectTrigger>
 					<SelectContent>
 						<SelectItem value="all">All servers</SelectItem>
