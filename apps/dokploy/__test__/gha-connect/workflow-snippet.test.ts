@@ -46,6 +46,7 @@ const reserved = declared.filter((name) =>
 type Step = { uses?: string; with?: Record<string, unknown> };
 type Job = {
 	needs?: string;
+	if?: string;
 	environment?: string;
 	permissions?: Record<string, string>;
 	outputs?: Record<string, string>;
@@ -145,8 +146,9 @@ describe("buildWorkflowSnippet, build mode (the whole workflow)", () => {
 			context: ".",
 			file: "apps/web/Dockerfile",
 			push: true,
-			"cache-from": "type=gha",
-			"cache-to": "type=gha,mode=max",
+			// Scoped to the service key so two services of one repository do not share (and evict) one cache.
+			"cache-from": "type=gha,scope=web",
+			"cache-to": "type=gha,mode=max,scope=web",
 		});
 		expect(push?.tags).toBe("ghcr.io/acme/shop/web:${{ github.sha }}");
 		expect(wholeYaml).not.toMatch(
@@ -184,6 +186,59 @@ describe("buildWorkflowSnippet, build mode (the whole workflow)", () => {
 		const workflow = parse(result.yaml) as Workflow;
 		expect(workflow.jobs.build?.steps?.[3]?.with?.context).toBe("apps/web");
 		expect(releaseSteps(workflow.jobs)[0]?.with?.delivery).toBe("push");
+	});
+});
+
+describe("buildWorkflowSnippet, build mode: what a pull request or another branch can do", () => {
+	it("publishes a release only from the tracked branch", () => {
+		const { whole, wholeYaml } = generated();
+		expect(whole.jobs.release?.if).toBe("github.ref == 'refs/heads/dev'");
+		// The build job has no such condition: a run elsewhere may build, never publish.
+		expect(whole.jobs.build?.if).toBeUndefined();
+		expect(wholeYaml).toContain("    if: github.ref == 'refs/heads/dev'");
+	});
+
+	it("follows the tracked branch it is generated for", () => {
+		const result = buildWorkflowSnippet({ ...build, branch: "release/2" });
+		if (!result.ok) throw new Error("unreachable");
+		const workflow = parse(result.yaml) as Workflow;
+		expect(workflow.jobs.release?.if).toBe(
+			"github.ref == 'refs/heads/release/2'",
+		);
+		expect(result.yaml).toContain("branches: [release/2]");
+	});
+
+	it("scopes the build cache to the service key", () => {
+		const result = buildWorkflowSnippet({ ...build, serviceKey: "api.v2" });
+		if (!result.ok) throw new Error("unreachable");
+		const workflow = parse(result.yaml) as Workflow;
+		const push = workflow.jobs.build?.steps?.[3]?.with;
+		expect(push?.["cache-from"]).toBe("type=gha,scope=api.v2");
+		expect(push?.["cache-to"]).toBe("type=gha,mode=max,scope=api.v2");
+	});
+});
+
+describe("the private package limit of phase 1", () => {
+	it.each([
+		["the whole workflow", () => buildWorkflowSnippet(build)],
+		["the job", () => buildWorkflowSnippet(existing)],
+	])("is written into %s as a comment", (_name, make) => {
+		const result = make();
+		if (!result.ok) throw new Error("unreachable");
+		const comments = result.yaml
+			.split("
+")
+			.filter((line) => line.trim().startsWith("#"))
+			.join(" ");
+		expect(comments).toMatch(/private by default|private package/i);
+		expect(comments).toMatch(/make it public/);
+		expect(comments).toMatch(/registry Dokploy can read/);
+	});
+
+	it("does not change what the workflow does: comments only", () => {
+		const { whole, job } = generated();
+		expect(Object.keys(whole.jobs)).toEqual(["build", "release"]);
+		expect(Object.keys(job.jobs)).toEqual(["dokploy-release"]);
 	});
 });
 

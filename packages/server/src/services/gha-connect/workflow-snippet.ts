@@ -81,6 +81,17 @@ const common = (input: SnippetInput): string | null => {
 	return null;
 };
 
+/**
+ * Phase 1 limit, written into the generated text where the user will read it: Dokploy pulls the image without a
+ * GitHub login, so a GHCR package that is private is not pullable until it is made public (or the image is mirrored
+ * to a registry Dokploy can read).
+ */
+const PRIVATE_PACKAGE_NOTE = [
+	"Dokploy pulls the image without a GitHub login. A GHCR package is private by default: make it public",
+	"(Package settings, Change visibility) or mirror the image to a registry Dokploy can read. Until then a",
+	"private package cannot be pulled.",
+];
+
 /** A GitHub Actions expression, written without a template-literal clash. */
 const expr = (inner: string) => `\${{ ${inner} }}`;
 
@@ -113,6 +124,7 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 		}
 		const yaml = [
 			"  # Added for Dokploy: publishes the release. It needs no Dokploy address and no API key.",
+			...PRIVATE_PACKAGE_NOTE.map((line) => `  # ${line}`),
 			"  dokploy-release:",
 			`    needs: ${input.buildJob}`,
 			`    if: github.ref == 'refs/heads/${input.branch}'`,
@@ -157,6 +169,7 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 		"  contents: read",
 		"jobs:",
 		"  build:",
+		...PRIVATE_PACKAGE_NOTE.map((line) => `    # ${line}`),
 		"    runs-on: ubuntu-latest",
 		"    permissions:",
 		"      contents: read",
@@ -180,10 +193,11 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 		`          file: ${input.dockerfile}`,
 		"          push: true",
 		`          tags: ${image}:${expr("github.sha")}`,
-		"          cache-from: type=gha",
-		"          cache-to: type=gha,mode=max",
+		`          cache-from: type=gha,scope=${input.serviceKey}`,
+		`          cache-to: type=gha,mode=max,scope=${input.serviceKey}`,
 		"  release:",
 		"    needs: build",
+		`    if: github.ref == 'refs/heads/${input.branch}'`,
 		"    runs-on: ubuntu-latest",
 		`    environment: ${input.environment}`,
 		"    permissions:",
