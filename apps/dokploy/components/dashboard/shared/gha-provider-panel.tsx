@@ -197,6 +197,11 @@ const ConnectedView = ({
 							) : (
 								row.value
 							)}
+							{row.note && (
+								<span className="block font-sans text-xs text-muted-foreground">
+									{row.note}
+								</span>
+							)}
 						</dd>
 					</div>
 				))}

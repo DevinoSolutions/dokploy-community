@@ -296,6 +296,8 @@ export type DetailRow = {
 	value: string;
 	href: string | null;
 	mono: boolean;
+	/** One line under the value, when the value needs a word of explanation. */
+	note?: string;
 };
 
 /** "just now", "5 minutes ago", "3 hours ago", "2 days ago"; null for no date or one that does not parse. */
@@ -384,7 +386,12 @@ export const runningImageProblem = (
 export type PanelImage = {
 	repositories: string[];
 	source: "running" | "expected";
+	/** A compose stack with nothing pinned yet: why a release does not pin anything before it does. */
+	hint?: string;
 };
+
+export const COMPOSE_PIN_HINT =
+	"A release pins only after the compose file carries this image once, as image: <name>@sha256:...";
 
 export const panelImageOfConnection = (
 	connection: Pick<
@@ -405,9 +412,12 @@ export const panelImageOfConnection = (
 	};
 	const image = deriveReleaseImage({ kind: type, ...input, ...running });
 	// A running image outside the namespaces cannot be replaced by a release: the row names the expected one.
-	return image.ok
+	const result: PanelImage = image.ok
 		? { repositories: image.repositories, source: image.source }
 		: { repositories: [expectedImageRepository(input)], source: "expected" };
+	return type === "compose" && result.source === "expected"
+		? { ...result, hint: COMPOSE_PIN_HINT }
+		: result;
 };
 
 /** The facts under the pill, in reading order. A row is left out when the value is not known. */
@@ -455,6 +465,7 @@ export const providerDetailRows = (
 			value: image.repositories.join(", "),
 			href: null,
 			mono: true,
+			...(image.hint ? { note: image.hint } : {}),
 		});
 	}
 	if (connection.deployedSha) {

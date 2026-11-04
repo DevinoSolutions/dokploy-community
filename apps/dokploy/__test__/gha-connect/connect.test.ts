@@ -263,6 +263,27 @@ describe("planConnect", () => {
 			expect(await plan(docker(null))).toMatchObject({ ok: true });
 		});
 
+		it("looks at the stored image whatever the source is: a git application with a stale off-namespace image is refused", async () => {
+			const stale = (dockerImage: string | null): ServiceFacts => ({
+				...githubApp,
+				dockerImage,
+			}) as ServiceFacts;
+			expect(await plan(stale("nginx:latest"))).toMatchObject({
+				ok: false,
+				code: "image",
+			});
+			expect(await plan(stale(`ghcr.io/other/app@${D}`))).toMatchObject({
+				ok: false,
+				code: "image",
+			});
+			// Empty, blank or in-namespace: nothing stops it.
+			for (const image of [null, "", "  ", "ghcr.io/acme/shop/web:old"]) {
+				expect(await plan(stale(image)), String(image)).toMatchObject({
+					ok: true,
+				});
+			}
+		});
+
 		it("does not look at a compose stack: its adopters keep connecting", async () => {
 			expect(
 				await plan(

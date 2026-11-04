@@ -251,6 +251,7 @@ describe("the image the whole workflow pushes", () => {
 		["a preview image", "ghcr.io/acme/shop/preview/pr-1"],
 		["another registry", "localhost:5000/registry.devino.ca/shop/web"],
 		["a path escape", "ghcr.io/acme/shop/../x"],
+		["an empty path segment", "ghcr.io/acme/shop//x"],
 		["text a workflow cannot take", "ghcr.io/acme/shop/web; rm -rf /"],
 	])("refuses %s", (_name, image) => {
 		expect(buildWorkflowSnippet({ ...build, image }).ok).toBe(false);

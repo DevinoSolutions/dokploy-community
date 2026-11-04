@@ -166,6 +166,7 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 	if (
 		!IMAGE.test(image) ||
 		image.endsWith("/") ||
+		image.includes("//") ||
 		image.length <= namespace.length ||
 		image.includes("..") ||
 		!image.toLowerCase().startsWith(namespace) ||

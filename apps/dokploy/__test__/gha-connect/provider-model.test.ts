@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	type ConnectForm,
+	COMPOSE_PIN_HINT,
 	connectFormProblem,
 	DEFAULT_WORKFLOW_PATH,
 	defaultConnectForm,
@@ -395,6 +396,24 @@ describe("the status panel", () => {
 				{},
 			),
 		).toBeNull();
+	});
+
+	it("tells a compose stack with nothing pinned yet when a release will pin", () => {
+		const D = `sha256:${"a".repeat(64)}`;
+		const guess = panelImageOfConnection(conn(), "compose", {
+			composeFile: "services:\n  db:\n    image: postgres:16\n",
+		});
+		expect(guess).toMatchObject({ source: "expected", hint: COMPOSE_PIN_HINT });
+		const row = providerDetailRows(conn(), new Date(), guess).find(
+			(r) => r.label === "Expected image",
+		);
+		expect(row?.note).toMatch(/pins only after the compose file carries/);
+		// Pinned inside the namespace: it is what runs, no hint. An application never gets one.
+		const pinned = panelImageOfConnection(conn(), "compose", {
+			composeFile: `services:\n  web:\n    image: ghcr.io/acme/shop/web@${D}\n`,
+		});
+		expect(pinned?.hint).toBeUndefined();
+		expect(panelImageOfConnection(conn(), "application", {})?.hint).toBeUndefined();
 	});
 
 	it("builds the workflow and refuses Connect from the same derivation", () => {
