@@ -1,3 +1,5 @@
+import { deploySourceTypeOf } from "./provider";
+
 /**
  * The flip: the one change a connection makes to a service, at the moment its
  * first release arrives (never at Connect). Pure planning; the poller applies
@@ -115,7 +117,14 @@ export const planApplicationFlip = (
 	application: Partial<Record<ApplicationSourceField, unknown>>,
 	dockerImage: string,
 ): FlipPlan => {
-	if (application.sourceType === "docker") return { flip: false };
+	// A service already on an image (or on the GitHub Actions provider, which deploys as one) is not flipped.
+	const { sourceType } = application;
+	if (
+		typeof sourceType === "string" &&
+		deploySourceTypeOf("application", sourceType) === "docker"
+	) {
+		return { flip: false };
+	}
 	return {
 		flip: true,
 		previousSource: snapshotPreviousSource(application),

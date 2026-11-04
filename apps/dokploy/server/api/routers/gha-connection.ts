@@ -46,6 +46,7 @@ import {
 	serviceRowExists,
 	touchConnectionActivity,
 	updateGateSettings,
+	wakeGhaConnection,
 	withoutMissingReferences,
 } from "@dokploy/server/services/gha-connect";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
@@ -624,6 +625,8 @@ export const ghaConnectionRouter = createTRPCRouter({
 				});
 			}
 			await touchConnectionActivity(row.ghaConnectionId);
+			// The poller looks at this connection on its next tick, whatever its cadence says.
+			wakeGhaConnection(row.ghaConnectionId);
 			if (row.state === "blocked") {
 				await applyConnectionEvent(
 					row.ghaConnectionId,

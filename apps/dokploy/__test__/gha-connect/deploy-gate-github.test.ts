@@ -10,7 +10,7 @@ import {
 	loadWorkflowRuns,
 	releaseWorkflowRunIds,
 } from "@dokploy/server/services/gha-connect/deploy-gate-github";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type Recorded, type Reply, routedFetch } from "./gha-helpers";
 
 const REF = { owner: "acme", repo: "shop" };
@@ -779,5 +779,56 @@ describe("loadRecentCommits and createGateGithub", () => {
 		await github.loadCommitChecks(SHA);
 		await github.loadWorkflowRuns(SHA);
 		expect(calls.every((c) => c.url.includes("/repos/acme/shop/"))).toBe(true);
+	});
+});
+
+describe("review follow-ups of the gate's reads", () => {
+	it("ties a check run to a workflow run through its details URL only when GitHub Actions made it", async () => {
+		const { apiDeps } = deps([
+			[
+				`/commits/${SHA}/check-runs`,
+				{
+					json: checkRuns(
+						checkRun(1, "build", "completed", "success"),
+						// Another app can point its details URL at any workflow run.
+						checkRun(2, "lint", "completed", "success", {
+							app: { slug: "some-other-app", id: 77 },
+							details_url: RUN_URL(1001),
+						}),
+						checkRun(3, "noapp", "completed", "success", { app: null }),
+					),
+				},
+			],
+			[`/commits/${SHA}/status`, { json: noStatuses }],
+		]);
+		const read = await loadCommitChecks(apiDeps, TOKEN, REF, SHA);
+		if (read.kind !== "ok") throw new Error("read failed");
+		const byName = Object.fromEntries(read.value.map((c) => [c.name, c.runId]));
+		expect(byName.build).toBe(1001);
+		expect(byName.lint).toBeNull();
+		expect(byName.noapp).toBeNull();
+	});
+
+	it("logs when the check-run pages stop at the cap, and still answers with what it read", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const page = Array.from({ length: 100 }, (_, i) =>
+			checkRun(i + 1, `check-${i}`, "completed", "success"),
+		);
+		const { apiDeps, calls } = deps([
+			[
+				`/commits/${SHA}/check-runs`,
+				{ json: { total_count: 1000, check_runs: page } },
+			],
+			[`/commits/${SHA}/status`, { json: noStatuses }],
+		]);
+		const read = await loadCommitChecks(apiDeps, TOKEN, REF, SHA);
+		expect(read.kind).toBe("ok");
+		expect(calls.filter((c) => c.url.includes("check-runs"))).toHaveLength(5);
+		expect(warn).toHaveBeenCalledWith(
+			expect.stringContaining(
+				"check runs of acme/shop@aaaaaaa truncated at 500 of 1000",
+			),
+		);
+		warn.mockRestore();
 	});
 });

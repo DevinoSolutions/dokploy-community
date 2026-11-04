@@ -28,7 +28,26 @@ export type ParsedPayload =
 			digest: string;
 			/** A github.com Actions run link, when the workflow sent a valid one. */
 			buildRunUrl?: string;
+			/** More images of the same release (a compose file with several built images). */
+			extraImages?: Array<{ repository: string; digest: string }>;
+			/** Set by a native GitHub Actions connection: the release this deploy is for. */
+			release?: ReleaseContext;
 	  };
+
+/** What a deploy started by a native GitHub Actions connection records about its release. */
+export interface ReleaseContext {
+	connectionId: string;
+	/** `gateVersion` the deploy gate was evaluated with: a start that finds another one is stale. */
+	gateVersion?: number;
+	serviceKey: string;
+	/** `release.id` of the manifest. */
+	manifestReleaseId: string;
+	sha: string;
+	runId: number;
+	runAttempt: number;
+	delivery: "pull" | "push";
+	images: Array<{ name: string; composeService: string; ref: string }>;
+}
 
 const asObject = (value: unknown): Record<string, unknown> | null =>
 	value !== null && typeof value === "object" && !Array.isArray(value)

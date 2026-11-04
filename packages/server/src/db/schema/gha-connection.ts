@@ -200,6 +200,8 @@ export const GHA_RELEASE_STATUSES = [
 	"failed",
 	"noop",
 	"verified",
+	/** Accepted, but a newer release took its place before it was deployed. */
+	"superseded",
 ] as const;
 export type GhaReleaseStatus = (typeof GHA_RELEASE_STATUSES)[number];
 

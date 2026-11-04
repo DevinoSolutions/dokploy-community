@@ -4,6 +4,7 @@ import {
 	createDeploymentStatus,
 	type DeploymentState,
 	type GithubDeployment,
+	type ListResult,
 	listDeployments,
 } from "./github-api";
 import { type ParsedPayload, parseDeploymentPayload } from "./payload";
@@ -45,6 +46,8 @@ export interface WatchRow {
 	inflightStartedAt: Date | null;
 	/** Opt in to sending this Dokploy's dashboard link to GitHub as `log_url`. Off by default. */
 	postLogUrl: boolean;
+	/** Set when a gha_connection owns this watch (native GitHub Actions connection); absent for a plain watch. */
+	ghaConnectionId?: string | null;
 }
 
 export type DeployPayload = Extract<ParsedPayload, { kind: "deploy" }>;
@@ -103,14 +106,23 @@ export interface PollDeps {
 		payload: DeployPayload,
 	) => Promise<StartOutcome>;
 	inspectInflight: (watch: WatchRow) => Promise<InflightState>;
+	/** Connection watches only: the link GitHub shows on a successful deployment. */
+	environmentUrl?: (watch: WatchRow) => Promise<string | undefined>;
+	/**
+	 * Connection watches only: the Dokploy deployment ended. Called before
+	 * GitHub is told, and again when telling GitHub has to be retried, so it
+	 * must be safe to repeat.
+	 */
+	onDeployEnded?: (watch: WatchRow, end: EndState) => Promise<void>;
 	log: (message: string) => void;
 }
 
 const startAttempts = new Map<string, number>();
 const statusAttempts = new Map<string, number>();
 
-const connectionKey = (connectionId: string) => `connection:${connectionId}`;
-const watchKey = (watchId: string) => `watch:${watchId}`;
+export const connectionKey = (connectionId: string) =>
+	`connection:${connectionId}`;
+export const watchKey = (watchId: string) => `watch:${watchId}`;
 
 /** New deployments, oldest first: ids above lastSeen, in id order. */
 export const selectNewDeployments = (
@@ -168,6 +180,12 @@ export const STATUS_TEXT = {
 		"Superseded by a newer deployment; Dokploy deployed the newest only",
 	serviceGone:
 		"The Dokploy service was removed before this deployment finished",
+	// Native GitHub Actions connection (gha_connection): fixed text only, like the rest.
+	waiting: "Dokploy is waiting for the run to finish",
+	verifiedPush: "Dokploy verified this release; the workflow deployed it",
+	alreadyDeployed: "Dokploy already runs this release",
+	refused: "Dokploy refused this release; see the Dokploy dashboard",
+	runFailed: "The run did not succeed, so Dokploy released nothing",
 } as const;
 
 const statusRetryDelay = (attempts: number) =>
@@ -197,7 +215,7 @@ type Settled =
  *   backs off (30s, 60s, ... capped at 5 min) and after MAX_STATUS_ATTEMPTS the
  *   status is given up, so the watch is not stuck on it; `problem` says so.
  */
-const postStatus = async (
+export const postStatus = async (
 	deps: PollDeps,
 	watch: WatchRow,
 	token: string,
@@ -205,6 +223,7 @@ const postStatus = async (
 	state: DeploymentState,
 	description: string,
 	logUrl?: string,
+	environmentUrl?: string,
 ): Promise<Settled> => {
 	const result = await createDeploymentStatus(deps, {
 		token,
@@ -215,6 +234,10 @@ const postStatus = async (
 		description,
 		// Opt in per watch: the dashboard link is internal.
 		logUrl: watch.postLogUrl ? logUrl : undefined,
+		// A connection's statuses are the record of every release: a newer
+		// status must not flip an older deployment to inactive on its own.
+		...(watch.ghaConnectionId ? { autoInactive: false } : {}),
+		...(environmentUrl ? { environmentUrl } : {}),
 	});
 	const key = `${watch.watchId}:${deploymentId}:${state}`;
 	if (result.ok) {
@@ -244,13 +267,13 @@ const postStatus = async (
 	return { settled: false };
 };
 
-type EndState =
+export type EndState =
 	| Exclude<InflightState, { state: "running" } | { state: "missing" }>
 	| { state: "timeout" }
 	| { state: "lost" };
 
 /** Report the end of a Dokploy deployment to GitHub. */
-const reportEnd = async (
+export const reportEnd = async (
 	deps: PollDeps,
 	watch: WatchRow,
 	token: string,
@@ -263,6 +286,10 @@ const reportEnd = async (
 		timeout: STATUS_TEXT.timeout,
 		lost: STATUS_TEXT.lost,
 	} as const;
+	const environmentUrl =
+		inflight.state === "done" && watch.ghaConnectionId
+			? await deps.environmentUrl?.(watch).catch(() => undefined)
+			: undefined;
 	return postStatus(
 		deps,
 		watch,
@@ -271,6 +298,7 @@ const reportEnd = async (
 		inflight.state === "done" ? "success" : "failure",
 		text[inflight.state],
 		"logUrl" in inflight ? inflight.logUrl : undefined,
+		environmentUrl,
 	);
 };
 
@@ -317,16 +345,48 @@ export const pollWatch = async (
 	}
 };
 
-const pollWatchInner = async (
+/** What a tick has in hand once the gates, the in-flight deployment and the list are dealt with. */
+export interface TickInput {
+	token: string;
+	now: number;
+	listed: Extract<ListResult, { kind: "ok" }>;
+	/** The cursor, known by now: the first poll only baselines it. */
+	lastSeen: number;
+	/** The list answered 304: nothing is new (only with `continueOnNotModified`). */
+	notModified?: boolean;
+}
+
+export interface PrepareOptions {
+	/**
+	 * Hand the tick on after a 304 instead of ending it. A connection's gate
+	 * has to look at its waiting release on every tick, new Deployments or not.
+	 */
+	continueOnNotModified?: boolean;
+	/**
+	 * First poll only: Deployments this says are new are NOT skipped by the baseline. A
+	 * connection uses it for the wake-ups created after Connect, so a release that
+	 * arrives between Connect and the first tick is not lost.
+	 */
+	isNewOnBaseline?: (deployment: GithubDeployment) => boolean;
+}
+
+/**
+ * Steps 1 to 3 of a tick, shared by every kind of watch: gates and back-off,
+ * the token, the deployment that is on its way (its end is reported to
+ * GitHub), the list of deployments and the first-poll baseline. Resolves to
+ * null when there is nothing more to do this tick.
+ */
+export const prepareTick = async (
 	watch: WatchRow,
 	deps: PollDeps,
-): Promise<void> => {
-	if (!watch.enabled) return;
+	options: PrepareOptions = {},
+): Promise<TickInput | null> => {
+	if (!watch.enabled) return null;
 	const now = deps.now();
 	const watchBlock = deps.blockedUntil(watchKey(watch.watchId));
-	if (watchBlock !== undefined && watchBlock > now) return;
+	if (watchBlock !== undefined && watchBlock > now) return null;
 	const connBlock = deps.blockedUntil(connectionKey(watch.connectionId));
-	if (connBlock !== undefined && connBlock > now) return;
+	if (connBlock !== undefined && connBlock > now) return null;
 
 	const token = await deps.loadToken(watch.connectionId);
 	if (!token) {
@@ -335,7 +395,7 @@ const pollWatchInner = async (
 				"The GitHub connection is missing or was revoked. Connect GitHub again.",
 		});
 		deps.block(watchKey(watch.watchId), now + WATCH_ERROR_BACKOFF_MS);
-		return;
+		return null;
 	}
 
 	// 1. A deployment is on its way: report its end, and take nothing new meanwhile.
@@ -351,7 +411,8 @@ const pollWatchInner = async (
 		} else {
 			end = state;
 		}
-		if (!end) return;
+		if (!end) return null;
+		if (watch.ghaConnectionId) await deps.onDeployEnded?.(watch, end);
 		const reported = await reportEnd(deps, watch, token, end);
 		if (reported.settled) {
 			await deps.patchWatch(watch.watchId, {
@@ -360,7 +421,7 @@ const pollWatchInner = async (
 				lastError: reported.problem ?? null,
 			});
 		}
-		return;
+		return null;
 	}
 
 	// 2. Look for new deployments (a 304 costs no rate limit).
@@ -379,16 +440,28 @@ const pollWatchInner = async (
 				{ lastCheckedAt: new Date(now), lastError: null },
 				{ ifCursor: watch.lastSeenDeploymentId },
 			);
-			return;
+			if (
+				options.continueOnNotModified &&
+				watch.lastSeenDeploymentId !== null
+			) {
+				return {
+					token,
+					now,
+					listed: { kind: "ok", deployments: [], etag: watch.etag },
+					lastSeen: watch.lastSeenDeploymentId,
+					notModified: true,
+				};
+			}
+			return null;
 		case "rate-limited":
 			deps.block(connectionKey(watch.connectionId), listed.retryAt);
 			deps.log(
 				`github deployments: rate limited, pausing connection ${watch.connectionId} for ${Math.ceil((listed.retryAt - now) / 1000)}s`,
 			);
-			return;
+			return null;
 		case "unauthorized":
 			await deps.markRevoked(watch.connectionId);
-			return;
+			return null;
 		case "forbidden":
 		case "not-found":
 			await deps.patchWatch(watch.watchId, {
@@ -398,7 +471,7 @@ const pollWatchInner = async (
 						: listed.message,
 			});
 			deps.block(watchKey(watch.watchId), now + WATCH_ERROR_BACKOFF_MS);
-			return;
+			return null;
 		case "error":
 			await deps.patchWatch(watch.watchId, {
 				lastError: `GitHub answered with an error${listed.status ? ` (HTTP ${listed.status})` : ""}.`,
@@ -407,47 +480,107 @@ const pollWatchInner = async (
 				watchKey(watch.watchId),
 				now + GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS * 3,
 			);
-			return;
+			return null;
 		case "ok":
 			break;
 	}
 
 	// 3. First poll: remember where the history ends. Old deployments never run.
 	if (watch.lastSeenDeploymentId === null) {
-		await deps.patchWatch(
+		const wanted = options.isNewOnBaseline
+			? listed.deployments.filter(options.isNewOnBaseline)
+			: [];
+		if (wanted.length === 0) {
+			await deps.patchWatch(
+				watch.watchId,
+				{
+					lastSeenDeploymentId: maxDeploymentId(listed.deployments),
+					etag: listed.etag,
+					lastCheckedAt: new Date(now),
+					lastError: null,
+				},
+				{ ifCursor: null },
+			);
+			return null;
+		}
+		// The history ends just before the oldest Deployment that must still run. The etag is
+		// not saved: the next list has to answer 200 until those are handled.
+		const baseline = Math.min(...wanted.map((d) => d.id)) - 1;
+		const written = await deps.patchWatch(
 			watch.watchId,
 			{
-				lastSeenDeploymentId: maxDeploymentId(listed.deployments),
-				etag: listed.etag,
+				lastSeenDeploymentId: baseline,
 				lastCheckedAt: new Date(now),
 				lastError: null,
 			},
 			{ ifCursor: null },
 		);
-		return;
+		if (written === false) return null;
+		return { token, now, listed, lastSeen: baseline };
 	}
+	return { token, now, listed, lastSeen: watch.lastSeenDeploymentId };
+};
 
-	// 4. New ones, oldest first. Only the NEWEST valid deployment for this
-	// service is deployed; every older valid one is answered as superseded so
-	// no workflow waits on it. Deployments of other services are left alone.
-	const fresh = selectNewDeployments(
-		listed.deployments,
-		watch.lastSeenDeploymentId,
-	);
-	const parsedById = new Map(
+/**
+ * What step 4 does with one new deployment.
+ * - ignore: not for this watch (never answered).
+ * - invalid: for this watch but refused; answered with a failure (`statusText` or the default).
+ * - deploy: a release to start.
+ * - superseded: valid, but a newer one is deployed instead; answered inactive.
+ * - hold: not decidable yet (a run still building); nothing at or after it moves this tick.
+ */
+export type Classified =
+	| { kind: "ignore"; reason: string }
+	| { kind: "invalid"; reason: string; statusText?: string }
+	| Extract<ParsedPayload, { kind: "deploy" }>
+	| { kind: "superseded" }
+	| { kind: "hold"; reason: string };
+
+const pollWatchInner = async (
+	watch: WatchRow,
+	deps: PollDeps,
+): Promise<void> => {
+	const tick = await prepareTick(watch, deps);
+	if (!tick) return;
+	const fresh = selectNewDeployments(tick.listed.deployments, tick.lastSeen);
+	const classified = new Map<number, Classified>(
 		fresh.map((d) => [
 			d.id,
 			parseDeploymentPayload(d.payload, watch.serviceId, watch),
 		]),
 	);
+
+	// 4. Only the NEWEST valid deployment for this service is deployed; every
+	// older valid one is answered as superseded so no workflow waits on it.
+	// Deployments of other services are left alone.
 	let targetId: number | undefined;
 	for (const d of fresh) {
-		if (parsedById.get(d.id)?.kind === "deploy") targetId = d.id;
+		if (classified.get(d.id)?.kind === "deploy") targetId = d.id;
 	}
+	await handleFresh(watch, deps, tick, fresh, classified, targetId);
+};
+
+/**
+ * Step 4 of a tick: walk the new deployments oldest first, answer each one
+ * and start the target. Shared by plain watches (classified from the payload)
+ * and connection watches (classified by checking the run and its artifact).
+ */
+export const handleFresh = async (
+	watch: WatchRow,
+	deps: PollDeps,
+	tick: TickInput,
+	fresh: GithubDeployment[],
+	classified: Map<number, Classified>,
+	targetId: number | undefined,
+	/** Out: where the stored cursor stands when the pass ends (a connection's gate starts releases from it). */
+	progress: { cursor: number | null } = { cursor: tick.lastSeen },
+): Promise<void> => {
+	const { token, now, listed } = tick;
+	const parsedById = classified;
 	/** What the dashboard keeps showing from this pass, if anything. */
 	let problem: string | null = null;
 	/** Where the stored cursor stands in this pass (startDeploy checks it against the locked row). */
-	let cursor = watch.lastSeenDeploymentId;
+	let cursor: number | null = tick.lastSeen;
 	/**
 	 * Compare-and-set on the cursor this pass started from: false means the
 	 * watch was reset (disabled and enabled again, or repointed) since the poll
@@ -461,6 +594,7 @@ const pollWatchInner = async (
 		);
 		if (written === false) return false;
 		cursor = Math.max(cursor ?? 0, deploymentId);
+		progress.cursor = cursor;
 		return true;
 	};
 
@@ -470,6 +604,13 @@ const pollWatchInner = async (
 			if (!(await advance(deployment.id))) return;
 			continue;
 		}
+		if (parsed.kind === "hold") {
+			await deps.patchWatch(watch.watchId, {
+				lastCheckedAt: new Date(now),
+				lastError: short(parsed.reason, 200),
+			});
+			return;
+		}
 		if (parsed.kind === "invalid") {
 			const answered = await postStatus(
 				deps,
@@ -477,14 +618,14 @@ const pollWatchInner = async (
 				token,
 				deployment.id,
 				"failure",
-				STATUS_TEXT.unreadable,
+				parsed.statusText ?? STATUS_TEXT.unreadable,
 			);
 			if (!answered.settled) return;
 			problem = `Deployment #${deployment.id}: ${short(parsed.reason, 200)}`;
 			if (!(await advance(deployment.id))) return;
 			continue;
 		}
-		if (deployment.id !== targetId) {
+		if (parsed.kind === "superseded" || deployment.id !== targetId) {
 			const answered = await postStatus(
 				deps,
 				watch,
@@ -504,7 +645,7 @@ const pollWatchInner = async (
 			outcome = await deps.startDeploy(
 				{ ...watch, lastSeenDeploymentId: cursor },
 				deployment,
-				parsed,
+				parsed as DeployPayload,
 			);
 		} catch (error) {
 			const attempts = (startAttempts.get(attemptKey) ?? 0) + 1;

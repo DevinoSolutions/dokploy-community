@@ -90,3 +90,20 @@ describe("APPLICATION_GIT_RESET", () => {
 		expect(APPLICATION_GIT_RESET).toEqual(rest);
 	});
 });
+
+import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/provider";
+import { planApplicationFlip as planFlip } from "@dokploy/server/services/gha-connect/flip";
+
+describe("the github-actions provider source type", () => {
+	it("deploys as an image for an application and as a stored file for compose", () => {
+		expect(deploySourceTypeOf("application", "github-actions")).toBe("docker");
+		expect(deploySourceTypeOf("compose", "github-actions")).toBe("raw");
+		expect(deploySourceTypeOf("application", "github")).toBe("github");
+	});
+
+	it("is never flipped", () => {
+		expect(planFlip({ sourceType: "github-actions" }, "x@sha256:1")).toEqual({
+			flip: false,
+		});
+	});
+});

@@ -18,6 +18,11 @@ const headers = (token: string, extra: Record<string, string> = {}) => ({
 export interface GithubDeployment {
 	id: number;
 	sha?: string;
+	ref?: string;
+	/** ISO time GitHub created the Deployment (used to age out a release that keeps being rechecked). */
+	created_at?: string;
+	/** `deploy` for a plain Deployment; `dokploy:<key>` for a release wake-up (native GitHub Actions connection). */
+	task?: string;
 	environment?: string;
 	payload?: unknown;
 	creator?: { login?: string } | null;
@@ -200,7 +205,9 @@ export type DeploymentState =
 	| "failure"
 	| "error"
 	/** A deployment that a newer one replaced; GitHub shows it as inactive. */
-	| "inactive";
+	| "inactive"
+	/** A release that waits for something (the deploy gate: checks still running). */
+	| "queued";
 
 /** GitHub caps a status description at 140 characters. */
 export const clampDescription = (text: string) =>
@@ -221,6 +228,10 @@ export const createDeploymentStatus = async (
 		state: DeploymentState;
 		description: string;
 		logUrl?: string;
+		/** Shown by GitHub as the link of a successful deployment. */
+		environmentUrl?: string;
+		/** False keeps a newer status from flipping older deployments to inactive. */
+		autoInactive?: boolean;
 	},
 ): Promise<StatusResult> => {
 	if (isDotSegment(args.owner) || isDotSegment(args.repo)) {
@@ -236,6 +247,10 @@ export const createDeploymentStatus = async (
 				state: args.state,
 				description: clampDescription(args.description),
 				...(args.logUrl ? { log_url: args.logUrl } : {}),
+				...(args.environmentUrl
+					? { environment_url: args.environmentUrl }
+					: {}),
+				...(args.autoInactive === false ? { auto_inactive: false } : {}),
 			}),
 		});
 	} catch {

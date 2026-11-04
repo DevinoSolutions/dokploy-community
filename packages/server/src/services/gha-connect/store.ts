@@ -355,3 +355,93 @@ export const listReleases = async (ghaConnectionId: string, limit = 10) =>
 		.where(eq(ghaRelease.ghaConnectionId, ghaConnectionId))
 		.orderBy(desc(ghaRelease.createdAt))
 		.limit(limit);
+
+/** Accepted releases that were not deployed, superseded or failed, for the poll's gate step. */
+export const listPendingReleases = async (ghaConnectionId: string) =>
+	db
+		.select()
+		.from(ghaRelease)
+		.where(
+			and(
+				eq(ghaRelease.ghaConnectionId, ghaConnectionId),
+				eq(ghaRelease.status, "accepted"),
+			),
+		)
+		.orderBy(desc(ghaRelease.runId), desc(ghaRelease.runAttempt));
+
+/** A newer release replaced these accepted ones. Only rows still accepted change. */
+export const supersedeReleases = async (
+	ghaConnectionId: string,
+	releaseIds: string[],
+) => {
+	if (releaseIds.length === 0) return;
+	await db
+		.update(ghaRelease)
+		.set({ status: "superseded", settledAt: new Date() })
+		.where(
+			and(
+				eq(ghaRelease.ghaConnectionId, ghaConnectionId),
+				inArray(ghaRelease.releaseId, releaseIds),
+				eq(ghaRelease.status, "accepted"),
+			),
+		);
+};
+
+/** An accepted release that could not be started. Only a row still accepted changes. */
+export const failAcceptedRelease = async (
+	ghaConnectionId: string,
+	releaseId: string,
+) => {
+	await db
+		.update(ghaRelease)
+		.set({ status: "failed", settledAt: new Date() })
+		.where(
+			and(
+				eq(ghaRelease.ghaConnectionId, ghaConnectionId),
+				eq(ghaRelease.releaseId, releaseId),
+				eq(ghaRelease.status, "accepted"),
+			),
+		);
+};
+
+/**
+ * The repository answers to another name now: keep the name the connection
+ * shows and the owner and repo its watch polls under. The repository is keyed
+ * by its id, so nothing else changes.
+ */
+export const renameGhaConnectionRepository = async (
+	ghaConnectionId: string,
+	fullName: string,
+) => {
+	const [owner, repo] = fullName.split("/");
+	if (!owner || !repo) return false;
+	await db.transaction(async (tx) => {
+		const [row] = await tx
+			.update(ghaConnection)
+			.set({ repoFullName: fullName })
+			.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId))
+			.returning({
+				serviceType: ghaConnection.serviceType,
+				serviceId: ghaConnection.serviceId,
+			});
+		if (!row) return;
+		await tx
+			.update(githubDeploymentWatch)
+			.set({ owner, repo })
+			.where(
+				and(
+					eq(githubDeploymentWatch.serviceType, row.serviceType),
+					eq(githubDeploymentWatch.serviceId, row.serviceId),
+				),
+			);
+	});
+	return true;
+};
+
+/** Remember the newest run of the release workflow the upkeep has seen. */
+export const recordRunSeen = async (ghaConnectionId: string, runId: number) => {
+	await db
+		.update(ghaConnection)
+		.set({ lastRunSeenId: runId, lastActivityAt: new Date() })
+		.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId));
+};

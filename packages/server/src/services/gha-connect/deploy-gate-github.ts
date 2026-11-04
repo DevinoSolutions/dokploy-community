@@ -204,7 +204,11 @@ const mapCheckRun = (json: unknown): GateCheck | null => {
 	const status = str(o?.status);
 	if (!o || id === null || !name || !status) return null;
 	const url = str(o.details_url) ?? str(o.html_url) ?? "";
-	const run = RUN_IN_URL.exec(url);
+	const appSlug = str(asObject(o.app)?.slug);
+	// The details URL of a check is free text of whoever created it: any app can
+	// point it at a workflow run. Only GitHub Actions' own check runs are tied to
+	// a run by it; a check run of another app never counts as that run's job.
+	const run = appSlug === "github-actions" ? RUN_IN_URL.exec(url) : null;
 	return {
 		name,
 		kind: "check-run",
@@ -212,7 +216,7 @@ const mapCheckRun = (json: unknown): GateCheck | null => {
 		conclusion: str(o.conclusion),
 		id,
 		startedAt: str(o.started_at) ?? str(o.created_at),
-		appSlug: str(asObject(o.app)?.slug),
+		appSlug,
 		appId: int(asObject(o.app)?.id),
 		runId: run?.[1] ? Number(run[1]) : null,
 		checkSuiteId: int(asObject(o.check_suite)?.id),

@@ -352,6 +352,13 @@ const readJobLogManifest = async (
 			),
 		};
 	};
+	// Known limit: the two groups are read one after the other and the first one that
+	// holds a marker decides. A second, different marker printed by a job of the other
+	// group (one the hint did not name) is therefore not seen. That cannot widen what is
+	// accepted: every job here ran in this run attempt, on the tracked branch, and the
+	// manifest still has to bind to this run, this branch and this commit and to name
+	// only images the registry serves. It only means "ambiguous" is detected inside a
+	// group, never across the two.
 	for (const group of [preferred, rest]) {
 		const read = await readGroup(group);
 		if (read.kind !== "continue") return read;
