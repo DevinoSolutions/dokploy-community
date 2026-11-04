@@ -8,6 +8,7 @@ import {
 	effectiveMode,
 	effectiveServiceKey,
 	effectiveWorkflowPath,
+	expectedReleaseImage,
 	keyFromRepository,
 	opensOnGithubActions,
 	type ProviderConnection,
@@ -303,6 +304,52 @@ describe("the status panel", () => {
 		expect(relativeTime("2026-11-01T10:30:00Z", now)).toBe("2 days ago");
 		expect(relativeTime("nonsense", now)).toBeNull();
 		expect(relativeTime(null, now)).toBeNull();
+	});
+
+	it("shows the image name(s) a release will pin, for an application and a compose stack alike", () => {
+		const one = providerDetailRows(conn(), new Date(), ["ghcr.io/acme/shop/web"]);
+		expect(one.map((row) => row.label)).toContain("Image");
+		expect(one.find((row) => row.label === "Image")).toMatchObject({
+			value: "ghcr.io/acme/shop/web",
+			mono: true,
+			href: null,
+		});
+		const several = providerDetailRows(conn(), new Date(), [
+			"ghcr.io/acme/shop/web",
+			"ghcr.io/acme/shop/worker",
+		]);
+		expect(several.find((row) => row.label === "Images")?.value).toBe(
+			"ghcr.io/acme/shop/web, ghcr.io/acme/shop/worker",
+		);
+		// The image row sits with the facts of the setup, before what was deployed.
+		expect(several.map((row) => row.label).indexOf("Images")).toBe(4);
+		expect(providerDetailRows(conn()).map((row) => row.label)).not.toContain(
+			"Image",
+		);
+	});
+
+	it("names the image the workflow produces, under the registry prefix when mirrored", () => {
+		expect(
+			expectedReleaseImage({
+				repository: "Acme/Shop",
+				serviceKey: "Web",
+				registryPrefix: null,
+			}),
+		).toBe("ghcr.io/acme/shop/web");
+		expect(
+			expectedReleaseImage({
+				repository: "acme/shop",
+				serviceKey: "web",
+				registryPrefix: "localhost:5000/registry.devino.ca/",
+			}),
+		).toBe("localhost:5000/registry.devino.ca/shop/web");
+		expect(
+			expectedReleaseImage({
+				repository: "nonsense",
+				serviceKey: "web",
+				registryPrefix: null,
+			}),
+		).toBeNull();
 	});
 
 	it("leaves out what is not known yet", () => {

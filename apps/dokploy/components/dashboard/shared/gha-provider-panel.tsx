@@ -1,4 +1,5 @@
 import { githubNewFileUrl } from "@dokploy/server/services/gha-connect/workflow-snippet";
+import { releaseImageRepositories } from "@dokploy/server/services/github-deployments/service-image";
 import { Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { createContext, useContext, useId, useState } from "react";
@@ -29,6 +30,7 @@ import {
 	effectiveServiceKey,
 	effectiveWorkflowPath,
 	environmentAdvice,
+	expectedReleaseImage,
 	isMirrored,
 	type PillTone,
 	providerDetailRows,
@@ -146,7 +148,22 @@ const ConnectedView = ({
 	const checkNow = api.ghaConnection.checkNow.useMutation();
 	const disconnect = api.ghaConnection.disconnect.useMutation();
 	const status = describeProviderStatus(connection);
-	const rows = providerDetailRows(connection);
+	// What the release will pin, from what the service runs (the same queries the service page already makes).
+	const { data: application } = api.application.one.useQuery(
+		{ applicationId: id },
+		{ enabled: type === "application" },
+	);
+	const { data: composeService } = api.compose.one.useQuery(
+		{ composeId: id },
+		{ enabled: type === "compose" },
+	);
+	const images = releaseImageRepositories({
+		kind: type,
+		dockerImage: application?.dockerImage,
+		composeFile: composeService?.composeFile,
+		expected: expectedReleaseImage(connection),
+	});
+	const rows = providerDetailRows(connection, new Date(), images);
 
 	return (
 		<div className="flex flex-col gap-4 p-2">

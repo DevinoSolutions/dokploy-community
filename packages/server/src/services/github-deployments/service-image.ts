@@ -226,3 +226,41 @@ export const listPinnedComposeRepositories = (
 		),
 	];
 };
+
+/**
+ * The repository of an image reference as a service runs it: `ghcr.io/org/app@sha256:...` gives `ghcr.io/org/app`
+ * and `localhost:5000/registry.devino.ca/org/app:tag` gives `localhost:5000/registry.devino.ca/org/app` (the
+ * registry port is not a tag). Null for what is no image name: nothing, a variable, or text with spaces.
+ */
+export const runningImageRepository = (
+	reference: string | null | undefined,
+): string | null => {
+	const value = reference?.trim();
+	if (!value || /[\s$]/.test(value)) return null;
+	const repository = repositoryOfReference(value);
+	return repository === "" ? null : repository;
+};
+
+/**
+ * The image name(s) a GitHub Actions release will pin for a service, for its status panel.
+ *
+ * What the service runs decides it. An application: the repository of its current image, whatever the form of the
+ * reference (digest, tag, registry port), even when it is not the name the connection's workflow would produce. A
+ * compose stack: the images its file pins by digest (the lines a release moves). Only when nothing is running yet
+ * (no image, none pinned) is the name `expected`, the one the connection's workflow produces. Empty when neither is
+ * known.
+ */
+export const releaseImageRepositories = (input: {
+	kind: "application" | "compose";
+	dockerImage?: string | null;
+	composeFile?: string | null;
+	expected?: string | null;
+}): string[] => {
+	const running =
+		input.kind === "compose"
+			? listPinnedComposeRepositories(input.composeFile ?? "")
+			: [runningImageRepository(input.dockerImage)];
+	const names = running.filter((name): name is string => Boolean(name));
+	if (names.length > 0) return names;
+	return input.expected ? [input.expected] : [];
+};

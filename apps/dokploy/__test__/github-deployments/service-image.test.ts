@@ -2,7 +2,9 @@ import {
 	decideApplicationImage,
 	isStoredComposeSource,
 	pinComposeImage,
+	releaseImageRepositories,
 	repositoryOfReference,
+	runningImageRepository,
 } from "@dokploy/server/services/github-deployments/service-image";
 import { describe, expect, it } from "vitest";
 
@@ -171,5 +173,83 @@ describe("a service whose provider is GitHub Actions (T-13879)", () => {
 		expect(isStoredComposeSource("github-actions")).toBe(true);
 		expect(isStoredComposeSource("github")).toBe(false);
 		expect(isStoredComposeSource("git")).toBe(false);
+	});
+});
+
+describe("the image name of a running service", () => {
+	const DIGEST = `sha256:${"a".repeat(64)}`;
+
+	it("is the repository of the current image, without tag or digest", () => {
+		expect(runningImageRepository(`ghcr.io/org/app@${DIGEST}`)).toBe(
+			"ghcr.io/org/app",
+		);
+		expect(
+			runningImageRepository("localhost:5000/registry.devino.ca/org/app:tag"),
+		).toBe("localhost:5000/registry.devino.ca/org/app");
+		expect(runningImageRepository(`  ghcr.io/org/app:v1@${DIGEST} `)).toBe(
+			"ghcr.io/org/app",
+		);
+	});
+
+	it("is nothing for what is not an image name", () => {
+		for (const value of [null, undefined, "", "   ", "${IMAGE}", "a b"]) {
+			expect(runningImageRepository(value)).toBeNull();
+		}
+	});
+
+	it("names a Docker application from its current image when the workflow name does not match", () => {
+		expect(
+			releaseImageRepositories({
+				kind: "application",
+				dockerImage: `ghcr.io/org/app@${DIGEST}`,
+				expected: "ghcr.io/org/shop/web",
+			}),
+		).toEqual(["ghcr.io/org/app"]);
+		expect(
+			releaseImageRepositories({
+				kind: "application",
+				dockerImage: "localhost:5000/registry.devino.ca/org/app:tag",
+				expected: "ghcr.io/org/shop/web",
+			}),
+		).toEqual(["localhost:5000/registry.devino.ca/org/app"]);
+	});
+
+	it("falls back to the name the workflow produces when nothing runs yet", () => {
+		expect(
+			releaseImageRepositories({
+				kind: "application",
+				dockerImage: null,
+				expected: "ghcr.io/org/shop/web",
+			}),
+		).toEqual(["ghcr.io/org/shop/web"]);
+		expect(releaseImageRepositories({ kind: "application" })).toEqual([]);
+	});
+
+	it("names a compose stack by the images its file pins by digest, and only those", () => {
+		const file = [
+			"services:",
+			"  web:",
+			`    image: ghcr.io/org/shop/web@${DIGEST}`,
+			"  db:",
+			"    image: postgres:16",
+		].join("
+");
+		expect(
+			releaseImageRepositories({
+				kind: "compose",
+				composeFile: file,
+				expected: "ghcr.io/org/shop/other",
+			}),
+		).toEqual(["ghcr.io/org/shop/web"]);
+		expect(
+			releaseImageRepositories({
+				kind: "compose",
+				composeFile: "services:
+  db:
+    image: postgres:16
+",
+				expected: "ghcr.io/org/shop/web",
+			}),
+		).toEqual(["ghcr.io/org/shop/web"]);
 	});
 });

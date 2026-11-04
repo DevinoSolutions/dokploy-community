@@ -212,6 +212,8 @@ export type PillTone = "neutral" | "good" | "warn" | "bad";
 
 export type ProviderConnection = {
 	state: string;
+	/** Where mirrored images live; null for public GHCR images. */
+	registryPrefix?: string | null;
 	statusText: string | null;
 	lastError: string | null;
 	repository: string;
@@ -311,10 +313,32 @@ export const relativeTime = (
 	return `${days} days ago`;
 };
 
+/**
+ * The image name the connection's workflow produces (`ghcr.io/<owner>/<repo>/<key>`, under the registry prefix when
+ * the images are mirrored). It is what the panel names until the service runs an image of its own.
+ */
+export const expectedReleaseImage = (
+	connection: Pick<
+		ProviderConnection,
+		"repository" | "serviceKey" | "registryPrefix"
+	>,
+): string | null => {
+	const parsed = parseRepository(connection.repository);
+	const key = connection.serviceKey.trim().toLowerCase();
+	if (!parsed || key === "") return null;
+	const repo = parsed.repo.toLowerCase();
+	const prefix = connection.registryPrefix?.trim().replace(//+$/, "").toLowerCase();
+	return prefix
+		? `${prefix}/${repo}/${key}`
+		: `ghcr.io/${parsed.owner.toLowerCase()}/${repo}/${key}`;
+};
+
 /** The facts under the pill, in reading order. A row is left out when the value is not known. */
 export const providerDetailRows = (
 	connection: ProviderConnection,
 	now: Date = new Date(),
+	/** The image name(s) a release will pin (`releaseImageRepositories`); the row is left out when there are none. */
+	images: readonly string[] = [],
 ): DetailRow[] => {
 	const rows: DetailRow[] = [
 		{
@@ -342,6 +366,14 @@ export const providerDetailRows = (
 			mono: false,
 		},
 	];
+	if (images.length > 0) {
+		rows.push({
+			label: images.length === 1 ? "Image" : "Images",
+			value: images.join(", "),
+			href: null,
+			mono: true,
+		});
+	}
 	if (connection.deployedSha) {
 		rows.push({
 			label: "Deployed commit",
