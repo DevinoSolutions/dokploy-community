@@ -165,6 +165,8 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 	const image = input.image?.trim() || `${namespace}${input.serviceKey}`;
 	if (
 		!IMAGE.test(image) ||
+		image.endsWith("/") ||
+		image.length <= namespace.length ||
 		image.includes("..") ||
 		!image.toLowerCase().startsWith(namespace) ||
 		image.slice(namespace.length).startsWith("preview/")

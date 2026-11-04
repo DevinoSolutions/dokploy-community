@@ -234,13 +234,14 @@ describe("planConnect", () => {
 			);
 
 		it("refuses an image outside the connection's namespace, before a release can be refused later", async () => {
-			for (const image of [`ghcr.io/acme/app@${D}`, "nginx:latest"]) {
-				const refused = await plan(docker(image));
+			for (const [image, repository] of [
+				[`ghcr.io/acme/app@${D}`, "ghcr.io/acme/app"],
+				["nginx:latest", "nginx"],
+			]) {
+				const refused = await plan(docker(image as string));
 				expect(refused, image).toMatchObject({ ok: false, code: "image" });
 				if (refused.ok) continue;
-				expect(refused.message).toContain(
-					`This service runs ${image.split("@")[0]}`,
-				);
+				expect(refused.message).toContain(`This service runs ${repository},`);
 				expect(refused.message).toContain("ghcr.io/acme/shop/");
 			}
 		});
