@@ -9,7 +9,6 @@ export * from "./deploy-gate-github";
 export * from "./deploy-gate-settings";
 export * from "./deploy-gate-step";
 export * from "./deploy-gate-store";
-export * from "./deploy-source";
 export * from "./environment-policy";
 export * from "./environment-url";
 export * from "./flip";

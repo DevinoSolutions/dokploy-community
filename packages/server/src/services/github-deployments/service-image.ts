@@ -112,14 +112,60 @@ export const pinComposeImage = (
 	};
 };
 
+const SERVICE_KEY =
+	/^([A-Za-z0-9][A-Za-z0-9._-]*|"[^"]+"|'[^']+')[ \t]*:[ \t]*(?:#.*)?$/;
+
+/**
+ * The compose service whose `image:` line pins `repository` by digest, or null
+ * when the line is not found inside the top-level `services:` block (an
+ * unusual layout: the caller then refuses rather than guesses).
+ */
+export const composeServiceOfImage = (
+	composeFile: string,
+	repository: string,
+): string | null => {
+	const image = new RegExp(
+		String.raw`^[ \t]*(?:-[ \t]*)?image:[ \t]*["']?${escapeRegExp(repository)}@sha256:[0-9a-f]{64}(?=["'\s#]|$)`,
+	);
+	const lines = composeFile.split(/\r?\n/);
+	let inServices = false;
+	let childIndent: number | null = null;
+	let current: string | null = null;
+	for (const line of lines) {
+		if (/^[ \t]*(#.*)?$/.test(line)) continue;
+		const indent = line.length - line.trimStart().length;
+		if (indent === 0) {
+			inServices = /^services[ \t]*:[ \t]*(#.*)?$/.test(line);
+			childIndent = null;
+			current = null;
+			continue;
+		}
+		if (!inServices) continue;
+		if (childIndent === null) childIndent = indent;
+		if (indent === childIndent) {
+			const key = SERVICE_KEY.exec(line.trim());
+			current = key ? (key[1] as string).replace(/^["']|["']$/g, "") : null;
+			continue;
+		}
+		if (image.test(line)) return current;
+	}
+	return null;
+};
+
 /**
  * Pin several images of one compose file (a release that built more than one
  * image). Every repository must appear on exactly one `image:` line, as for
- * `pinComposeImage`, and each repository may be named once.
+ * `pinComposeImage`, and each repository may be named once. An image that names
+ * its compose service (the manifest always does) is pinned only on the line of
+ * that service: a digest never moves another service's image.
  */
 export const pinComposeImages = (
 	composeFile: string,
-	images: Array<{ repository: string; digest: string }>,
+	images: Array<{
+		repository: string;
+		digest: string;
+		composeService?: string | null;
+	}>,
 ): ComposePin => {
 	const seen = new Set<string>();
 	let file = composeFile;
@@ -134,6 +180,17 @@ export const pinComposeImages = (
 			};
 		}
 		seen.add(key);
+		if (image.composeService) {
+			const holder = composeServiceOfImage(file, image.repository);
+			if (holder !== image.composeService) {
+				return {
+					ok: false,
+					reason: holder
+						? `The release puts ${image.repository} on the compose service '${image.composeService}', but the compose file has it on '${holder}'.`
+						: `The release puts ${image.repository} on the compose service '${image.composeService}', but that image line is not inside the services block of the compose file.`,
+				};
+			}
+		}
 		const pinned = pinComposeImage(file, image.repository, image.digest);
 		if (!pinned.ok) return pinned;
 		file = pinned.composeFile;

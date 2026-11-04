@@ -21,6 +21,12 @@ import {
 	watchRow,
 } from "./poll-harness";
 
+/** Let a backup that runs outside the tick finish. */
+const flush = async () => {
+	for (let i = 0; i < 5; i += 1) await Promise.resolve();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
 beforeEach(() => {
 	resetPollState();
 	resetConnectionPollState();
@@ -341,6 +347,13 @@ describe("starting the release", () => {
 				note: ok ? "" : "The backup failed (disk full).",
 			}),
 		});
+		// The dump runs outside the tick: the first tick only starts it.
+		await pollConnectionWatch(watchRow(), h.deps);
+		expect(h.started).toEqual([]);
+		expect(h.patches.at(-1)).toMatchObject({
+			lastError: "Backing up before the first release.",
+		});
+		await flush();
 		await pollConnectionWatch(watchRow(), h.deps);
 		expect(h.started).toEqual([]);
 		expect(h.patches.at(-1)).toMatchObject({
@@ -351,8 +364,30 @@ describe("starting the release", () => {
 		// The retry waits out its back-off.
 		h.blocks.clear();
 		await pollConnectionWatch(watchRow(), h.deps);
+		await flush();
+		await pollConnectionWatch(watchRow(), h.deps);
 		expect(h.backups).toHaveLength(2);
 		expect(h.started).toHaveLength(1);
+
+		// A slow dump does not hold the tick: while it runs nothing starts.
+		resetConnectionPollState();
+		let release!: () => void;
+		const slow = harness({
+			pending: [pending(100, 11)],
+			deployments: null,
+			backup: () =>
+				new Promise((resolve) => {
+					release = () => resolve({ ok: true, note: "" });
+				}),
+		});
+		await pollConnectionWatch(watchRow(), slow.deps);
+		await pollConnectionWatch(watchRow(), slow.deps);
+		expect(slow.backups).toHaveLength(1);
+		expect(slow.started).toEqual([]);
+		release();
+		await flush();
+		await pollConnectionWatch(watchRow(), slow.deps);
+		expect(slow.started).toHaveLength(1);
 	});
 
 	it("does not run the backup twice for one release, nor once something is deployed", async () => {
@@ -360,7 +395,10 @@ describe("starting the release", () => {
 			pending: [pending(100, 11)],
 			deployments: null,
 			startOutcome: { kind: "stale" },
+			backup: async () => ({ ok: true, note: "" }),
 		});
+		await pollConnectionWatch(watchRow(), first.deps);
+		await flush();
 		await pollConnectionWatch(watchRow(), first.deps);
 		await pollConnectionWatch(watchRow(), first.deps);
 		expect(first.backups).toHaveLength(1);

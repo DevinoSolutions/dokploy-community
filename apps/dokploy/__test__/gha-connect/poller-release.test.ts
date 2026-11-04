@@ -1,6 +1,7 @@
 import {
 	applications,
 	compose,
+	deployments,
 	ghaConnection,
 	ghaRelease,
 	githubDeploymentWatch,
@@ -24,6 +25,10 @@ const mocks = vi.hoisted(() => ({
 	findComposeById: vi.fn(),
 	getDokployUrl: vi.fn(),
 	registerExternalBuild: vi.fn(),
+	/** The deployments table, as far as the poller reads it: one row the run registered. */
+	deploymentRow: null as Record<string, unknown> | null,
+	/** gha_release rows the poller looks up by deployment id. */
+	releaseRows: [] as unknown[],
 	listEnabledGithubWatches: vi.fn(),
 	deleteGithubWatch: vi.fn(),
 	removeGhcrWatchConfigDirs: vi.fn(),
@@ -37,7 +42,29 @@ vi.mock("@dokploy/server", () => ({
 	registerExternalBuild: mocks.registerExternalBuild,
 }));
 
-vi.mock("@dokploy/server/db", () => {
+vi.mock("@dokploy/server/db", async () => {
+	const { PgDialect } = await import("drizzle-orm/pg-core");
+	const dialect = new PgDialect();
+	/**
+	 * Whether the deployment row satisfies a condition, read from the SQL the
+	 * poller built: a `title like` pattern or a `buildRunId =` value.
+	 */
+	const rowMatches = (condition: unknown) => {
+		const row = mocks.deploymentRow;
+		if (!row) return false;
+		const { sql, params } = dialect.sqlToQuery(condition as never);
+		const values = params.map(String);
+		if (/"title" like/.test(sql)) {
+			const pattern = values.find((v) => v.includes("%"));
+			if (!pattern) return false;
+			const [head = "", tail = ""] = pattern.split("%");
+			const title = String(row.title);
+			return title.startsWith(head) && title.endsWith(tail);
+		}
+		if (/"buildRunId" =/.test(sql))
+			return values.includes(String(row.buildRunId));
+		return false;
+	};
 	const makeTx = (id: number) => ({
 		select: () => ({
 			from: () => ({
@@ -69,8 +96,29 @@ vi.mock("@dokploy/server/db", () => {
 				return result;
 			},
 			select: () => ({
-				from: () => ({
-					where: () => ({ orderBy: () => ({ limit: async () => [] }) }),
+				from: (table: unknown) => ({
+					where: (condition: unknown) =>
+						Object.assign(
+							Promise.resolve(table === ghaRelease ? mocks.releaseRows : []),
+							{
+								orderBy: () => ({
+									limit: async () =>
+										table === deployments && rowMatches(condition)
+											? [{ status: mocks.deploymentRow?.status }]
+											: [],
+								}),
+							},
+						),
+				}),
+			}),
+			update: (table: unknown) => ({
+				set: (values: Record<string, unknown>) => ({
+					where: async () => {
+						// Only the retitle of the registered row is made outside a transaction.
+						if (table === deployments && mocks.deploymentRow) {
+							Object.assign(mocks.deploymentRow, values);
+						}
+					},
 				}),
 			}),
 			query: {
@@ -222,9 +270,18 @@ beforeEach(() => {
 	mocks.queueAdd.mockResolvedValue({ id: "job-1" });
 	mocks.getJobs.mockResolvedValue([]);
 	mocks.getDokployUrl.mockResolvedValue("https://dokploy.example");
-	mocks.registerExternalBuild.mockResolvedValue({
-		deploymentId: "dep-live",
-		created: true,
+	// The row upkeep registered for the run while GitHub built: open, titled by the run.
+	mocks.deploymentRow = null;
+	mocks.releaseRows = [];
+	mocks.registerExternalBuild.mockImplementation(async () => {
+		mocks.deploymentRow = {
+			deploymentId: "dep-live",
+			title: "GHA run #555",
+			buildRunId: "555",
+			externalBuildOnly: true,
+			status: "running",
+		};
+		return { deploymentId: "dep-live", created: false };
 	});
 	mocks.findApplicationById.mockResolvedValue(gitApp);
 	mocks.findComposeById.mockResolvedValue(stack);
@@ -344,16 +401,48 @@ describe("startDeploy: a release of a GitHub Actions connection", () => {
 		});
 	});
 
-	it("rejects when the connection is gone or disconnected, writing and enqueuing nothing", async () => {
+	it("rejects when the connection is gone, writing and enqueuing nothing", async () => {
 		const watch = watchRow();
-		for (const connection of [null, connectionRow({ state: "disconnected" })]) {
-			mocks.updates = [];
-			mocks.lockedQueue = locked(watch, connection);
-			const outcome = await deps().startDeploy(watch, deployment, payload());
-			expect(outcome.kind).toBe("rejected");
-			expect(mocks.updates).toEqual([]);
-		}
+		mocks.lockedQueue = locked(watch, null);
+		const outcome = await deps().startDeploy(watch, deployment, payload());
+		expect(outcome.kind).toBe("rejected");
+		expect(mocks.updates).toEqual([]);
 		expect(mocks.queueAdd).not.toHaveBeenCalled();
+	});
+
+	it("is stale, not failed, when the connection was disconnected between the tick and the start", async () => {
+		const watch = watchRow();
+		mocks.lockedQueue = locked(watch, connectionRow({ state: "disconnected" }));
+		const outcome = await deps().startDeploy(watch, deployment, payload());
+		expect(outcome.kind).toBe("stale");
+		expect(mocks.updates).toEqual([]);
+		expect(mocks.queueAdd).not.toHaveBeenCalled();
+	});
+
+	it("is stale, and writes nothing, when the gate settings changed since the gate answered", async () => {
+		const watch = watchRow();
+		mocks.lockedQueue = locked(watch, connectionRow({ gateVersion: 4 }));
+		const stale = payload();
+		stale.release = {
+			...releaseContext,
+			gateVersion: 3,
+		} as typeof stale.release;
+		expect((await deps().startDeploy(watch, deployment, stale)).kind).toBe(
+			"stale",
+		);
+		expect(mocks.updates).toEqual([]);
+		expect(mocks.queueAdd).not.toHaveBeenCalled();
+
+		// The version the gate read is the one stored: it starts.
+		mocks.lockedQueue = locked(watch, connectionRow({ gateVersion: 3 }));
+		const current = payload();
+		current.release = {
+			...releaseContext,
+			gateVersion: 3,
+		} as typeof current.release;
+		expect((await deps().startDeploy(watch, deployment, current)).kind).toBe(
+			"started",
+		);
 	});
 
 	it("is stale, and writes nothing, when the connection got blocked for a reason that is not the gate's", async () => {
@@ -524,5 +613,56 @@ describe("startDeploy: a release of a GitHub Actions connection", () => {
 		expect(mocks.queueAdd.mock.calls[0]?.[1]).not.toHaveProperty(
 			"deploymentId",
 		);
+	});
+});
+
+describe("a release that continues the row registered for its run", () => {
+	const started = async () => {
+		const watch = watchRow();
+		mocks.lockedQueue = locked(watch);
+		await deps().startDeploy(watch, deployment, payload());
+		return watch;
+	};
+	const inflight = (watch: WatchRow) =>
+		deps().inspectInflight({
+			...watch,
+			inflightDeploymentId: 120,
+			inflightStartedAt: new Date(),
+		});
+
+	it("is found, and ends as done: the row is retitled with the deployment handle", async () => {
+		const watch = await started();
+		expect(
+			String(mocks.deploymentRow?.title).endsWith("[deployment #120]"),
+		).toBe(true);
+		// The deploy ran on the reused row and finished.
+		if (mocks.deploymentRow) mocks.deploymentRow.status = "done";
+		expect(await inflight(watch)).toMatchObject({ state: "done" });
+	});
+
+	it("is found by the run it was built by even if the row kept its old title", async () => {
+		const watch = await started();
+		// The retitle did not happen (a failed write): the lookup must not depend on it.
+		if (mocks.deploymentRow) {
+			mocks.deploymentRow.title = "GHA run #555";
+			mocks.deploymentRow.status = "done";
+		}
+		mocks.releaseRows = [{ releaseId: "rel-1", runId: 555 }];
+		expect(await inflight(watch)).toMatchObject({ state: "done" });
+	});
+
+	it("is still running while the reused row is open", async () => {
+		const watch = await started();
+		expect(await inflight(watch)).toMatchObject({ state: "running" });
+	});
+
+	it("was missing before the fix: an untitled row and no run lookup is never found", async () => {
+		const watch = await started();
+		if (mocks.deploymentRow) {
+			mocks.deploymentRow.title = "GHA run #555";
+			mocks.deploymentRow.status = "done";
+		}
+		mocks.releaseRows = [];
+		expect(await inflight(watch)).toMatchObject({ state: "missing" });
 	});
 });

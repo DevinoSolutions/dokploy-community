@@ -167,6 +167,10 @@ export interface HarnessOptions {
 	now?: number;
 	/** Extra scripted GitHub routes (the repository, the branch, the runs), tried first. */
 	routes?: Array<[string, Reply | ((call: Recorded) => Reply)]>;
+	/** When the connection was made (epoch ms). Default: an hour before NOW. */
+	connectedAt?: number;
+	/** The connection is gone from the database when the poll reads it again (after the first read). */
+	goneAfterFirstRead?: boolean;
 }
 
 /**
@@ -212,9 +216,11 @@ export const harness = (options: HarnessOptions = {}) => {
 	const backups: number[] = [];
 	const stored: PendingRelease[] = [...(options.pending ?? [])];
 	let gateConn = gateConnection(options.gate);
+	let reads = 0;
 	const record = (): ConnectionRecord => ({
 		connectionId: "c1",
 		organizationId: "org1",
+		createdAt: options.connectedAt ?? NOW - 3_600_000,
 		facts: { ...facts, ...options.factsOverride },
 		processed: options.processed ?? [],
 		gate: gateConn,
@@ -251,7 +257,10 @@ export const harness = (options: HarnessOptions = {}) => {
 		},
 		inspectInflight: async () => ({ state: "running" }),
 		log: () => {},
-		loadConnection: async () => record(),
+		loadConnection: async () => {
+			reads += 1;
+			return options.goneAfterFirstRead && reads > 1 ? null : record();
+		},
 		loadPendingReleases: async () => [...stored],
 		createApi: () => ({}) as never,
 		createProbe: () => ({ headDigest: async () => ({ kind: "not-found" }) }),
@@ -310,13 +319,13 @@ export const harness = (options: HarnessOptions = {}) => {
 		recordNoop: async (_c, _r, id) => {
 			noops.push(id);
 		},
-		preFlipBackup:
-			options.backup === null
-				? undefined
-				: async () => {
-						backups.push(1);
-						return (options.backup ?? (async () => ({ ok: true, note: "" })))();
-					},
+		// Only a test that is about the backup has one: it runs outside the tick.
+		preFlipBackup: options.backup
+			? async () => {
+					backups.push(1);
+					return (options.backup as NonNullable<typeof options.backup>)();
+				}
+			: undefined,
 	};
 	const statuses = () =>
 		calls

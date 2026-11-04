@@ -69,6 +69,8 @@ export const BACKUP_RETRY_MS = 2 * 60 * 1000;
 export interface ConnectionRecord {
 	connectionId: string;
 	organizationId: string;
+	/** When the connection was made (epoch ms): a wake-up created after it is never skipped by the first baseline. */
+	createdAt: number;
 	/** Everything acceptance needs, including what the service runs now. */
 	facts: ConnectionFacts;
 	processed: ProcessedEntry[];
@@ -185,6 +187,11 @@ const recheckSeen = new Map<string, number>();
 const recheckAfter = new Map<string, number>();
 const startFailures = new Map<string, number>();
 const backedUp = new Set<string>();
+/** Backups before a first release that run (or ran) outside the tick, by release. */
+const backupRuns = new Map<
+	string,
+	{ done: boolean; ok: boolean; note: string }
+>();
 const lastGateStatus = new Map<string, string>();
 
 /** Test hook: forget what the poll keeps between ticks. */
@@ -193,6 +200,7 @@ export const resetConnectionPollState = () => {
 	recheckAfter.clear();
 	startFailures.clear();
 	backedUp.clear();
+	backupRuns.clear();
 	lastGateStatus.clear();
 };
 
@@ -226,11 +234,23 @@ const pollConnectionInner = async (
 	watch: WatchRow,
 	deps: ConnectionPollDeps,
 ): Promise<void> => {
-	// A 304 still goes on: the gate looks at its waiting release on every tick.
-	const tick = await prepareTick(watch, deps, { continueOnNotModified: true });
-	if (!tick) return;
 	const record = await deps.loadConnection(watch);
 	if (!record) return;
+	// A 304 still goes on: the gate looks at its waiting release on every tick. The first
+	// poll baselines the history but keeps the wake-ups of this service created since Connect.
+	const tick = await prepareTick(watch, deps, {
+		continueOnNotModified: true,
+		isNewOnBaseline: (deployment) => {
+			if (parseDeploymentTask(deployment.task) !== record.facts.serviceKey) {
+				return false;
+			}
+			const created = deployment.created_at
+				? Date.parse(deployment.created_at)
+				: Number.NaN;
+			return Number.isFinite(created) && created >= record.createdAt;
+		},
+	});
+	if (!tick) return;
 
 	const progress = { cursor: tick.lastSeen as number | null };
 	await discover(watch, deps, tick, record, progress);
@@ -469,6 +489,7 @@ const discover = async (
 					break;
 				}
 				await deps.recordNoop(record.connectionId, result.release, id);
+				await retireNotNewerThan(deps, watch, token, record, result.release);
 				if (result.release.delivery === "pull") {
 					await deps.applyEvent(record.connectionId, {
 						type: "release-deployed",
@@ -500,6 +521,9 @@ const discover = async (
 						result.release,
 						id,
 					);
+					// What the workflow deployed is now the newest thing running: a pull release
+					// that was waiting at the gate and is not newer must never go out over it.
+					await retireNotNewerThan(deps, watch, token, record, result.release);
 					handled.push(stamp(candidate, "verified-push"));
 					classified.set(id, { kind: "ignore", reason: "verified" });
 					settled = true;
@@ -607,6 +631,7 @@ export const releasePayload = (
 			: {}),
 		release: {
 			connectionId: record.connectionId,
+			gateVersion: record.gate.gateVersion,
 			serviceKey: record.facts.serviceKey,
 			manifestReleaseId: release.manifestReleaseId,
 			sha: release.sha,
@@ -645,6 +670,65 @@ const announce = async (
 	if (posted.settled) lastGateStatus.set(release.releaseId, memo);
 };
 
+/** Whether a release is the same run and attempt as `than`, or an earlier one. */
+const notNewerThan = (
+	release: { runId: number; runAttempt: number },
+	than: { runId: number; attempt?: number; runAttempt?: number },
+) => {
+	const attempt = than.attempt ?? than.runAttempt ?? 0;
+	return (
+		release.runId < than.runId ||
+		(release.runId === than.runId && release.runAttempt <= attempt)
+	);
+};
+
+/** These accepted releases will never be deployed: answer them inactive and forget their gate start. */
+const retire = async (
+	deps: ConnectionPollDeps,
+	watch: WatchRow,
+	token: string,
+	record: ConnectionRecord,
+	releases: PendingRelease[],
+) => {
+	if (releases.length === 0) return;
+	for (const release of releases) {
+		lastGateStatus.delete(release.releaseId);
+		if (release.githubDeploymentId === null) continue;
+		await postStatus(
+			deps,
+			watch,
+			token,
+			release.githubDeploymentId,
+			"inactive",
+			STATUS_TEXT.superseded,
+		);
+	}
+	await deps.supersedeReleases(
+		record.connectionId,
+		releases.map((release) => release.releaseId),
+	);
+	await deps.gateStore.clearGateStart(record.connectionId);
+};
+
+/** A pushed or already-running release was recorded: accepted pull releases that are not newer are retired. */
+const retireNotNewerThan = async (
+	deps: ConnectionPollDeps,
+	watch: WatchRow,
+	token: string,
+	record: ConnectionRecord,
+	recorded: AcceptedRelease,
+) => {
+	const waiting = (await deps.loadPendingReleases(record.connectionId)).filter(
+		(release) =>
+			release.delivery === "pull" &&
+			notNewerThan(release, {
+				runId: recorded.runId,
+				attempt: recorded.runAttempt,
+			}),
+	);
+	await retire(deps, watch, token, record, waiting);
+};
+
 /** Step 2: the newest accepted release goes through the gate; a passing one is started. */
 const settle = async (
 	watch: WatchRow,
@@ -659,32 +743,32 @@ const settle = async (
 	);
 	if (pending.length === 0) return;
 	// Discovery may have changed the connection (a block, a verified release): read it again.
-	const record = (await deps.loadConnection(watch)) ?? first;
-	const [newest, ...older] = [...pending].sort(newestFirst) as [
+	// A connection that is gone (its service was deleted) has nothing left to deploy.
+	const record = await deps.loadConnection(watch);
+	if (!record) return;
+
+	// Not newer than what runs now: never deployed over it.
+	const deployed = record.facts.deployed;
+	const live = deployed
+		? pending.filter((release) => !notNewerThan(release, deployed))
+		: pending;
+	if (deployed && live.length < pending.length) {
+		await retire(
+			deps,
+			watch,
+			token,
+			record,
+			pending.filter((release) => notNewerThan(release, deployed)),
+		);
+	}
+	if (live.length === 0) return;
+	const [newest, ...older] = [...live].sort(newestFirst) as [
 		PendingRelease,
 		...PendingRelease[],
 	];
 
 	// A newer release supersedes the ones still waiting.
-	if (older.length > 0) {
-		for (const release of older) {
-			lastGateStatus.delete(release.releaseId);
-			if (release.githubDeploymentId === null) continue;
-			await postStatus(
-				deps,
-				watch,
-				token,
-				release.githubDeploymentId,
-				"inactive",
-				STATUS_TEXT.superseded,
-			);
-		}
-		await deps.supersedeReleases(
-			record.connectionId,
-			older.map((release) => release.releaseId),
-		);
-		await deps.gateStore.clearGateStart(record.connectionId);
-	}
+	await retire(deps, watch, token, record, older);
 
 	const { state, gateBlocked } = record.gate;
 	// Blocked for a reason that is not the gate's (a refused release) or a lost token:
@@ -778,9 +862,36 @@ const startRelease = async (
 		deps.preFlipBackup &&
 		!backedUp.has(release.releaseId)
 	) {
-		const backup = await deps.preFlipBackup(watch, record);
-		if (!backup.ok) {
-			await deps.patchWatch(watch.watchId, { lastError: backup.note });
+		// A dump can take minutes and the tick serves every connection: the backup runs on
+		// its own, and the release is looked at again on the next ticks.
+		const run = backupRuns.get(release.releaseId);
+		if (!run) {
+			const state = { done: false, ok: false, note: "" };
+			backupRuns.set(release.releaseId, state);
+			deps
+				.preFlipBackup(watch, record)
+				.then(
+					(result) => {
+						state.ok = result.ok;
+						state.note = result.note;
+					},
+					(error) => {
+						state.ok = false;
+						state.note = `The backup before the first release failed (${describeError(error, 120)}). The release waits and is tried again.`;
+					},
+				)
+				.finally(() => {
+					state.done = true;
+				});
+			await deps.patchWatch(watch.watchId, {
+				lastError: "Backing up before the first release.",
+			});
+			return;
+		}
+		if (!run.done) return;
+		backupRuns.delete(release.releaseId);
+		if (!run.ok) {
+			await deps.patchWatch(watch.watchId, { lastError: run.note });
 			deps.block(watchKey(watch.watchId), now + BACKUP_RETRY_MS);
 			return;
 		}

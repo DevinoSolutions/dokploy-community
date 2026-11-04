@@ -362,6 +362,12 @@ export interface PrepareOptions {
 	 * has to look at its waiting release on every tick, new Deployments or not.
 	 */
 	continueOnNotModified?: boolean;
+	/**
+	 * First poll only: Deployments this says are new are NOT skipped by the baseline. A
+	 * connection uses it for the wake-ups created after Connect, so a release that
+	 * arrives between Connect and the first tick is not lost.
+	 */
+	isNewOnBaseline?: (deployment: GithubDeployment) => boolean;
 }
 
 /**
@@ -481,17 +487,36 @@ export const prepareTick = async (
 
 	// 3. First poll: remember where the history ends. Old deployments never run.
 	if (watch.lastSeenDeploymentId === null) {
-		await deps.patchWatch(
+		const wanted = options.isNewOnBaseline
+			? listed.deployments.filter(options.isNewOnBaseline)
+			: [];
+		if (wanted.length === 0) {
+			await deps.patchWatch(
+				watch.watchId,
+				{
+					lastSeenDeploymentId: maxDeploymentId(listed.deployments),
+					etag: listed.etag,
+					lastCheckedAt: new Date(now),
+					lastError: null,
+				},
+				{ ifCursor: null },
+			);
+			return null;
+		}
+		// The history ends just before the oldest Deployment that must still run. The etag is
+		// not saved: the next list has to answer 200 until those are handled.
+		const baseline = Math.min(...wanted.map((d) => d.id)) - 1;
+		const written = await deps.patchWatch(
 			watch.watchId,
 			{
-				lastSeenDeploymentId: maxDeploymentId(listed.deployments),
-				etag: listed.etag,
+				lastSeenDeploymentId: baseline,
 				lastCheckedAt: new Date(now),
 				lastError: null,
 			},
 			{ ifCursor: null },
 		);
-		return null;
+		if (written === false) return null;
+		return { token, now, listed, lastSeen: baseline };
 	}
 	return { token, now, listed, lastSeen: watch.lastSeenDeploymentId };
 };

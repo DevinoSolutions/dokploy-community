@@ -37,6 +37,8 @@ export type ParsedPayload =
 /** What a deploy started by a native GitHub Actions connection records about its release. */
 export interface ReleaseContext {
 	connectionId: string;
+	/** `gateVersion` the deploy gate was evaluated with: a start that finds another one is stale. */
+	gateVersion?: number;
 	serviceKey: string;
 	/** `release.id` of the manifest. */
 	manifestReleaseId: string;

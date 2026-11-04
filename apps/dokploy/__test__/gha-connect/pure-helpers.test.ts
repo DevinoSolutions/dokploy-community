@@ -15,6 +15,7 @@ import {
 } from "@dokploy/server/services/gha-connect/stale";
 import { createDeploymentStatus } from "@dokploy/server/services/github-deployments/github-api";
 import {
+	composeServiceOfImage,
 	listPinnedComposeRepositories,
 	pinComposeImages,
 } from "@dokploy/server/services/github-deployments/service-image";
@@ -67,6 +68,75 @@ describe("pinComposeImages", () => {
 				{ repository: "Registry.Devino.CA/shorty/web", digest: D("b") },
 			]),
 		).toMatchObject({ ok: false, reason: expect.stringContaining("twice") });
+	});
+});
+
+describe("pinComposeImages with the compose service the manifest names", () => {
+	const web = "registry.devino.ca/shorty/web";
+	const compose = [
+		"services:",
+		"  web:",
+		`    image: ${web}@${D("1")}`,
+		"  worker:",
+		"    image: postgres:16",
+		"",
+	].join("\n");
+
+	it("pins the image of the service that holds it", () => {
+		const result = pinComposeImages(compose, [
+			{ repository: web, digest: D("a"), composeService: "web" },
+		]);
+		expect(result).toMatchObject({ ok: true, changed: true });
+	});
+
+	it("refuses an image the file keeps on another service, naming both", () => {
+		const result = pinComposeImages(compose, [
+			{ repository: web, digest: D("a"), composeService: "worker" },
+		]);
+		expect(result).toMatchObject({
+			ok: false,
+			reason: expect.stringContaining("'worker'"),
+		});
+		expect(!result.ok && result.reason).toContain("'web'");
+	});
+
+	it("refuses when the image line is not inside the services block", () => {
+		const loose = `x-common: &c
+  image: ${web}@${D("1")}
+`;
+		expect(
+			pinComposeImages(loose, [
+				{ repository: web, digest: D("a"), composeService: "web" },
+			]),
+		).toMatchObject({ ok: false });
+	});
+
+	it("still pins an image whose manifest entry names no service", () => {
+		expect(
+			pinComposeImages(compose, [
+				{ repository: web, digest: D("a"), composeService: null },
+			]),
+		).toMatchObject({ ok: true });
+	});
+});
+
+describe("composeServiceOfImage", () => {
+	it("finds the service by indentation, with quoted keys and list-style images", () => {
+		const repo = "registry.devino.ca/shorty/web";
+		const file = [
+			"# comment",
+			"services:",
+			"    'api':",
+			"      environment:",
+			"        - A=1",
+			"    web:",
+			"      - image: " + repo + "@" + D("1"),
+			"volumes:",
+			"  data: {}",
+			"",
+		].join("\r\n");
+		expect(composeServiceOfImage(file, repo)).toBe("web");
+		expect(composeServiceOfImage(file, "other/repo")).toBeNull();
 	});
 });
 

@@ -96,16 +96,10 @@ import { planApplicationFlip as planFlip } from "@dokploy/server/services/gha-co
 
 describe("the github-actions provider source type", () => {
 	it("deploys as an image for an application and as a stored file for compose", () => {
-		expect(
-			deploySourceTypeOf({ sourceType: "github-actions" }, "application"),
-		).toBe("docker");
-		expect(
-			deploySourceTypeOf({ sourceType: "github-actions" }, "compose"),
-		).toBe("raw");
-		expect(deploySourceTypeOf({ sourceType: "github" }, "application")).toBe(
-			"github",
-		);
-		expect(deploySourceTypeOf({ sourceType: null }, "compose")).toBeNull();
+		expect(deploySourceTypeOf("application", "github-actions")).toBe("docker");
+		expect(deploySourceTypeOf("compose", "github-actions")).toBe("raw");
+		expect(deploySourceTypeOf("application", "github")).toBe("github");
+		expect(deploySourceTypeOf("compose", null)).toBeNull();
 	});
 
 	it("is never flipped", () => {

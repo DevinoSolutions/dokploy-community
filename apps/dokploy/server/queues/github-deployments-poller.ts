@@ -19,12 +19,13 @@ import { buildOriginJobFields } from "@dokploy/server/services/build-origin-shar
 import {
 	consumeWake,
 	deleteGhaConnection,
-	deploySourceTypeOf,
+	findReleaseByDeployment,
 	isDue,
 	listGhaConnections,
 	planApplicationFlip,
 	snapshotPreviousSource,
 } from "@dokploy/server/services/gha-connect";
+import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/deploy-source";
 import {
 	createGithubFetch,
 	type DeployPayload,
@@ -357,13 +358,22 @@ const prepareReleaseDeploy = async (
 		!connection ||
 		connection.organizationId !== watch.organizationId ||
 		connection.serviceType !== watch.serviceType ||
-		connection.serviceId !== watch.serviceId ||
-		connection.state === "disconnected"
+		connection.serviceId !== watch.serviceId
 	) {
 		return {
 			kind: "rejected",
 			reason: "The GitHub Actions connection of this service is gone.",
 		};
+	}
+	// Access was lost since the tick decided: the release waits for it to come back.
+	if (connection.state === "disconnected") return { kind: "stale" };
+	// The gate was evaluated with other settings than these (they changed, or Deploy anyway
+	// was said): that answer does not apply, the next tick asks again.
+	if (
+		release.gateVersion !== undefined &&
+		connection.gateVersion !== release.gateVersion
+	) {
+		return { kind: "stale" };
 	}
 	// Blocked for a reason that is not the gate's: the tick checked, and a block that
 	// came in between still wins.
@@ -384,10 +394,17 @@ const prepareReleaseDeploy = async (
 	// Superseded, failed or deployed since the tick read it.
 	if (!stored) return { kind: "stale" };
 
+	// The compose service each image belongs to, from the accepted manifest.
+	const composeServiceOf = (repository: string, digest: string) =>
+		release.images.find((image) => image.ref === `${repository}@${digest}`)
+			?.composeService;
 	const images = [
 		{ repository: payload.repository, digest: payload.digest },
 		...(payload.extraImages ?? []),
-	];
+	].map((image) => ({
+		...image,
+		composeService: composeServiceOf(image.repository, image.digest),
+	}));
 	const title = githubDeploymentTitle(watch, deployment);
 	const description =
 		`${watch.owner}/${watch.repo} (${watch.environment}) ${release.sha.slice(0, 7)} ${payload.buildRunUrl ?? ""}`.trim();
@@ -450,7 +467,7 @@ const prepareReleaseDeploy = async (
 		const appFields = app as unknown as Record<string, unknown>;
 		let update: Record<string, unknown> = { dockerImage: payload.image };
 		let savedSource = connection.previousSource;
-		if (deploySourceTypeOf(app, "application") === "docker") {
+		if (deploySourceTypeOf("application", app.sourceType) === "docker") {
 			const current = app.dockerImage?.trim();
 			if (
 				current &&
@@ -528,7 +545,7 @@ const prepareReleaseDeploy = async (
 			reason: "The compose stack belongs to another organization.",
 		};
 	}
-	if (deploySourceTypeOf(stack, "compose") !== "raw") {
+	if (deploySourceTypeOf("compose", stack.sourceType) !== "raw") {
 		return {
 			kind: "rejected",
 			reason:
@@ -604,8 +621,23 @@ const finishStart = async (
 		const live = await registerExternalBuild(prepared.liveRow).catch(
 			() => null,
 		);
-		if (live)
+		if (live) {
 			job = { ...job, deploymentId: live.deploymentId } as DeploymentJob;
+			// The row keeps the title it was registered with ("GHA run #<id>"), and the takeover
+			// keeps it too. The poller finds a deployment by the handle at the end of its title, so
+			// without this a release that continues an open row would never be found: reported as
+			// lost and marked failed. Only a row nothing took over yet is retitled.
+			await db
+				.update(deployments)
+				.set({ title: job.titleLog })
+				.where(
+					and(
+						eq(deployments.deploymentId, live.deploymentId),
+						eq(deployments.externalBuildOnly, true),
+					),
+				)
+				.catch(() => undefined);
+		}
 	}
 	try {
 		await myQueue.add("deployments", job, {
@@ -697,6 +729,22 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 		.orderBy(desc(deployments.createdAt))
 		.limit(1);
 	let row = titled;
+	if (!row && watch.ghaConnectionId) {
+		// A release that continued the row registered for its run is found by the run it
+		// was built by, whatever the row is titled (it may predate the handle).
+		const release = await findReleaseByDeployment(
+			watch.ghaConnectionId,
+			id,
+		).catch(() => null);
+		if (release) {
+			[row] = await db
+				.select(statusOf)
+				.from(deployments)
+				.where(and(owner, eq(deployments.buildRunId, String(release.runId))))
+				.orderBy(desc(deployments.createdAt))
+				.limit(1);
+		}
+	}
 	if (!row && watch.inflightStartedAt) {
 		// A manual Deploy that arrived while this job was still waiting is folded
 		// into it (coalesceWaiting) and the merged job carries the manual title.

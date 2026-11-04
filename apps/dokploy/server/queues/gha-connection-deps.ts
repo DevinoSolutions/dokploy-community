@@ -17,7 +17,6 @@ import {
 	createGateGithub,
 	createRegistryProbe,
 	dbDeployGateStore,
-	deploySourceTypeOf,
 	digestsOf,
 	failAcceptedRelease,
 	findGhaConnectionById,
@@ -43,7 +42,9 @@ import {
 	supersedeReleases,
 	toPendingRelease,
 } from "@dokploy/server/services/gha-connect";
+import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/deploy-source";
 import {
+	connectionKey,
 	listPinnedComposeRepositories,
 	type PollDeps,
 	repositoryOfReference,
@@ -51,7 +52,7 @@ import {
 	watchKey,
 } from "@dokploy/server/services/github-deployments";
 import { runComposeBackup } from "@dokploy/server/utils/backups/compose";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, isNull, ne, or } from "drizzle-orm";
 
 /**
  * The real database and GitHub behind a GitHub Actions connection's tick. The
@@ -110,7 +111,7 @@ const currentRepositories = async (
 	if (row.serviceType === "application") {
 		const app = await findApplicationById(row.serviceId).catch(() => null);
 		const image =
-			app && deploySourceTypeOf(app, "application") === "docker"
+			app && deploySourceTypeOf("application", app.sourceType) === "docker"
 				? app.dockerImage?.trim()
 				: null;
 		return image ? [repositoryOfReference(image)] : [];
@@ -257,10 +258,16 @@ export const createGhaConnectionPollDeps = (
 				})
 				.from(domains)
 				.where(
-					watch.serviceType === "application"
-						? eq(domains.applicationId, watch.serviceId)
-						: eq(domains.composeId, watch.serviceId),
-				);
+					and(
+						watch.serviceType === "application"
+							? eq(domains.applicationId, watch.serviceId)
+							: eq(domains.composeId, watch.serviceId),
+						// A preview deployment's domain is not where the service lives.
+						or(isNull(domains.domainType), ne(domains.domainType, "preview")),
+					),
+				)
+				// The same domain on every tick, whatever order the database answers in.
+				.orderBy(asc(domains.createdAt), asc(domains.uniqueConfigKey));
 			return pickEnvironmentUrl(rows);
 		},
 		onDeployEnded: async (watch, end) => {
@@ -351,12 +358,33 @@ const applyRename = async (
 	watch.repo = repo;
 };
 
+/**
+ * What every read of the tick does with a failure that concerns the whole
+ * connection: a rate limit pauses it (the Deployments poll that follows sees the
+ * pause), a dead token marks the GitHub account revoked. The result is returned
+ * untouched.
+ */
+type NoteFailure = <T extends { kind: string }>(result: T) => T;
+
+const failureNoter =
+	(deps: ConnectionPollDeps, watch: WatchRow): NoteFailure =>
+	(result) => {
+		const failure = result as { kind: string; retryAt?: number };
+		if (failure.kind === "rate-limited" && failure.retryAt !== undefined) {
+			deps.block(connectionKey(watch.connectionId), failure.retryAt);
+		} else if (failure.kind === "unauthorized") {
+			void deps.markRevoked(watch.connectionId).catch(() => undefined);
+		}
+		return result;
+	};
+
 const runConnectionUpkeep = async (
 	apiDeps: ApiDeps,
 	watch: WatchRow,
 	row: GhaConnectionRow,
 	token: string,
 	now: number,
+	note: NoteFailure,
 ) => {
 	const last = lastUpkeepAt.get(row.ghaConnectionId);
 	if (last !== undefined && now - last < UPKEEP_INTERVAL_MS) return;
@@ -377,13 +405,31 @@ const runConnectionUpkeep = async (
 			acceptedShas: accepted.map((release) => release.sha),
 		},
 		{
-			repository: () => readRepository(apiDeps, row, token),
-			branchHead: () => getBranchHead(apiDeps, token, ref, row.trackedBranch),
-			workflowRuns: () =>
-				listWorkflowRuns(apiDeps, token, ref, workflowFile, row.trackedBranch),
-			compare: (base, head) => compareCommits(apiDeps, token, ref, base, head),
-			workflowFile: () =>
-				getFileText(apiDeps, token, ref, row.workflowPath, row.trackedBranch),
+			repository: async () => note(await readRepository(apiDeps, row, token)),
+			branchHead: async () =>
+				note(await getBranchHead(apiDeps, token, ref, row.trackedBranch)),
+			workflowRuns: async () =>
+				note(
+					await listWorkflowRuns(
+						apiDeps,
+						token,
+						ref,
+						workflowFile,
+						row.trackedBranch,
+					),
+				),
+			compare: async (base, head) =>
+				note(await compareCommits(apiDeps, token, ref, base, head)),
+			workflowFile: async () =>
+				note(
+					await getFileText(
+						apiDeps,
+						token,
+						ref,
+						row.workflowPath,
+						row.trackedBranch,
+					),
+				),
 		},
 	);
 
@@ -407,10 +453,18 @@ const checkRepositoryName = async (
 	watch: WatchRow,
 	row: GhaConnectionRow,
 	token: string,
+	note: NoteFailure,
 ) => {
-	const result = await readRepository(apiDeps, row, token);
+	const result = note(await readRepository(apiDeps, row, token));
 	if (result.kind === "ok" && result.value.fullName !== row.repoFullName) {
 		await applyRename(row, watch, result.value);
+	} else if (result.kind === "not-modified") {
+		// The saved answer is kept when GitHub says nothing changed. If writing the rename
+		// failed last time, the saved name still differs from the stored one: write it now.
+		const memo = repositoryMemo.get(row.ghaConnectionId);
+		if (memo && memo.fullName !== row.repoFullName) {
+			await applyRename(row, watch, memo);
+		}
 	}
 };
 
@@ -442,10 +496,19 @@ export const pollGhaConnection = async (
 		lastUpkeepAt.delete(row.ghaConnectionId);
 		deps.block(watchKey(watch.watchId), 0);
 	}
+	// A paused connection (GitHub rate limited it) or a backed-off watch reads nothing at all:
+	// the name check and the upkeep would spend the very requests the pause is saving.
+	const now = deps.now();
+	const paused = [
+		deps.blockedUntil(connectionKey(watch.connectionId)),
+		deps.blockedUntil(watchKey(watch.watchId)),
+	].some((until) => until !== undefined && until > now);
+	if (paused) return;
 	const apiDeps: ApiDeps = { fetch: deps.fetch, now: deps.now };
+	const note = failureNoter(deps, watch);
 	try {
-		await checkRepositoryName(apiDeps, watch, row, token);
-		await runConnectionUpkeep(apiDeps, watch, row, token, deps.now());
+		await checkRepositoryName(apiDeps, watch, row, token, note);
+		await runConnectionUpkeep(apiDeps, watch, row, token, deps.now(), note);
 	} catch (error) {
 		deps.log(
 			`gha connection ${row.ghaConnectionId}: upkeep failed: ${error instanceof Error ? error.message : String(error)}`,

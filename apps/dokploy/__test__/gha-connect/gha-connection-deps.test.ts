@@ -173,6 +173,79 @@ describe("pollGhaConnection", () => {
 		expect(hits(h, "/deployments?")).toBe(1);
 	});
 
+	it("reads nothing at all while the connection is paused, not even the name or the upkeep", async () => {
+		const h = harness({ deployments: null, routes: routes() });
+		h.blocks.set("connection:gh1", NOW + 60_000);
+		await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		expect(h.calls).toEqual([]);
+		h.blocks.clear();
+		h.blocks.set("watch:w1", NOW + 60_000);
+		await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		expect(h.calls).toEqual([]);
+	});
+
+	it("a rate-limited upkeep read pauses the connection for what GitHub said", async () => {
+		const h = harness({
+			deployments: null,
+			routes: [
+				["/repositories/42", REPO_OK],
+				["/branches/dev", { status: 429, headers: { "retry-after": "60" } }],
+				["/actions/workflows/", RUNS],
+			],
+		});
+		await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		expect(h.blocks.get("connection:gh1")).toBe(NOW + 60_000);
+		// The Deployments poll that follows honours the pause.
+		expect(hits(h, "/deployments?")).toBe(0);
+	});
+
+	it("a rate-limited name check pauses the connection and lists nothing", async () => {
+		const h = harness({
+			deployments: null,
+			routes: [
+				["/repositories/42", { status: 429, headers: { "retry-after": "30" } }],
+			],
+		});
+		await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		expect(h.blocks.get("connection:gh1")).toBe(NOW + 30_000);
+		expect(hits(h, "/deployments?")).toBe(0);
+	});
+
+	it("writes a rename that failed to save once GitHub answers 304 with the saved name", async () => {
+		const renamed: Reply = {
+			json: {
+				id: 42,
+				name: "voicelabs-v2",
+				owner: { login: "DevinoSolutions" },
+				full_name: "DevinoSolutions/voicelabs-v2",
+				default_branch: "dev",
+			},
+			headers: { etag: 'W/"repo2"' },
+		};
+		const h = harness({
+			deployments: null,
+			routes: routes([renamed, { status: 304 }, { status: 304 }]),
+		});
+		// The first write is lost (another worker held the row); the stored name stays old.
+		mocks.renameGhaConnectionRepository.mockResolvedValueOnce(false);
+		await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		expect(mocks.renameGhaConnectionRepository).toHaveBeenCalledTimes(1);
+		// The next tick: 304, but the row still has the old name.
+		await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		expect(mocks.renameGhaConnectionRepository).toHaveBeenCalledTimes(2);
+		expect(mocks.renameGhaConnectionRepository).toHaveBeenLastCalledWith(
+			"c1",
+			"DevinoSolutions/voicelabs-v2",
+		);
+		// Written: a 304 with a row that has the new name does nothing more.
+		await deps.pollGhaConnection(
+			watchRow(),
+			row({ repoFullName: "DevinoSolutions/voicelabs-v2" }),
+			h.deps,
+		);
+		expect(mocks.renameGhaConnectionRepository).toHaveBeenCalledTimes(2);
+	});
+
 	it("a failing upkeep read costs its own information, never the poll after it", async () => {
 		const h = harness({
 			deployments: null,
