@@ -353,7 +353,10 @@ export function ShowDeploymentsTable() {
 									<span className="text-[10px]">built on</span>
 									<span className="truncate text-xs">{builtOn.name}</span>
 									{builtOn.type && (
-										<Badge variant="outline" className="text-[10px] font-normal">
+										<Badge
+											variant="outline"
+											className="text-[10px] font-normal"
+										>
 											{builtOn.type}
 										</Badge>
 									)}
