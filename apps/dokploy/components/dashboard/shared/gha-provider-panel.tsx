@@ -355,6 +355,11 @@ const ConnectFlow = ({
 					</Link>{" "}
 					to do so.
 				</span>
+				<Button variant="secondary" asChild>
+					<Link href="/dashboard/settings/git-providers">
+						Open Git providers
+					</Link>
+				</Button>
 			</div>
 		);
 	}
