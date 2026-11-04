@@ -591,7 +591,10 @@ describe("isGithubActionsDeployment", () => {
 });
 
 describe("a service that follows GitHub Actions (source type github-actions)", () => {
-	const application = { kind: "application", sourceType: "github-actions" } as const;
+	const application = {
+		kind: "application",
+		sourceType: "github-actions",
+	} as const;
 	const composeService = {
 		kind: "compose",
 		sourceType: "github-actions",
@@ -648,7 +651,9 @@ describe("a service that follows GitHub Actions (source type github-actions)", (
 
 describe("describeGithubActionsOriginPill", () => {
 	test("a connected service with no release yet waits for the first release", () => {
-		expect(describeGithubActionsOriginPill({ buildOrigin: "github-actions" })).toEqual({
+		expect(
+			describeGithubActionsOriginPill({ buildOrigin: "github-actions" }),
+		).toEqual({
 			label: "GitHub Actions · waiting for the first release",
 			waitingForFirstRelease: true,
 		});
@@ -670,7 +675,10 @@ describe("describeGithubActionsOriginPill", () => {
 		["a run id", { buildRunId: "123456789" }],
 	])("says just GitHub Actions once there is %s", (_name, fields) => {
 		expect(
-			describeGithubActionsOriginPill({ buildOrigin: "github-actions", ...fields }),
+			describeGithubActionsOriginPill({
+				buildOrigin: "github-actions",
+				...fields,
+			}),
 		).toEqual({ label: "GitHub Actions", waitingForFirstRelease: false });
 	});
 

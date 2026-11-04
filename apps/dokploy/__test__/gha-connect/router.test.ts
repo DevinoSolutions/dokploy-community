@@ -1448,7 +1448,7 @@ describe("testConnection (Test connection in the Connect flow)", () => {
 		nothingWritten();
 	});
 
-	it("refuses with \"Pick a repository first\" when the application has no repository selected", async () => {
+	it('refuses with "Pick a repository first" when the application has no repository selected', async () => {
 		mocks.findApplicationById.mockResolvedValue({
 			applicationId: "app-1",
 			sourceType: "github",

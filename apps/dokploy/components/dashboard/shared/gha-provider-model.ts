@@ -327,7 +327,10 @@ export const expectedReleaseImage = (
 	const key = connection.serviceKey.trim().toLowerCase();
 	if (!parsed || key === "") return null;
 	const repo = parsed.repo.toLowerCase();
-	const prefix = connection.registryPrefix?.trim().replace(/\/+$/, "").toLowerCase();
+	const prefix = connection.registryPrefix
+		?.trim()
+		.replace(/\/+$/, "")
+		.toLowerCase();
 	return prefix
 		? `${prefix}/${repo}/${key}`
 		: `ghcr.io/${parsed.owner.toLowerCase()}/${repo}/${key}`;

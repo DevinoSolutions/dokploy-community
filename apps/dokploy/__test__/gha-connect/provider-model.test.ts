@@ -57,7 +57,9 @@ describe("the connect form", () => {
 			trackedBranch: "",
 		});
 		expect(connectFormProblem(blank)).not.toBeNull();
-		expect(connectFormProblem({ ...blank, githubConnectionId: "gh-1" })).not.toBeNull();
+		expect(
+			connectFormProblem({ ...blank, githubConnectionId: "gh-1" }),
+		).not.toBeNull();
 		expect(
 			connectFormProblem({
 				...blank,
@@ -307,7 +309,9 @@ describe("the status panel", () => {
 	});
 
 	it("shows the image name(s) a release will pin, for an application and a compose stack alike", () => {
-		const one = providerDetailRows(conn(), new Date(), ["ghcr.io/acme/shop/web"]);
+		const one = providerDetailRows(conn(), new Date(), [
+			"ghcr.io/acme/shop/web",
+		]);
 		expect(one.map((row) => row.label)).toContain("Image");
 		expect(one.find((row) => row.label === "Image")).toMatchObject({
 			value: "ghcr.io/acme/shop/web",
