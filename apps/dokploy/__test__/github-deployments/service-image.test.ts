@@ -232,8 +232,7 @@ describe("the image name of a running service", () => {
 			`    image: ghcr.io/org/shop/web@${DIGEST}`,
 			"  db:",
 			"    image: postgres:16",
-		].join("
-");
+		].join("\n");
 		expect(
 			releaseImageRepositories({
 				kind: "compose",
@@ -244,10 +243,7 @@ describe("the image name of a running service", () => {
 		expect(
 			releaseImageRepositories({
 				kind: "compose",
-				composeFile: "services:
-  db:
-    image: postgres:16
-",
+				composeFile: "services:\n  db:\n    image: postgres:16\n",
 				expected: "ghcr.io/org/shop/web",
 			}),
 		).toEqual(["ghcr.io/org/shop/web"]);

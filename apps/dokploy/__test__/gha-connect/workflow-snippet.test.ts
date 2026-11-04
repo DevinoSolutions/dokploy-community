@@ -226,8 +226,7 @@ describe("the private package limit of phase 1", () => {
 		const result = make();
 		if (!result.ok) throw new Error("unreachable");
 		const comments = result.yaml
-			.split("
-")
+			.split("\n")
 			.filter((line) => line.trim().startsWith("#"))
 			.join(" ");
 		expect(comments).toMatch(/private by default|private package/i);
