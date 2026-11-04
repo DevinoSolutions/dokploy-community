@@ -2,6 +2,28 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.47
+
+Build on GitHub Actions, natively: connect a service to its repository, Dokploy adds one workflow, GitHub builds, and Dokploy deploys the digest behind a per-service gate.
+
+Upgrade notes: five new additive database migrations (0228 to 0232) add the GitHub Deployments watch tables, the GitHub Actions connection and release tables, the deploy gate columns, the manifest source column and the `github-actions` service source, so an image-only rollback to v0.30.8-community.46 keeps working as long as no service has been switched to the new GitHub Actions provider. Nothing to configure. Services keep their current source until someone connects them. This release includes everything in v0.30.8-community.46.
+
+**GitHub Actions as a service provider** (#601, T-13879). The Provider tab of applications and compose services has a new GitHub Actions option next to GitHub, GitLab, Docker and Git. Connecting asks for the GitHub account, the repository, the branch, the GitHub environment and a service key, and shows who builds the image: the Dokploy action builds it from a Dockerfile (Dokploy generates the whole `.github/workflows/dokploy.yml`, with Copy file and Open on GitHub, which opens GitHub's own new-file page so the change goes in as a pull request), or an existing workflow builds it (Dokploy shows one job to paste, which is also the only shape offered when images are mirrored to a registry of ours). Test connection runs every connect check and writes nothing. After connecting, the same tab shows a status panel with the state (waiting for the first release, connected, stale or blocked), what to do next, the repository, workflow, branch, environment, the deployed commit and run as links, Check now, Disconnect (restores the previous source) and the deploy gate card. The Deploy button reads "Redeploy current image" and says to push to the branch to build a new version. Moving a connected service to another provider is refused until it is disconnected.
+
+**Per-service deploy gate** (#598, T-13720). A GitHub Actions service gets a "Deploy when" setting with three modes: image built (the default, deploys as soon as the release is accepted), all checks green (the required checks of branch protection when readable, else the checks of the last green commit, else wait until nothing is queued or running), or named workflows pass. The latest attempt of each check decides, so a re-run replaces a failure. A check that never reports within the timeout (default 60 minutes) blocks the release and says which one. A blocked release can be deployed with "Deploy anyway".
+
+**Release acceptance** (#599, T-13719). Dokploy deploys only what it can verify: the manifest comes from the `dokploy-release` run artifact, or from a marker line in the job log when GitHub's artifact storage is unavailable, and has to match the run, the repository, the commit, the branch and the environment. The image digest is probed in the registry. An older or already deployed run is refused, so an old run cannot roll a service back.
+
+**Connection tables and Connect API** (#597, T-13719). New tables for connections and releases, the `ghaConnection` API (one, connect, disconnect, checkNow, and testConnection) with its MCP tools, and a narrower GitHub sign-in: Connect GitHub now asks for deployments and repository access only, no longer for package read access, so the production Dokploy holds no GitHub Container Registry token for a connected service.
+
+**Poller** (#602, T-13719). Connected services are polled outbound only: Dokploy sees a new GitHub Deployment, verifies the run, asks the deploy gate on every tick and deploys the accepted release. The first release takes a backup of the previous source before the service is switched, and Disconnect puts it back. Releases that a newer run replaces are marked superseded, and the Deployments tab and the run modal keep working for these deploys.
+
+**Deploy from GitHub Deployments** (#577, T-12166). A pull flow for Dokploys that GitHub Actions cannot reach, such as one behind a private network. A workflow creates a GitHub Deployment naming the service and the image digest, Dokploy polls GitHub, runs its normal deploy and reports in progress, then success or failure with a log link. Settings > Git Providers has Connect GitHub (device flow on the Dokploy Community OAuth App, no secret to configure) and each application and compose gets a watch on its Advanced tab. Private GitHub Container Registry images are pulled with that login without storing it on the service.
+
+**Recent deployments on the home page** (#600, T-13877). The columns are fixed width so rows no longer shift between GitHub Actions and Dokploy builds, both origins use one outlined pill style, and GitHub Actions titles read as the commit subject and short sha instead of the raw run text.
+
+**Docs** (#595, #596, T-13719, T-13720). The design spec and the implementation plan for the native GitHub Actions connection.
+
 ### New in v0.30.8-community.46
 
 Upgrade notes: no database migration and no API change, so an image-only rollback to v0.30.8-community.45 keeps working. Nothing to configure. This release includes everything in v0.30.8-community.45.
