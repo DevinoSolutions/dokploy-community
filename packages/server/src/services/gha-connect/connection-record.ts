@@ -16,6 +16,7 @@ export const buildConnectionRecord = (
 ): ConnectionRecord => ({
 	connectionId: row.ghaConnectionId,
 	organizationId: row.organizationId,
+	createdAt: row.createdAt.getTime(),
 	processed: row.processed,
 	gate: {
 		ghaConnectionId: row.ghaConnectionId,

@@ -36,10 +36,16 @@ const row = {
 	deployedRunId: 77,
 	deployedRunAttempt: 2,
 	deployedDigests: [`sha256:${"2".repeat(64)}`, `sha256:${"1".repeat(64)}`],
+	createdAt: new Date("2026-11-03T08:00:00Z"),
 	processed: [{ runId: 1, attempt: 1, outcome: "accepted", at: "x" }],
 } as unknown as GhaConnectionRow;
 
 describe("the poller's read of a connection", () => {
+	it("carries when the connection was made, for the first tick", () => {
+		const record = buildConnectionRecord(row, { owner: "acme", repo: "shop" }, []);
+		expect(record.createdAt).toBe(Date.parse("2026-11-03T08:00:00Z"));
+	});
+
 	it("carries every input the deploy gate needs, gateVersion first among them", () => {
 		const record = buildConnectionRecord(row, { owner: "acme", repo: "shop" }, [
 			"registry.devino.ca/shop/web",
