@@ -376,8 +376,8 @@ const ConnectFlow = ({
 		return (
 			<div className="flex min-h-[25vh] flex-col items-center justify-center gap-3 text-center">
 				<span className="text-base text-muted-foreground">
-					To follow GitHub Actions releases, connect a GitHub account first.
-					It is added under Settings, Git providers.
+					To follow GitHub Actions releases, connect a GitHub account first. It
+					is added under Settings, Git providers.
 				</span>
 				<Button variant="secondary" asChild>
 					<Link href="/dashboard/settings/git-providers">

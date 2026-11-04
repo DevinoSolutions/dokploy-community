@@ -13,8 +13,8 @@ import {
 	GITHUB_ACTIONS_PILL_LABEL,
 	GITHUB_ACTIONS_WAITING_PILL_LABEL,
 	githubActionsBranch,
-	githubCommitUrl,
 	githubActionsRunsOf,
+	githubCommitUrl,
 	githubRepositoryUrl,
 	isLiveGithubBuild,
 	normalizeBuildRunUrl,
@@ -591,8 +591,8 @@ export const GithubActionsRunPill = ({
 					<TooltipContent className="z-999 max-w-[320px]">
 						<span>
 							Connected to GitHub Actions. The first release has not arrived
-							yet; push to the tracked branch or press Check now on the
-							Provider tab.
+							yet; push to the tracked branch or press Check now on the Provider
+							tab.
 						</span>
 					</TooltipContent>
 				</Tooltip>

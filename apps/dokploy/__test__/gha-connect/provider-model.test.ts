@@ -10,8 +10,8 @@ import {
 	effectiveWorkflowPath,
 	keyFromRepository,
 	opensOnGithubActions,
-	panelImageOfConnection,
 	type ProviderConnection,
+	panelImageOfConnection,
 	providerDetailRows,
 	redeployCopy,
 	relativeTime,
@@ -418,9 +418,9 @@ describe("the status panel", () => {
 			expect(
 				workflowImageOfForm(form, "application", { dockerImage }),
 			).toBeUndefined();
-			expect(
-				runningImageProblem(form, "application", { dockerImage }),
-			).toMatch(/outside ghcr\.io\/acme\/shop\//);
+			expect(runningImageProblem(form, "application", { dockerImage })).toMatch(
+				/outside ghcr\.io\/acme\/shop\//,
+			);
 		}
 		// A compose stack in the mirror namespace connects without refusal.
 		const mirrored = filled({

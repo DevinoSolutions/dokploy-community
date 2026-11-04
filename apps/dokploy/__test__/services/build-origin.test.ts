@@ -721,9 +721,9 @@ describe("githubActionsRunsOf", () => {
 				"github-actions",
 			).map((row) => row.deploymentId),
 		).toEqual(["d2", "d3"]);
-		expect(githubActionsRunsOf([dokployBuild, manual], "github-actions")).toEqual(
-			[],
-		);
+		expect(
+			githubActionsRunsOf([dokployBuild, manual], "github-actions"),
+		).toEqual([]);
 	});
 
 	test("any other service keeps every row", () => {

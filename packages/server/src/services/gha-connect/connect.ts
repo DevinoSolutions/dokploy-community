@@ -2,7 +2,11 @@ import type { ApiResult, RepositoryInfo } from "./actions-api";
 import type { EnvironmentPolicy } from "./environment-policy";
 import { evaluateEnvironmentPolicy } from "./environment-policy";
 import { type PreviousSource, snapshotPreviousSource } from "./flip";
-import { deploySourceTypeOf, GHA_SOURCE_TYPE, isGhaSourceType } from "./provider";
+import {
+	deploySourceTypeOf,
+	GHA_SOURCE_TYPE,
+	isGhaSourceType,
+} from "./provider";
 import { deriveReleaseImage } from "./release-image";
 
 /**
@@ -203,7 +207,9 @@ export const planConnect = async (
 		}
 		// What it runs decides which image a release can ever replace: a repository outside the connection's
 		// namespaces would make every release refuse later, so say so now.
-		if (deploySourceTypeOf("application", service.sourceType ?? "") === "docker") {
+		if (
+			deploySourceTypeOf("application", service.sourceType ?? "") === "docker"
+		) {
 			const image = deriveReleaseImage({
 				kind: "application",
 				owner: request.owner,

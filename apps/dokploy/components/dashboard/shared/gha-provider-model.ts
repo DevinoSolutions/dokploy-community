@@ -341,7 +341,9 @@ export const releaseImageOfForm = (
 		kind: type,
 		owner: parsed.owner,
 		repo: parsed.repo,
-		registryPrefix: isMirrored(form) ? form.registryPrefix.trim() || null : null,
+		registryPrefix: isMirrored(form)
+			? form.registryPrefix.trim() || null
+			: null,
 		serviceKey,
 		...running,
 	});
