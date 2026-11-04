@@ -178,11 +178,7 @@ export function ShowDeploymentsTable() {
 			const q = globalFilter.toLowerCase();
 			list = list.filter((d) => {
 				const info = getServiceInfo(d);
-				const serverName =
-					d.server?.name ??
-					d.application?.server?.name ??
-					d.compose?.server?.name ??
-					"";
+				const hosted = describeHostedOn(d);
 				const buildServerName =
 					d.buildServer?.name ?? d.application?.buildServer?.name ?? "";
 				if (!info) return false;
@@ -193,7 +189,8 @@ export function ShowDeploymentsTable() {
 					(d.title?.toLowerCase().includes(q) ?? false) ||
 					(displayDeploymentTitle(d.title)?.toLowerCase().includes(q) ??
 						false) ||
-					serverName.toLowerCase().includes(q) ||
+					hosted.hostName.toLowerCase().includes(q) ||
+					(hosted.builtOn?.name.toLowerCase().includes(q) ?? false) ||
 					buildServerName.toLowerCase().includes(q)
 				);
 			});
@@ -311,11 +308,7 @@ export function ShowDeploymentsTable() {
 			},
 			{
 				id: "serverName",
-				accessorFn: (row: DeploymentRow) =>
-					row.server?.name ??
-					row.application?.server?.name ??
-					row.compose?.server?.name ??
-					"",
+				accessorFn: (row: DeploymentRow) => describeHostedOn(row).hostName,
 				header: ({
 					column,
 				}: {

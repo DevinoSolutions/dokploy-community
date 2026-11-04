@@ -1,7 +1,7 @@
 import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
 
 type ServerRef =
-	| { name: string; serverType?: string | null }
+	| { serverId: string; name: string; serverType?: string | null }
 	| null
 	| undefined;
 
@@ -32,7 +32,7 @@ export function describeHostedOn(d: HostedOnInput): HostedOn {
 	const hostName = host?.name ?? DOKPLOY_HOST_NAME;
 	const build = d.buildServer ?? d.application?.buildServer ?? null;
 	const builtOn =
-		build && !isGithubActionsDeployment(d) && build.name !== hostName
+		build && !isGithubActionsDeployment(d) && build.serverId !== host?.serverId
 			? { name: build.name, type: build.serverType ?? null }
 			: null;
 	return { hostName, hostType: host?.serverType ?? null, builtOn };
