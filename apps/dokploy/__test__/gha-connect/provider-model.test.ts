@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-	type ConnectForm,
 	COMPOSE_PIN_HINT,
+	type ConnectForm,
 	connectFormProblem,
 	DEFAULT_WORKFLOW_PATH,
 	defaultConnectForm,
@@ -413,7 +413,9 @@ describe("the status panel", () => {
 			composeFile: `services:\n  web:\n    image: ghcr.io/acme/shop/web@${D}\n`,
 		});
 		expect(pinned?.hint).toBeUndefined();
-		expect(panelImageOfConnection(conn(), "application", {})?.hint).toBeUndefined();
+		expect(
+			panelImageOfConnection(conn(), "application", {})?.hint,
+		).toBeUndefined();
 	});
 
 	it("builds the workflow and refuses Connect from the same derivation", () => {

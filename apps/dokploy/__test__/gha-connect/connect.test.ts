@@ -264,10 +264,11 @@ describe("planConnect", () => {
 		});
 
 		it("looks at the stored image whatever the source is: a git application with a stale off-namespace image is refused", async () => {
-			const stale = (dockerImage: string | null): ServiceFacts => ({
-				...githubApp,
-				dockerImage,
-			}) as ServiceFacts;
+			const stale = (dockerImage: string | null): ServiceFacts =>
+				({
+					...githubApp,
+					dockerImage,
+				}) as ServiceFacts;
 			expect(await plan(stale("nginx:latest"))).toMatchObject({
 				ok: false,
 				code: "image",
