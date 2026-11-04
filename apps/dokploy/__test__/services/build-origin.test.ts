@@ -9,6 +9,7 @@ import {
 	hasGithubActionsTitleMarker,
 	inferBuildOriginFromSource,
 	isGithubActionsDeployment,
+	isGithubActionsPillInteractive,
 	isGithubActionsRollbackTitle,
 	normalizeBuildRunUrl,
 	pickServiceBuildOrigin,
@@ -731,5 +732,48 @@ describe("githubActionsRunsOf", () => {
 		for (const origin of ["dokploy", "external", null, undefined]) {
 			expect(githubActionsRunsOf(all, origin)).toEqual(all);
 		}
+	});
+});
+
+describe("isGithubActionsPillInteractive", () => {
+	test("is inert while the service waits for its first release", () => {
+		expect(
+			isGithubActionsPillInteractive({ waitingForFirstRelease: true }),
+		).toBe(false);
+	});
+
+	test("is clickable once a run exists", () => {
+		expect(
+			isGithubActionsPillInteractive({ waitingForFirstRelease: false }),
+		).toBe(true);
+		expect(isGithubActionsPillInteractive({})).toBe(true);
+	});
+
+	test("is clickable for a Dokploy origin and for a deployed-at-only release", () => {
+		expect(
+			isGithubActionsPillInteractive(
+				describeGithubActionsOriginPill({ buildOrigin: "dokploy" }),
+			),
+		).toBe(true);
+		expect(
+			isGithubActionsPillInteractive(
+				describeGithubActionsOriginPill({
+					buildOrigin: "github-actions",
+					buildDeployedAt: "2026-11-04T00:00:00.000Z",
+				}),
+			),
+		).toBe(true);
+	});
+
+	test("follows describeGithubActionsOriginPill", () => {
+		const waiting = describeGithubActionsOriginPill({
+			buildOrigin: "github-actions",
+		});
+		expect(isGithubActionsPillInteractive(waiting)).toBe(false);
+		const released = describeGithubActionsOriginPill({
+			buildOrigin: "github-actions",
+			buildRunId: "42",
+		});
+		expect(isGithubActionsPillInteractive(released)).toBe(true);
 	});
 });

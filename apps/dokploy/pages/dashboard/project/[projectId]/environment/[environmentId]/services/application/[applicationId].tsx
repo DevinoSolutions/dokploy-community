@@ -133,7 +133,7 @@ const Service = (
 				<Card className="h-full bg-sidebar p-2.5 rounded-xl w-full">
 					<div className="rounded-xl bg-background shadow-md ">
 						<CardHeader className="flex flex-row justify-between items-center">
-							<div className="flex flex-col">
+							<div className="flex flex-col min-w-0">
 								<CardTitle className="text-xl flex flex-row gap-2 items-center">
 									<div className="relative flex flex-row gap-4 items-center">
 										<ShowIconSettings
@@ -155,8 +155,8 @@ const Service = (
 									{data?.appName}
 								</span>
 							</div>
-							<div className="flex flex-col h-fit w-fit gap-2">
-								<div className="flex flex-row h-fit w-fit gap-2">
+							<div className="flex flex-col h-fit w-fit min-w-0 gap-2">
+								<div className="flex flex-row h-fit w-fit max-w-full min-w-0 gap-2">
 									<Badge
 										className="cursor-pointer"
 										onClick={() => {

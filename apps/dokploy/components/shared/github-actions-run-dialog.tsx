@@ -16,6 +16,7 @@ import {
 	githubActionsRunsOf,
 	githubCommitUrl,
 	githubRepositoryUrl,
+	isGithubActionsPillInteractive,
 	isLiveGithubBuild,
 	normalizeBuildRunUrl,
 	pickNewerLiveGithubDeployment,
@@ -577,15 +578,25 @@ export const GithubActionsRunPill = ({
 	const [open, setOpen] = useState(false);
 	const [logs, setLogs] = useState<LogRequest | null>(null);
 
-	// No release has arrived: there is no run to open, so the pill only says what Dokploy waits for.
-	if (waitingForFirstRelease) {
+	// No release has arrived: there is no run to open, so the pill only says what Dokploy waits for. It is a plain,
+	// inert badge (no button, no hover, no click) that shrinks and truncates inside a narrow header (390 px).
+	if (!isGithubActionsPillInteractive({ waitingForFirstRelease })) {
 		return (
 			<TooltipProvider delayDuration={0}>
 				<Tooltip>
 					<TooltipTrigger asChild>
-						<Badge variant="outline" className={className}>
-							<GithubIcon />
-							{GITHUB_ACTIONS_WAITING_PILL_LABEL}
+						<Badge
+							variant="outline"
+							className={cn(
+								"min-w-0 max-w-full shrink cursor-default",
+								className,
+							)}
+							title={GITHUB_ACTIONS_WAITING_PILL_LABEL}
+						>
+							<GithubIcon className="shrink-0" />
+							<span className="min-w-0 truncate">
+								{GITHUB_ACTIONS_WAITING_PILL_LABEL}
+							</span>
 						</Badge>
 					</TooltipTrigger>
 					<TooltipContent className="z-999 max-w-[320px]">
