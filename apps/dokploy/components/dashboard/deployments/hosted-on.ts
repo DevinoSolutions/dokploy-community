@@ -1,6 +1,9 @@
 import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
 
-type ServerRef = { name: string; serverType?: string | null } | null | undefined;
+type ServerRef =
+	| { name: string; serverType?: string | null }
+	| null
+	| undefined;
 
 export type HostedOnInput = {
 	buildOrigin?: string | null;

@@ -334,7 +334,9 @@ export function ShowDeploymentsTable() {
 					</Button>
 				),
 				cell: ({ row }: { row: { original: DeploymentRow } }) => {
-					const { hostName, hostType, builtOn } = describeHostedOn(row.original);
+					const { hostName, hostType, builtOn } = describeHostedOn(
+						row.original,
+					);
 					return (
 						<div className="flex flex-col gap-0.5 text-sm">
 							<div className="flex items-center gap-1.5 flex-wrap">
