@@ -12,6 +12,8 @@ import {
 	extractComposeImages,
 	githubActionsBranch,
 	githubCommitUrl,
+	GITHUB_ACTIONS_PILL_LABEL,
+	GITHUB_ACTIONS_WAITING_PILL_LABEL,
 	githubRepositoryUrl,
 	isLiveGithubBuild,
 	normalizeBuildRunUrl,
@@ -553,6 +555,8 @@ interface Props {
 	service: GithubActionsRunService;
 	/** The deployment row the pill sits on. Left out on the service page, where the run that is deployed now shows. */
 	deployment?: GithubActionsRunRow;
+	/** The service is connected but no release has arrived: the pill says so (and has no run to open yet). */
+	waitingForFirstRelease?: boolean;
 	className?: string;
 }
 
@@ -564,6 +568,7 @@ interface Props {
 export const GithubActionsRunPill = ({
 	service,
 	deployment,
+	waitingForFirstRelease = false,
 	className,
 }: Props) => {
 	const [open, setOpen] = useState(false);
@@ -589,13 +594,16 @@ export const GithubActionsRunPill = ({
 							)}
 						>
 							<GithubIcon />
-							GitHub Actions
+							{waitingForFirstRelease
+								? GITHUB_ACTIONS_WAITING_PILL_LABEL
+								: GITHUB_ACTIONS_PILL_LABEL}
 						</button>
 					</TooltipTrigger>
 					<TooltipContent className="z-999 max-w-[320px]">
 						<span>
-							Built and deployed by GitHub Actions. Click for the run, the image
-							and the logs.
+							{waitingForFirstRelease
+								? "Connected to GitHub Actions. The first release has not arrived yet; push to the tracked branch or press Check now on the Provider tab."
+								: "Built and deployed by GitHub Actions. Click for the run, the image and the logs."}
 						</span>
 					</TooltipContent>
 				</Tooltip>

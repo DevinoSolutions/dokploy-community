@@ -45,7 +45,13 @@ export const BuildOriginBadge = ({
 }: Props) => {
 	if (!isBuildOrigin(buildOrigin)) return null;
 	if (buildOrigin === "github-actions" && service) {
-		return <GithubActionsRunPill service={service} className={className} />;
+		return (
+			<GithubActionsRunPill
+				service={service}
+				waitingForFirstRelease={waitingForFirstRelease}
+				className={className}
+			/>
+		);
 	}
 	const { label, description } = BUILD_ORIGIN_LABELS[buildOrigin];
 

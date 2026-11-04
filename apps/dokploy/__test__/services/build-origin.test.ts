@@ -587,3 +587,96 @@ describe("isGithubActionsDeployment", () => {
 		).toBe(false);
 	});
 });
+
+describe("a service that follows GitHub Actions (source type github-actions)", () => {
+	const application = { kind: "application", sourceType: "github-actions" } as const;
+	const composeService = {
+		kind: "compose",
+		sourceType: "github-actions",
+		hasBuildSection: false,
+	} as const;
+
+	test("is built in GitHub Actions before any release arrived, not on Dokploy", () => {
+		expect(pickServiceBuildOrigin([], application)).toEqual({
+			buildOrigin: "github-actions",
+			buildRunUrl: null,
+		});
+		expect(pickServiceBuildOrigin([], composeService).buildOrigin).toBe(
+			"github-actions",
+		);
+		// A compose file with build: sections is no reason to call it a Dokploy build once it is connected.
+		expect(
+			pickServiceBuildOrigin([], { ...composeService, hasBuildSection: true })
+				.buildOrigin,
+		).toBe("github-actions");
+	});
+
+	test("rows from before it was connected (built by Dokploy) do not count", () => {
+		const before = row({ buildOrigin: "dokploy", title: "Manual deployment" });
+		expect(pickServiceBuildOrigin([before], application)).toEqual({
+			buildOrigin: "github-actions",
+			buildRunUrl: null,
+		});
+	});
+
+	test("takes the run link of the newest release", () => {
+		const release = row({
+			buildOrigin: "github-actions",
+			buildRunUrl: RUN,
+			title: "GHA production abcdef12 [run 5.1]",
+			createdAt: "2026-11-03T10:00:00.000Z",
+		});
+		const before = row({
+			buildOrigin: "dokploy",
+			createdAt: "2026-11-04T10:00:00.000Z",
+		});
+		expect(pickServiceBuildOrigin([before, release], application)).toEqual({
+			buildOrigin: "github-actions",
+			buildRunUrl: RUN,
+		});
+	});
+
+	test("describeServiceBuild has no run details and no deploy time while waiting", () => {
+		const described = describeServiceBuild([], application);
+		expect(described.buildOrigin).toBe("github-actions");
+		expect(described.buildDeployedAt).toBeNull();
+		expect(described.buildRunId).toBeNull();
+	});
+});
+
+describe("describeGithubActionsOriginPill", () => {
+	test("a connected service with no release yet waits for the first release", () => {
+		expect(describeGithubActionsOriginPill({ buildOrigin: "github-actions" })).toEqual({
+			label: "GitHub Actions · waiting for the first release",
+			waitingForFirstRelease: true,
+		});
+		expect(
+			describeGithubActionsOriginPill({
+				buildOrigin: "github-actions",
+				buildDeployedAt: null,
+				buildRunUrl: null,
+				buildCommitSha: null,
+				buildRunId: null,
+			}).waitingForFirstRelease,
+		).toBe(true);
+	});
+
+	test.each([
+		["a deploy time", { buildDeployedAt: "2026-11-03T10:00:00.000Z" }],
+		["a run link", { buildRunUrl: RUN }],
+		["a commit", { buildCommitSha: "abcdef12" }],
+		["a run id", { buildRunId: "123456789" }],
+	])("says just GitHub Actions once there is %s", (_name, fields) => {
+		expect(
+			describeGithubActionsOriginPill({ buildOrigin: "github-actions", ...fields }),
+		).toEqual({ label: "GitHub Actions", waitingForFirstRelease: false });
+	});
+
+	test("never waits for any other origin", () => {
+		for (const buildOrigin of ["dokploy", "external", null, undefined]) {
+			expect(
+				describeGithubActionsOriginPill({ buildOrigin }).waitingForFirstRelease,
+			).toBe(false);
+		}
+	});
+});

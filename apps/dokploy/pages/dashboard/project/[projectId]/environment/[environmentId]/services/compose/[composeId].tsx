@@ -1,4 +1,5 @@
 import { validateRequest } from "@dokploy/server/lib/auth";
+import { describeGithubActionsOriginPill } from "@dokploy/server/services/build-origin-shared";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import copy from "copy-to-clipboard";
 import {
@@ -270,6 +271,10 @@ const Service = (
 										</Badge>
 										<BuildOriginBadge
 											buildOrigin={data?.buildOrigin}
+											waitingForFirstRelease={
+												describeGithubActionsOriginPill(data ?? {})
+													.waitingForFirstRelease
+											}
 											service={{ type: "compose", id: composeId }}
 										/>
 										{data?.server?.serverStatus === "inactive" && (
