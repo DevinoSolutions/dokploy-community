@@ -52,7 +52,11 @@ type Job = {
 	outputs?: Record<string, string>;
 	steps?: Step[];
 };
-type Workflow = { jobs: Record<string, Job>; permissions?: object };
+type Workflow = {
+	on?: { push?: { branches?: unknown[] } };
+	jobs: Record<string, Job>;
+	permissions?: object;
+};
 
 const releaseSteps = (jobs: Record<string, Job>) =>
 	Object.values(jobs)
@@ -121,7 +125,7 @@ describe("buildWorkflowSnippet, build mode (the whole workflow)", () => {
 		expect(Object.keys(whole.jobs)).toEqual(["build", "release"]);
 		expect(whole.jobs.release?.needs).toBe("build");
 		expect(whole.jobs.release?.environment).toBe("development");
-		expect(result.yaml).toContain("branches: [dev]");
+		expect(result.yaml).toContain("branches: ['dev']");
 		expect(result.yaml).toContain("workflow_dispatch:");
 		expect(result.yaml.endsWith("\n")).toBe(true);
 	});
@@ -205,7 +209,7 @@ describe("buildWorkflowSnippet, build mode: what a pull request or another branc
 		expect(workflow.jobs.release?.if).toBe(
 			"github.ref == 'refs/heads/release/2'",
 		);
-		expect(result.yaml).toContain("branches: [release/2]");
+		expect(result.yaml).toContain("branches: ['release/2']");
 	});
 
 	it("scopes the build cache to the service key", () => {
@@ -215,6 +219,52 @@ describe("buildWorkflowSnippet, build mode: what a pull request or another branc
 		const push = workflow.jobs.build?.steps?.[3]?.with;
 		expect(push?.["cache-from"]).toBe("type=gha,scope=api.v2");
 		expect(push?.["cache-to"]).toBe("type=gha,mode=max,scope=api.v2");
+	});
+});
+
+describe("the image the whole workflow pushes", () => {
+	it("is the repository the service already runs, when it is inside ghcr.io/<owner>/<repo>/", () => {
+		const result = buildWorkflowSnippet({
+			...build,
+			image: "ghcr.io/acme/shop/storefront",
+		});
+		if (!result.ok) throw new Error("unreachable");
+		const workflow = parse(result.yaml) as Workflow;
+		expect(workflow.jobs.build?.outputs?.image).toBe(
+			"ghcr.io/acme/shop/storefront@${{ steps.build.outputs.digest }}",
+		);
+		expect(workflow.jobs.build?.steps?.[3]?.with?.tags).toBe(
+			"ghcr.io/acme/shop/storefront:${{ github.sha }}",
+		);
+	});
+
+	it("is ghcr.io/<owner>/<repo>/<service key> when the service runs nothing of its own", () => {
+		const result = buildWorkflowSnippet(build);
+		if (!result.ok) throw new Error("unreachable");
+		expect(result.yaml).toContain("ghcr.io/acme/shop/web@");
+	});
+
+	it.each([
+		["another owner", "ghcr.io/org/app"],
+		["another repository", "ghcr.io/acme/other/web"],
+		["the namespace itself", "ghcr.io/acme/shop/"],
+		["a preview image", "ghcr.io/acme/shop/preview/pr-1"],
+		["another registry", "localhost:5000/registry.devino.ca/shop/web"],
+		["a path escape", "ghcr.io/acme/shop/../x"],
+		["text a workflow cannot take", "ghcr.io/acme/shop/web; rm -rf /"],
+	])("refuses %s", (_name, image) => {
+		expect(buildWorkflowSnippet({ ...build, image }).ok).toBe(false);
+	});
+});
+
+describe("the tracked branch is a string in the workflow", () => {
+	it("stays one when it looks like a number", () => {
+		const result = buildWorkflowSnippet({ ...build, branch: "1.0" });
+		if (!result.ok) throw new Error("unreachable");
+		expect(result.yaml).toContain("branches: ['1.0']");
+		const workflow = parse(result.yaml) as Workflow;
+		expect(workflow.on?.push?.branches).toEqual(["1.0"]);
+		expect(workflow.jobs.release?.if).toBe("github.ref == 'refs/heads/1.0'");
 	});
 });
 
@@ -256,8 +306,19 @@ describe("buildWorkflowSnippet, existing mode (one job)", () => {
 			contents: "read",
 			deployments: "write",
 		});
-		expect(result.yaml).toContain("if: github.ref == 'refs/heads/dev'");
+		expect(release?.if).toBe("github.ref == 'refs/heads/dev'");
+		expect(result.yaml).toContain("    if: github.ref == 'refs/heads/dev'");
 		expect(result.yaml).not.toMatch(/DOKPLOY_(API_KEY|URL)/);
+	});
+
+	it("follows the tracked branch it is generated for, like the whole workflow", () => {
+		const result = buildWorkflowSnippet({ ...existing, branch: "release/2" });
+		if (!result.ok) throw new Error("unreachable");
+		const workflow = parse(`jobs:
+${result.yaml}`) as Workflow;
+		expect(workflow.jobs["dokploy-release"]?.if).toBe(
+			"github.ref == 'refs/heads/release/2'",
+		);
 	});
 });
 

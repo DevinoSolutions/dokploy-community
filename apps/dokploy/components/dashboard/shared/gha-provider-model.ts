@@ -8,6 +8,11 @@ import {
 	redeployHint,
 } from "@dokploy/server/services/gha-connect/provider";
 import {
+	deriveReleaseImage,
+	expectedImageRepository,
+	type ReleaseImage,
+} from "@dokploy/server/services/gha-connect/release-image";
+import {
 	addWorkflowNames,
 	type GateMode,
 	gateFormProblem,
@@ -179,7 +184,7 @@ export const toConnectInput = (
 };
 
 /** The input of `ghaConnection.snippet`. Call only when `snippetProblem` is null. */
-export const toSnippetInput = (form: ConnectForm) => {
+export const toSnippetInput = (form: ConnectForm, image?: string) => {
 	const base = {
 		serviceKey: effectiveServiceKey(form),
 		trackedBranch: form.trackedBranch.trim(),
@@ -193,6 +198,7 @@ export const toSnippetInput = (form: ConnectForm) => {
 				repository: form.repository.trim(),
 				dockerfile: form.dockerfile.trim(),
 				context: form.context.trim(),
+				...(image ? { image } : {}),
 			}
 		: {
 				...base,
@@ -313,35 +319,101 @@ export const relativeTime = (
 	return `${days} days ago`;
 };
 
+/** What a service runs now, as the service reads return it. */
+export type RunningImage = {
+	dockerImage?: string | null;
+	composeFile?: string | null;
+};
+
 /**
- * The image name the connection's workflow produces (`ghcr.io/<owner>/<repo>/<key>`, under the registry prefix when
- * the images are mirrored). It is what the panel names until the service runs an image of its own.
+ * The image repository the form's workflow will build and a release will pin, from the ONE derivation the server
+ * uses too (`deriveReleaseImage`). Null while the repository or the key is not valid yet.
  */
-export const expectedReleaseImage = (
+export const releaseImageOfForm = (
+	form: ConnectForm,
+	type: ServiceKind,
+	running: RunningImage,
+): ReleaseImage | null => {
+	const parsed = parseRepository(form.repository);
+	const serviceKey = effectiveServiceKey(form);
+	if (!parsed || !KEY.test(serviceKey)) return null;
+	return deriveReleaseImage({
+		kind: type,
+		owner: parsed.owner,
+		repo: parsed.repo,
+		registryPrefix: isMirrored(form) ? form.registryPrefix.trim() || null : null,
+		serviceKey,
+		...running,
+	});
+};
+
+/**
+ * The repository the generated workflow pushes when the service already runs one inside the namespace; undefined
+ * otherwise (the workflow then pushes ghcr.io/<owner>/<repo>/<service key>).
+ */
+export const workflowImageOfForm = (
+	form: ConnectForm,
+	type: ServiceKind,
+	running: RunningImage,
+): string | undefined => {
+	const image = releaseImageOfForm(form, type, running);
+	if (!image?.ok || image.source !== "running") return undefined;
+	const parsed = parseRepository(form.repository);
+	const prefix = `ghcr.io/${parsed?.owner.toLowerCase()}/${parsed?.repo.toLowerCase()}/`;
+	const ghcr = image.repositories.filter((name) =>
+		name.toLowerCase().startsWith(prefix),
+	);
+	if (ghcr.length === 0) return undefined;
+	const expected = `${prefix}${effectiveServiceKey(form)}`;
+	return ghcr.find((name) => name.toLowerCase() === expected) ?? ghcr[0];
+};
+
+/** The sentence that stops Connect because the service runs an image no release can replace; null otherwise. */
+export const runningImageProblem = (
+	form: ConnectForm,
+	type: ServiceKind,
+	running: RunningImage,
+): string | null => {
+	const image = releaseImageOfForm(form, type, running);
+	return image && !image.ok ? image.message : null;
+};
+
+/** What the Image row of the status panel shows: the repositories and whether they are what runs or a guess. */
+export type PanelImage = {
+	repositories: string[];
+	source: "running" | "expected";
+};
+
+export const panelImageOfConnection = (
 	connection: Pick<
 		ProviderConnection,
 		"repository" | "serviceKey" | "registryPrefix"
 	>,
-): string | null => {
+	type: ServiceKind,
+	running: RunningImage,
+): PanelImage | null => {
 	const parsed = parseRepository(connection.repository);
-	const key = connection.serviceKey.trim().toLowerCase();
-	if (!parsed || key === "") return null;
-	const repo = parsed.repo.toLowerCase();
-	const prefix = connection.registryPrefix
-		?.trim()
-		.replace(/\/+$/, "")
-		.toLowerCase();
-	return prefix
-		? `${prefix}/${repo}/${key}`
-		: `ghcr.io/${parsed.owner.toLowerCase()}/${repo}/${key}`;
+	const serviceKey = connection.serviceKey.trim();
+	if (!parsed || serviceKey === "") return null;
+	const input = {
+		owner: parsed.owner,
+		repo: parsed.repo,
+		registryPrefix: connection.registryPrefix?.trim() || null,
+		serviceKey,
+	};
+	const image = deriveReleaseImage({ kind: type, ...input, ...running });
+	// A running image outside the namespaces cannot be replaced by a release: the row names the expected one.
+	return image.ok
+		? { repositories: image.repositories, source: image.source }
+		: { repositories: [expectedImageRepository(input)], source: "expected" };
 };
 
 /** The facts under the pill, in reading order. A row is left out when the value is not known. */
 export const providerDetailRows = (
 	connection: ProviderConnection,
 	now: Date = new Date(),
-	/** The image name(s) a release will pin (`releaseImageRepositories`); the row is left out when there are none. */
-	images: readonly string[] = [],
+	/** The image a release will pin (`panelImageOfConnection`); the row is left out when it is not known. */
+	image: PanelImage | null = null,
 ): DetailRow[] => {
 	const rows: DetailRow[] = [
 		{
@@ -369,10 +441,16 @@ export const providerDetailRows = (
 			mono: false,
 		},
 	];
-	if (images.length > 0) {
+	if (image && image.repositories.length > 0) {
+		// A guess at <namespace>/<service key> is said to be one; what the service runs is not.
 		rows.push({
-			label: images.length === 1 ? "Image" : "Images",
-			value: images.join(", "),
+			label:
+				image.source === "expected"
+					? "Expected image"
+					: image.repositories.length === 1
+						? "Image"
+						: "Images",
+			value: image.repositories.join(", "),
 			href: null,
 			mono: true,
 		});

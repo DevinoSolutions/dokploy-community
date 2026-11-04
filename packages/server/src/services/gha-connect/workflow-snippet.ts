@@ -38,6 +38,11 @@ export type SnippetInput = {
 			dockerfile: string;
 			/** Build context directory; `.` is the repository root. */
 			context: string;
+			/**
+			 * The GHCR repository the workflow pushes (`deriveReleaseImage`): the repository the service already runs, when
+			 * it is inside ghcr.io/<owner>/<repo>/. Defaults to ghcr.io/<owner>/<repo>/<service key>.
+			 */
+			image?: string;
 	  }
 	| {
 			mode: "existing";
@@ -61,6 +66,7 @@ export type SnippetResult =
 const SAFE = /^[A-Za-z0-9._/-]+$/;
 const JOB = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const KEY = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+const IMAGE = /^[a-z0-9][a-z0-9._/-]*$/;
 const REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
 const bad = (error: string): SnippetResult => ({ ok: false, error });
@@ -155,12 +161,22 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 		return bad("The build context has characters a workflow cannot take.");
 	}
 	// GHCR names are lower case. The digest comes from the push, so the release names the image exactly.
-	const image = `ghcr.io/${input.repository.toLowerCase()}/${input.serviceKey}`;
+	const namespace = `ghcr.io/${input.repository.toLowerCase()}/`;
+	const image = input.image?.trim() || `${namespace}${input.serviceKey}`;
+	if (
+		!IMAGE.test(image) ||
+		image.includes("..") ||
+		!image.toLowerCase().startsWith(namespace) ||
+		image.slice(namespace.length).startsWith("preview/")
+	) {
+		return bad(`The image must be a repository under ${namespace}.`);
+	}
 	const yaml = [
 		"name: Dokploy",
 		"on:",
 		"  push:",
-		`    branches: [${input.branch}]`,
+		// Quoted: a branch such as 1.0 would otherwise be read as a number.
+		`    branches: ['${input.branch}']`,
 		"  workflow_dispatch:",
 		"concurrency:",
 		`  group: dokploy-${expr("github.workflow")}-${expr("github.ref")}`,

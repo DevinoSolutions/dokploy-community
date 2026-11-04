@@ -5,6 +5,7 @@ import {
 	computeServiceBuildOrigins,
 	describeGithubActionsOriginPill,
 	describeServiceBuild,
+	githubActionsRunsOf,
 	hasGithubActionsTitleMarker,
 	inferBuildOriginFromSource,
 	isGithubActionsDeployment,
@@ -687,6 +688,48 @@ describe("describeGithubActionsOriginPill", () => {
 			expect(
 				describeGithubActionsOriginPill({ buildOrigin }).waitingForFirstRelease,
 			).toBe(false);
+		}
+	});
+});
+
+describe("githubActionsRunsOf", () => {
+	const dokployBuild = {
+		deploymentId: "d1",
+		buildOrigin: "dokploy",
+		title: "Manual deployment",
+	};
+	const oldRun = {
+		deploymentId: "d2",
+		buildOrigin: null,
+		title: "GHA production abcdef12 [run 5.1]",
+	};
+	const run = {
+		deploymentId: "d3",
+		buildOrigin: "github-actions",
+		title: "GHA production abcdef12",
+	};
+	const manual = {
+		deploymentId: "d4",
+		buildOrigin: null,
+		title: "Manual deployment",
+	};
+
+	test("a GitHub Actions service shows only its runs, not the builds Dokploy made before it was connected", () => {
+		expect(
+			githubActionsRunsOf(
+				[dokployBuild, oldRun, run, manual],
+				"github-actions",
+			).map((row) => row.deploymentId),
+		).toEqual(["d2", "d3"]);
+		expect(githubActionsRunsOf([dokployBuild, manual], "github-actions")).toEqual(
+			[],
+		);
+	});
+
+	test("any other service keeps every row", () => {
+		const all = [dokployBuild, oldRun, run, manual];
+		for (const origin of ["dokploy", "external", null, undefined]) {
+			expect(githubActionsRunsOf(all, origin)).toEqual(all);
 		}
 	});
 });

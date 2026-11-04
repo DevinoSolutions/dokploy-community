@@ -1,5 +1,4 @@
 import { githubNewFileUrl } from "@dokploy/server/services/gha-connect/workflow-snippet";
-import { releaseImageRepositories } from "@dokploy/server/services/github-deployments/service-image";
 import { Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { createContext, useContext, useId, useState } from "react";
@@ -30,14 +29,16 @@ import {
 	effectiveServiceKey,
 	effectiveWorkflowPath,
 	environmentAdvice,
-	expectedReleaseImage,
 	isMirrored,
 	type PillTone,
+	panelImageOfConnection,
 	providerDetailRows,
+	runningImageProblem,
 	type ServiceKind,
 	snippetProblem,
 	toConnectInput,
 	toSnippetInput,
+	workflowImageOfForm,
 } from "./gha-provider-model";
 
 interface Props {
@@ -157,13 +158,11 @@ const ConnectedView = ({
 		{ composeId: id },
 		{ enabled: type === "compose" },
 	);
-	const images = releaseImageRepositories({
-		kind: type,
+	const image = panelImageOfConnection(connection, type, {
 		dockerImage: application?.dockerImage,
 		composeFile: composeService?.composeFile,
-		expected: expectedReleaseImage(connection),
 	});
-	const rows = providerDetailRows(connection, new Date(), images);
+	const rows = providerDetailRows(connection, new Date(), image);
 
 	return (
 		<div className="flex flex-col gap-4 p-2">
@@ -297,9 +296,24 @@ const ConnectFlow = ({
 	const mode = effectiveMode(form);
 	const mirrored = isMirrored(form);
 	const snippetInvalid = snippetProblem(form);
-	const problem = connectFormProblem(form);
+	// What the service runs decides the image the workflow pushes and whether a release can ever replace it.
+	const { data: runningApplication } = api.application.one.useQuery(
+		{ applicationId: id },
+		{ enabled: type === "application" },
+	);
+	const { data: runningCompose } = api.compose.one.useQuery(
+		{ composeId: id },
+		{ enabled: type === "compose" },
+	);
+	const running = {
+		dockerImage: runningApplication?.dockerImage,
+		composeFile: runningCompose?.composeFile,
+	};
+	// A running image no release could replace stops Connect here, as it does on the server.
+	const problem =
+		connectFormProblem(form) ?? runningImageProblem(form, type, running);
 	const { data: snippet } = api.ghaConnection.snippet.useQuery(
-		toSnippetInput(form),
+		toSnippetInput(form, workflowImageOfForm(form, type, running)),
 		{ enabled: snippetInvalid === null, retry: false },
 	);
 
@@ -363,14 +377,7 @@ const ConnectFlow = ({
 			<div className="flex min-h-[25vh] flex-col items-center justify-center gap-3 text-center">
 				<span className="text-base text-muted-foreground">
 					To follow GitHub Actions releases, connect a GitHub account first.
-					Please, go to{" "}
-					<Link
-						href="/dashboard/settings/git-providers"
-						className="text-foreground underline"
-					>
-						Settings
-					</Link>{" "}
-					to do so.
+					It is added under Settings, Git providers.
 				</span>
 				<Button variant="secondary" asChild>
 					<Link href="/dashboard/settings/git-providers">

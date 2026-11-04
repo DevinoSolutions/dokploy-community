@@ -8,16 +8,18 @@ import {
 	effectiveMode,
 	effectiveServiceKey,
 	effectiveWorkflowPath,
-	expectedReleaseImage,
 	keyFromRepository,
 	opensOnGithubActions,
+	panelImageOfConnection,
 	type ProviderConnection,
 	providerDetailRows,
 	redeployCopy,
 	relativeTime,
+	runningImageProblem,
 	snippetProblem,
 	toConnectInput,
 	toSnippetInput,
+	workflowImageOfForm,
 } from "@/components/dashboard/shared/gha-provider-model";
 
 const filled = (patch: Partial<ConnectForm> = {}): ConnectForm => ({
@@ -308,50 +310,127 @@ describe("the status panel", () => {
 		expect(relativeTime(null, now)).toBeNull();
 	});
 
-	it("shows the image name(s) a release will pin, for an application and a compose stack alike", () => {
-		const one = providerDetailRows(conn(), new Date(), [
-			"ghcr.io/acme/shop/web",
-		]);
-		expect(one.map((row) => row.label)).toContain("Image");
+	it("shows what a release will pin as Image(s), and a guess as Expected image", () => {
+		const one = providerDetailRows(conn(), new Date(), {
+			repositories: ["ghcr.io/acme/shop/web"],
+			source: "running",
+		});
 		expect(one.find((row) => row.label === "Image")).toMatchObject({
 			value: "ghcr.io/acme/shop/web",
 			mono: true,
 			href: null,
 		});
-		const several = providerDetailRows(conn(), new Date(), [
-			"ghcr.io/acme/shop/web",
-			"ghcr.io/acme/shop/worker",
-		]);
+		const several = providerDetailRows(conn(), new Date(), {
+			repositories: ["ghcr.io/acme/shop/web", "ghcr.io/acme/shop/worker"],
+			source: "running",
+		});
 		expect(several.find((row) => row.label === "Images")?.value).toBe(
 			"ghcr.io/acme/shop/web, ghcr.io/acme/shop/worker",
 		);
 		// The image row sits with the facts of the setup, before what was deployed.
 		expect(several.map((row) => row.label).indexOf("Images")).toBe(4);
+		const guess = providerDetailRows(conn(), new Date(), {
+			repositories: ["ghcr.io/acme/shop/web"],
+			source: "expected",
+		});
+		expect(guess.map((row) => row.label)).toContain("Expected image");
+		expect(guess.map((row) => row.label)).not.toContain("Image");
 		expect(providerDetailRows(conn()).map((row) => row.label)).not.toContain(
 			"Image",
 		);
 	});
 
-	it("names the image the workflow produces, under the registry prefix when mirrored", () => {
+	it("names the image from what the service runs, else the expected one (mirrored or not)", () => {
+		const D = `sha256:${"a".repeat(64)}`;
+		// (a) running inside the namespace: that repository.
 		expect(
-			expectedReleaseImage({
-				repository: "Acme/Shop",
-				serviceKey: "Web",
-				registryPrefix: null,
+			panelImageOfConnection(conn(), "application", {
+				dockerImage: `ghcr.io/acme/shop/storefront@${D}`,
 			}),
-		).toBe("ghcr.io/acme/shop/web");
+		).toEqual({
+			repositories: ["ghcr.io/acme/shop/storefront"],
+			source: "running",
+		});
+		// (c) nothing running yet: the expected name, labelled as a guess.
+		expect(panelImageOfConnection(conn(), "application", {})).toEqual({
+			repositories: ["ghcr.io/acme/shop/shop"],
+			source: "expected",
+		});
 		expect(
-			expectedReleaseImage({
-				repository: "acme/shop",
-				serviceKey: "web",
-				registryPrefix: "localhost:5000/registry.devino.ca/",
+			panelImageOfConnection(
+				conn({ registryPrefix: "localhost:5000/registry.devino.ca/" }),
+				"application",
+				{},
+			),
+		).toEqual({
+			repositories: ["localhost:5000/registry.devino.ca/shop/shop"],
+			source: "expected",
+		});
+		// Outside the namespace (a release can never replace it): never named as the image.
+		expect(
+			panelImageOfConnection(conn(), "application", {
+				dockerImage: `ghcr.io/org/app@${D}`,
 			}),
-		).toBe("localhost:5000/registry.devino.ca/shop/web");
+		).toEqual({
+			repositories: ["ghcr.io/acme/shop/shop"],
+			source: "expected",
+		});
+		// A compose stack: the pinned images inside the namespace.
 		expect(
-			expectedReleaseImage({
-				repository: "nonsense",
-				serviceKey: "web",
-				registryPrefix: null,
+			panelImageOfConnection(
+				conn({ registryPrefix: "localhost:5000/registry.devino.ca" }),
+				"compose",
+				{
+					composeFile: `services:\n  web:\n    image: localhost:5000/registry.devino.ca/shop/web@${D}\n  db:\n    image: postgres@${D}\n`,
+				},
+			),
+		).toEqual({
+			repositories: ["localhost:5000/registry.devino.ca/shop/web"],
+			source: "running",
+		});
+		expect(
+			panelImageOfConnection(
+				conn({ repository: "nonsense" }),
+				"application",
+				{},
+			),
+		).toBeNull();
+	});
+
+	it("builds the workflow and refuses Connect from the same derivation", () => {
+		const D = `sha256:${"a".repeat(64)}`;
+		const form = filled({ repository: "acme/shop", serviceKey: "web" });
+		// Running inside ghcr.io/acme/shop/: the workflow pushes that repository.
+		const inside = { dockerImage: `ghcr.io/acme/shop/storefront@${D}` };
+		expect(workflowImageOfForm(form, "application", inside)).toBe(
+			"ghcr.io/acme/shop/storefront",
+		);
+		expect(toSnippetInput(form, "ghcr.io/acme/shop/storefront")).toMatchObject({
+			mode: "build",
+			image: "ghcr.io/acme/shop/storefront",
+		});
+		expect(runningImageProblem(form, "application", inside)).toBeNull();
+		// Nothing running: the default name, no image sent.
+		expect(workflowImageOfForm(form, "application", {})).toBeUndefined();
+		expect(toSnippetInput(form)).not.toHaveProperty("image");
+		// Outside it: no image to build, and a sentence that stops Connect.
+		for (const dockerImage of [`ghcr.io/org/app@${D}`, "nginx:latest"]) {
+			expect(
+				workflowImageOfForm(form, "application", { dockerImage }),
+			).toBeUndefined();
+			expect(
+				runningImageProblem(form, "application", { dockerImage }),
+			).toMatch(/outside ghcr\.io\/acme\/shop\//);
+		}
+		// A compose stack in the mirror namespace connects without refusal.
+		const mirrored = filled({
+			repository: "acme/shop",
+			registryId: "reg-1",
+			registryPrefix: "localhost:5000/registry.devino.ca",
+		});
+		expect(
+			runningImageProblem(mirrored, "compose", {
+				composeFile: `services:\n  web:\n    image: localhost:5000/registry.devino.ca/shop/web@${D}\n`,
 			}),
 		).toBeNull();
 	});

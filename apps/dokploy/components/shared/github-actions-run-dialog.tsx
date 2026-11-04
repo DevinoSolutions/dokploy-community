@@ -14,6 +14,7 @@ import {
 	GITHUB_ACTIONS_WAITING_PILL_LABEL,
 	githubActionsBranch,
 	githubCommitUrl,
+	githubActionsRunsOf,
 	githubRepositoryUrl,
 	isLiveGithubBuild,
 	normalizeBuildRunUrl,
@@ -212,13 +213,15 @@ const RunDialogBody = ({
 		api.compose.deploy.useMutation();
 
 	const svc = isApplication ? application : composeService;
-	const serving = pickServingDeployment(deployments ?? []);
+	// Earlier builds Dokploy ran itself (before the service followed GitHub Actions) are not runs.
+	const runs = githubActionsRunsOf(deployments ?? [], svc?.buildOrigin);
+	const serving = pickServingDeployment(runs);
 	// The row follows the list: a live GitHub Actions row changes under the modal while the run goes on.
 	const fromList = given
 		? deployments?.find((d) => d.deploymentId === given.deploymentId)
 		: undefined;
 	const row: GithubActionsRunRow | null =
-		fromList ?? given ?? serving ?? deployments?.[0] ?? null;
+		fromList ?? given ?? serving ?? runs[0] ?? null;
 	const isServing = !row || row.deploymentId === serving?.deploymentId;
 
 	const run = describeGithubActionsRun({
@@ -244,7 +247,7 @@ const RunDialogBody = ({
 	// seeing there, so it gets its own line and its own link to GitHub.
 	const newerLive = !given
 		? pickNewerLiveGithubDeployment(
-				deployments ?? [],
+				runs,
 				row
 					? { deploymentId: row.deploymentId, createdAt: row.createdAt ?? "" }
 					: null,
@@ -555,7 +558,7 @@ interface Props {
 	service: GithubActionsRunService;
 	/** The deployment row the pill sits on. Left out on the service page, where the run that is deployed now shows. */
 	deployment?: GithubActionsRunRow;
-	/** The service is connected but no release has arrived: the pill says so (and has no run to open yet). */
+	/** The service is connected but no release has arrived: the pill says so and opens nothing (there is no run). */
 	waitingForFirstRelease?: boolean;
 	className?: string;
 }
@@ -573,6 +576,29 @@ export const GithubActionsRunPill = ({
 }: Props) => {
 	const [open, setOpen] = useState(false);
 	const [logs, setLogs] = useState<LogRequest | null>(null);
+
+	// No release has arrived: there is no run to open, so the pill only says what Dokploy waits for.
+	if (waitingForFirstRelease) {
+		return (
+			<TooltipProvider delayDuration={0}>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<Badge variant="outline" className={className}>
+							<GithubIcon />
+							{GITHUB_ACTIONS_WAITING_PILL_LABEL}
+						</Badge>
+					</TooltipTrigger>
+					<TooltipContent className="z-999 max-w-[320px]">
+						<span>
+							Connected to GitHub Actions. The first release has not arrived
+							yet; push to the tracked branch or press Check now on the
+							Provider tab.
+						</span>
+					</TooltipContent>
+				</Tooltip>
+			</TooltipProvider>
+		);
+	}
 
 	return (
 		<>
@@ -594,16 +620,13 @@ export const GithubActionsRunPill = ({
 							)}
 						>
 							<GithubIcon />
-							{waitingForFirstRelease
-								? GITHUB_ACTIONS_WAITING_PILL_LABEL
-								: GITHUB_ACTIONS_PILL_LABEL}
+							{GITHUB_ACTIONS_PILL_LABEL}
 						</button>
 					</TooltipTrigger>
 					<TooltipContent className="z-999 max-w-[320px]">
 						<span>
-							{waitingForFirstRelease
-								? "Connected to GitHub Actions. The first release has not arrived yet; push to the tracked branch or press Check now on the Provider tab."
-								: "Built and deployed by GitHub Actions. Click for the run, the image and the logs."}
+							Built and deployed by GitHub Actions. Click for the run, the image
+							and the logs.
 						</span>
 					</TooltipContent>
 				</Tooltip>

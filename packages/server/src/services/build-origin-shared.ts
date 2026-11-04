@@ -1184,6 +1184,23 @@ export const isGithubActionsDeployment = (
 			hasGithubActionsTitleMarker(row.title);
 
 /**
+ * The deployments that are runs of a service built in GitHub Actions. A service that follows GitHub Actions may
+ * have earlier deployments Dokploy built itself (before it was connected): none of them is "the run", so the run
+ * modal looks only at the rest. Any other service keeps all its rows.
+ */
+export const githubActionsRunsOf = <
+	T extends { buildOrigin?: string | null; title?: string | null },
+>(
+	deployments: readonly T[],
+	serviceBuildOrigin: string | null | undefined,
+): T[] =>
+	serviceBuildOrigin === "github-actions"
+		? deployments.filter((row) =>
+				isGithubActionsDeployment(row, serviceBuildOrigin),
+			)
+		: [...deployments];
+
+/**
  * The marker line an application's deploy script logs where its build starts (`getBuildStartLine` in
  * deployment-heartbeat.ts, which names the deployment so the watchdog can tell deployments apart). It is stored
  * with the deployment's internal id; the log dialog renders it with `renderBuildStartMarker` so the id is not shown.

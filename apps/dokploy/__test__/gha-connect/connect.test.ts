@@ -217,6 +217,61 @@ describe("planConnect", () => {
 		}
 	});
 
+	describe("what the service already runs", () => {
+		const D = `sha256:${"a".repeat(64)}`;
+		const docker = (dockerImage: string | null): ServiceFacts => ({
+			kind: "application",
+			sourceType: "docker",
+			owner: null,
+			repository: null,
+			dockerImage,
+			fields: { sourceType: "docker", dockerImage },
+		});
+		const plan = (service: ServiceFacts, over: Partial<ConnectRequest> = {}) =>
+			planConnect(
+				{ scopes: SCOPES, service, request: { ...request, ...over } },
+				reads(),
+			);
+
+		it("refuses an image outside the connection's namespace, before a release can be refused later", async () => {
+			for (const image of [`ghcr.io/acme/app@${D}`, "nginx:latest"]) {
+				const refused = await plan(docker(image));
+				expect(refused, image).toMatchObject({ ok: false, code: "image" });
+				if (refused.ok) continue;
+				expect(refused.message).toContain(
+					`This service runs ${image.split("@")[0]}`,
+				);
+				expect(refused.message).toContain("ghcr.io/acme/shop/");
+			}
+		});
+
+		it("refuses a mirror image when the registry prefix does not match, and accepts it when it does", async () => {
+			const mirrored = docker("localhost:5000/registry.devino.ca/shop/web:tag");
+			expect(await plan(mirrored)).toMatchObject({ ok: false, code: "image" });
+			expect(
+				await plan(mirrored, {
+					registryPrefix: "localhost:5000/registry.devino.ca",
+				}),
+			).toMatchObject({ ok: true });
+		});
+
+		it("accepts an image inside ghcr.io/<owner>/<repo>/ and a service that runs nothing yet", async () => {
+			expect(
+				await plan(docker(`ghcr.io/acme/shop/storefront@${D}`)),
+			).toMatchObject({ ok: true });
+			expect(await plan(docker(null))).toMatchObject({ ok: true });
+		});
+
+		it("does not look at a compose stack: its adopters keep connecting", async () => {
+			expect(
+				await plan(
+					{ kind: "compose", sourceType: "raw" },
+					{ registryPrefix: "localhost:5000/registry.devino.ca" },
+				),
+			).toMatchObject({ ok: true });
+		});
+	});
+
 	it("refuses application sources it cannot flip", async () => {
 		const plan = await planConnect(
 			{
