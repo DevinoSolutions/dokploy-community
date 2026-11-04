@@ -2,6 +2,20 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.48
+
+Polish for the GitHub Actions provider before its first adopter: honest origin header, clear connect-time refusals, one image name everywhere.
+
+Upgrade notes: no database migration and no API change beyond an additive optional `image` input on the workflow snippet and the new refusal messages, so an image-only rollback to v0.30.8-community.47 keeps working. Nothing to configure. This release includes everything in v0.30.8-community.47.
+
+**GitHub Actions provider follow-ups** (#604, T-13896).
+
+- The service header shows the GitHub Actions origin for a connected service ("GitHub Actions · waiting for the first release", then "GitHub Actions") instead of "Built on Dokploy". The waiting pill no longer opens a stale Dokploy build in the run modal.
+- Connect and Test connection refuse an application whose running image sits outside the namespace a release can pin, with a clear message, and refuse "Pick a repository first" instead of reporting "builds from ?/?".
+- One shared image derivation feeds the generated workflow, the status panel ("Image" / "Expected image", plus a hint for compose services) and Connect, so the same image name shows everywhere.
+- The generated workflow's release job only runs on the tracked branch, the buildx cache is scoped per service key, the branch is quoted, and a note covers private GitHub Container Registry packages.
+- The home page and table titles only strip a numeric `[run N.M]` trailer.
+
 ### New in v0.30.8-community.47
 
 Build on GitHub Actions, natively: connect a service to its repository, Dokploy adds one workflow, GitHub builds, and Dokploy deploys the digest behind a per-service gate.
