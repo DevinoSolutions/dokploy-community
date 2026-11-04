@@ -1448,6 +1448,53 @@ describe("testConnection (Test connection in the Connect flow)", () => {
 		nothingWritten();
 	});
 
+	it('refuses with "Pick a repository first" when the application has no repository selected', async () => {
+		mocks.findApplicationById.mockResolvedValue({
+			applicationId: "app-1",
+			sourceType: "github",
+			owner: null,
+			repository: null,
+			environment: { project: { organizationId: "org-a" } },
+		});
+		const result = await callerFor("owner").testConnection({
+			...connectInput,
+			serviceType: "application",
+			serviceId: "app-1",
+		});
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toMatch(/^Pick a repository first/);
+		expect(result.message).not.toContain("?/?");
+		expect(mocks.getRepositoryByName).not.toHaveBeenCalled();
+		nothingWritten();
+	});
+
+	it("refuses an application that runs an image outside the connection's namespace, naming it", async () => {
+		mocks.findApplicationById.mockResolvedValue({
+			applicationId: "app-1",
+			sourceType: "docker",
+			dockerImage: "ghcr.io/DevinoSolutions/other-app@sha256:abc",
+			owner: null,
+			repository: null,
+			environment: { project: { organizationId: "org-a" } },
+		});
+		const result = await callerFor("owner").testConnection({
+			...connectInput,
+			serviceType: "application",
+			serviceId: "app-1",
+		});
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toContain(
+			"This service runs ghcr.io/DevinoSolutions/other-app, which is outside",
+		);
+		expect(result.message).toContain(
+			"localhost:5000/registry.devino.ca/voicelabs/",
+		);
+		expect(mocks.getRepositoryByName).not.toHaveBeenCalled();
+		nothingWritten();
+	});
+
 	it("needs the same access as connect", async () => {
 		await expect(
 			callerFor("member").testConnection(connectInput),

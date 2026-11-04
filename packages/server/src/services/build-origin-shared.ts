@@ -1,6 +1,8 @@
 // No db/schema imports here: client components import this file directly (see overview-shared.ts), and the
 // db schema imports the constants below for its zod inputs.
 
+import { isGhaSourceType } from "./gha-connect/provider";
+
 /**
  * Where the image a deployment shipped was built (T-12149).
  *
@@ -386,7 +388,13 @@ const pickServiceBuild = (
 	/** The newest finished deployment of any kind, a rollback included: what runs now. Null when none finished. */
 	serving: BuildOriginDeploymentRow | null;
 } => {
-	const inferred = inferBuildOriginFromSource(source);
+	// A service that follows GitHub Actions (source type `github-actions`) never builds on Dokploy. It shows as built
+	// in GitHub Actions from the moment it is connected, before any release arrived, and only the rows the action
+	// wrote count (rows from before it was connected were built by Dokploy).
+	const followsGithubActions = isGhaSourceType(source.sourceType);
+	const inferred = followsGithubActions
+		? "external"
+		: inferBuildOriginFromSource(source);
 	if (inferred === "dokploy") {
 		return {
 			resolved: { buildOrigin: "dokploy", buildRunUrl: null },
@@ -394,7 +402,13 @@ const pickServiceBuild = (
 			serving: null,
 		};
 	}
-	const ofService = deployments.filter(isServiceDeployment);
+	const ofService = deployments
+		.filter(isServiceDeployment)
+		.filter(
+			(row) =>
+				!followsGithubActions ||
+				isGithubActionsDeployment(row, "github-actions"),
+		);
 	const serving =
 		[...ofService]
 			.sort((a, b) => createdAtMs(b) - createdAtMs(a))
@@ -408,7 +422,10 @@ const pickServiceBuild = (
 	const chosen = rows.find((row) => row.status === "done") ?? rows[0];
 	if (!chosen) {
 		return {
-			resolved: { buildOrigin: inferred, buildRunUrl: null },
+			resolved: {
+				buildOrigin: followsGithubActions ? "github-actions" : inferred,
+				buildRunUrl: null,
+			},
 			row: null,
 			serving: null,
 		};
@@ -591,10 +608,10 @@ export const describeGithubActionsTitle = (
 // What the action and the poller append to the stored title (T-13877): "[run <id>.<n>]" (deploy.sh) and the
 // poller's "[deployment #<id>]" handle, in either order. Stripped from the end of the first line, and only
 // when one of them is there, so a subject's own trailing "(...)" or "[...]" is never cut.
-const TITLE_TRAILER = /\s*(\[run\s[^\]]*\]|\[deployment\s+#\d+\])\s*$/i;
+const TITLE_TRAILER = /\s*(\[run\s+\d+(?:\.\d+)?\]|\[deployment\s+#\d+\])\s*$/i;
 // "GHA [<env>] <sha>[:] [<subject>]"; the sha has a boundary like TITLE_DEPLOY, the environment may be missing.
 const GHA_TITLE_BODY =
-	/^GHA\s+(?:(\S+)\s+)?([0-9a-f]{7,40})(?![0-9A-Za-z]):?\s*(.*)$/i;
+	/^GHA\s+(?:(\S+)\s+)?([0-9a-f]{7,40})(?=[:\s]|$):?\s*(.*)$/i;
 const GHA_TITLE_ENV_ONLY = /^GHA\s+(\S+)$/i;
 
 export type PresentedGithubActionsTitle = {
@@ -990,6 +1007,37 @@ export const describeServiceBuild = (
 	};
 };
 
+export const GITHUB_ACTIONS_PILL_LABEL = "GitHub Actions";
+export const GITHUB_ACTIONS_WAITING_PILL_LABEL =
+	"GitHub Actions · waiting for the first release";
+
+/**
+ * What the origin pill in a service header says for a service built in GitHub Actions. A service that is connected
+ * (source type `github-actions`) but has no release yet has no deployment, so none of the run fields is known: the
+ * pill then says it waits for the first release, instead of nothing or "Built on Dokploy". Any other origin keeps
+ * its own label (this is only about the GitHub Actions pill). Takes the fields application.one / compose.one return.
+ */
+export const describeGithubActionsOriginPill = (service: {
+	buildOrigin?: string | null;
+	buildDeployedAt?: string | Date | null;
+	buildRunUrl?: string | null;
+	buildCommitSha?: string | null;
+	buildRunId?: string | null;
+}): { label: string; waitingForFirstRelease: boolean } => {
+	const waitingForFirstRelease =
+		service.buildOrigin === "github-actions" &&
+		!service.buildDeployedAt &&
+		!service.buildRunUrl &&
+		!service.buildCommitSha &&
+		!service.buildRunId;
+	return {
+		label: waitingForFirstRelease
+			? GITHUB_ACTIONS_WAITING_PILL_LABEL
+			: GITHUB_ACTIONS_PILL_LABEL,
+		waitingForFirstRelease,
+	};
+};
+
 /**
  * The one plain line the GitHub Actions run modal shows after the action's rollback deploy. The commit
  * part is left out when the rollback title names none, the run part says "the latest run" when the id is unknown,
@@ -1134,6 +1182,23 @@ export const isGithubActionsDeployment = (
 		? row.buildOrigin === "github-actions"
 		: serviceBuildOrigin === "github-actions" &&
 			hasGithubActionsTitleMarker(row.title);
+
+/**
+ * The deployments that are runs of a service built in GitHub Actions. A service that follows GitHub Actions may
+ * have earlier deployments Dokploy built itself (before it was connected): none of them is "the run", so the run
+ * modal looks only at the rest. Any other service keeps all its rows.
+ */
+export const githubActionsRunsOf = <
+	T extends { buildOrigin?: string | null; title?: string | null },
+>(
+	deployments: readonly T[],
+	serviceBuildOrigin: string | null | undefined,
+): T[] =>
+	serviceBuildOrigin === "github-actions"
+		? deployments.filter((row) =>
+				isGithubActionsDeployment(row, serviceBuildOrigin),
+			)
+		: [...deployments];
 
 /**
  * The marker line an application's deploy script logs where its build starts (`getBuildStartLine` in

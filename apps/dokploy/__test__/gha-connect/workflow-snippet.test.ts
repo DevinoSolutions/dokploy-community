@@ -46,12 +46,17 @@ const reserved = declared.filter((name) =>
 type Step = { uses?: string; with?: Record<string, unknown> };
 type Job = {
 	needs?: string;
+	if?: string;
 	environment?: string;
 	permissions?: Record<string, string>;
 	outputs?: Record<string, string>;
 	steps?: Step[];
 };
-type Workflow = { jobs: Record<string, Job>; permissions?: object };
+type Workflow = {
+	on?: { push?: { branches?: unknown[] } };
+	jobs: Record<string, Job>;
+	permissions?: object;
+};
 
 const releaseSteps = (jobs: Record<string, Job>) =>
 	Object.values(jobs)
@@ -120,7 +125,7 @@ describe("buildWorkflowSnippet, build mode (the whole workflow)", () => {
 		expect(Object.keys(whole.jobs)).toEqual(["build", "release"]);
 		expect(whole.jobs.release?.needs).toBe("build");
 		expect(whole.jobs.release?.environment).toBe("development");
-		expect(result.yaml).toContain("branches: [dev]");
+		expect(result.yaml).toContain("branches: ['dev']");
 		expect(result.yaml).toContain("workflow_dispatch:");
 		expect(result.yaml.endsWith("\n")).toBe(true);
 	});
@@ -145,8 +150,9 @@ describe("buildWorkflowSnippet, build mode (the whole workflow)", () => {
 			context: ".",
 			file: "apps/web/Dockerfile",
 			push: true,
-			"cache-from": "type=gha",
-			"cache-to": "type=gha,mode=max",
+			// Scoped to the service key so two services of one repository do not share (and evict) one cache.
+			"cache-from": "type=gha,scope=web",
+			"cache-to": "type=gha,mode=max,scope=web",
 		});
 		expect(push?.tags).toBe("ghcr.io/acme/shop/web:${{ github.sha }}");
 		expect(wholeYaml).not.toMatch(
@@ -187,6 +193,105 @@ describe("buildWorkflowSnippet, build mode (the whole workflow)", () => {
 	});
 });
 
+describe("buildWorkflowSnippet, build mode: what a pull request or another branch can do", () => {
+	it("publishes a release only from the tracked branch", () => {
+		const { whole, wholeYaml } = generated();
+		expect(whole.jobs.release?.if).toBe("github.ref == 'refs/heads/dev'");
+		// The build job has no such condition: a run elsewhere may build, never publish.
+		expect(whole.jobs.build?.if).toBeUndefined();
+		expect(wholeYaml).toContain("    if: github.ref == 'refs/heads/dev'");
+	});
+
+	it("follows the tracked branch it is generated for", () => {
+		const result = buildWorkflowSnippet({ ...build, branch: "release/2" });
+		if (!result.ok) throw new Error("unreachable");
+		const workflow = parse(result.yaml) as Workflow;
+		expect(workflow.jobs.release?.if).toBe(
+			"github.ref == 'refs/heads/release/2'",
+		);
+		expect(result.yaml).toContain("branches: ['release/2']");
+	});
+
+	it("scopes the build cache to the service key", () => {
+		const result = buildWorkflowSnippet({ ...build, serviceKey: "api.v2" });
+		if (!result.ok) throw new Error("unreachable");
+		const workflow = parse(result.yaml) as Workflow;
+		const push = workflow.jobs.build?.steps?.[3]?.with;
+		expect(push?.["cache-from"]).toBe("type=gha,scope=api.v2");
+		expect(push?.["cache-to"]).toBe("type=gha,mode=max,scope=api.v2");
+	});
+});
+
+describe("the image the whole workflow pushes", () => {
+	it("is the repository the service already runs, when it is inside ghcr.io/<owner>/<repo>/", () => {
+		const result = buildWorkflowSnippet({
+			...build,
+			image: "ghcr.io/acme/shop/storefront",
+		});
+		if (!result.ok) throw new Error("unreachable");
+		const workflow = parse(result.yaml) as Workflow;
+		expect(workflow.jobs.build?.outputs?.image).toBe(
+			"ghcr.io/acme/shop/storefront@${{ steps.build.outputs.digest }}",
+		);
+		expect(workflow.jobs.build?.steps?.[3]?.with?.tags).toBe(
+			"ghcr.io/acme/shop/storefront:${{ github.sha }}",
+		);
+	});
+
+	it("is ghcr.io/<owner>/<repo>/<service key> when the service runs nothing of its own", () => {
+		const result = buildWorkflowSnippet(build);
+		if (!result.ok) throw new Error("unreachable");
+		expect(result.yaml).toContain("ghcr.io/acme/shop/web@");
+	});
+
+	it.each([
+		["another owner", "ghcr.io/org/app"],
+		["another repository", "ghcr.io/acme/other/web"],
+		["the namespace itself", "ghcr.io/acme/shop/"],
+		["a preview image", "ghcr.io/acme/shop/preview/pr-1"],
+		["another registry", "localhost:5000/registry.devino.ca/shop/web"],
+		["a path escape", "ghcr.io/acme/shop/../x"],
+		["an empty path segment", "ghcr.io/acme/shop//x"],
+		["text a workflow cannot take", "ghcr.io/acme/shop/web; rm -rf /"],
+	])("refuses %s", (_name, image) => {
+		expect(buildWorkflowSnippet({ ...build, image }).ok).toBe(false);
+	});
+});
+
+describe("the tracked branch is a string in the workflow", () => {
+	it("stays one when it looks like a number", () => {
+		const result = buildWorkflowSnippet({ ...build, branch: "1.0" });
+		if (!result.ok) throw new Error("unreachable");
+		expect(result.yaml).toContain("branches: ['1.0']");
+		const workflow = parse(result.yaml) as Workflow;
+		expect(workflow.on?.push?.branches).toEqual(["1.0"]);
+		expect(workflow.jobs.release?.if).toBe("github.ref == 'refs/heads/1.0'");
+	});
+});
+
+describe("the private package limit of phase 1", () => {
+	it.each([
+		["the whole workflow", () => buildWorkflowSnippet(build)],
+		["the job", () => buildWorkflowSnippet(existing)],
+	])("is written into %s as a comment", (_name, make) => {
+		const result = make();
+		if (!result.ok) throw new Error("unreachable");
+		const comments = result.yaml
+			.split("\n")
+			.filter((line) => line.trim().startsWith("#"))
+			.join(" ");
+		expect(comments).toMatch(/private by default|private package/i);
+		expect(comments).toMatch(/make it public/);
+		expect(comments).toMatch(/registry Dokploy can read/);
+	});
+
+	it("does not change what the workflow does: comments only", () => {
+		const { whole, job } = generated();
+		expect(Object.keys(whole.jobs)).toEqual(["build", "release"]);
+		expect(Object.keys(job.jobs)).toEqual(["dokploy-release"]);
+	});
+});
+
 describe("buildWorkflowSnippet, existing mode (one job)", () => {
 	it("renders one job that publishes the release from the build job's output", () => {
 		const result = buildWorkflowSnippet(existing);
@@ -202,8 +307,19 @@ describe("buildWorkflowSnippet, existing mode (one job)", () => {
 			contents: "read",
 			deployments: "write",
 		});
-		expect(result.yaml).toContain("if: github.ref == 'refs/heads/dev'");
+		expect(release?.if).toBe("github.ref == 'refs/heads/dev'");
+		expect(result.yaml).toContain("    if: github.ref == 'refs/heads/dev'");
 		expect(result.yaml).not.toMatch(/DOKPLOY_(API_KEY|URL)/);
+	});
+
+	it("follows the tracked branch it is generated for, like the whole workflow", () => {
+		const result = buildWorkflowSnippet({ ...existing, branch: "release/2" });
+		if (!result.ok) throw new Error("unreachable");
+		const workflow = parse(`jobs:
+${result.yaml}`) as Workflow;
+		expect(workflow.jobs["dokploy-release"]?.if).toBe(
+			"github.ref == 'refs/heads/release/2'",
+		);
 	});
 });
 

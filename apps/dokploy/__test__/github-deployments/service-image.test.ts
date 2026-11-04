@@ -3,6 +3,7 @@ import {
 	isStoredComposeSource,
 	pinComposeImage,
 	repositoryOfReference,
+	runningImageRepository,
 } from "@dokploy/server/services/github-deployments/service-image";
 import { describe, expect, it } from "vitest";
 
@@ -171,5 +172,27 @@ describe("a service whose provider is GitHub Actions (T-13879)", () => {
 		expect(isStoredComposeSource("github-actions")).toBe(true);
 		expect(isStoredComposeSource("github")).toBe(false);
 		expect(isStoredComposeSource("git")).toBe(false);
+	});
+});
+
+describe("the repository of a running image", () => {
+	const DIGEST = `sha256:${"a".repeat(64)}`;
+
+	it("is the repository of the current image, without tag or digest", () => {
+		expect(runningImageRepository(`ghcr.io/org/app@${DIGEST}`)).toBe(
+			"ghcr.io/org/app",
+		);
+		expect(
+			runningImageRepository("localhost:5000/registry.devino.ca/org/app:tag"),
+		).toBe("localhost:5000/registry.devino.ca/org/app");
+		expect(runningImageRepository(`  ghcr.io/org/app:v1@${DIGEST} `)).toBe(
+			"ghcr.io/org/app",
+		);
+	});
+
+	it("is nothing for what is not an image name", () => {
+		for (const value of [null, undefined, "", "   ", "${IMAGE}", "a b"]) {
+			expect(runningImageRepository(value)).toBeNull();
+		}
 	});
 });

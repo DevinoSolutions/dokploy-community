@@ -99,6 +99,14 @@ const apiGhaSnippetInput = z
 			.regex(SAFE_PATH, "Not a valid directory")
 			.default(".")
 			.describe("Mode build: the build directory, . for the repository root."),
+		image: z
+			.string()
+			.trim()
+			.max(255)
+			.optional()
+			.describe(
+				"Mode build: the GHCR repository the workflow pushes, under ghcr.io/<owner>/<repo>/. Leave it out for ghcr.io/<owner>/<repo>/<serviceKey>; pass the repository the service already runs so a release can replace it.",
+			),
 		buildJob: z
 			.string()
 			.regex(JOB_ID, "Not a valid job id")
@@ -180,6 +188,7 @@ const loadServiceFacts = async (
 			sourceType: app.sourceType,
 			owner: app.owner,
 			repository: app.repository,
+			dockerImage: app.dockerImage,
 			fields: app as unknown as Record<string, unknown>,
 		};
 	}
@@ -494,6 +503,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 							repository: input.repository ?? "",
 							dockerfile: input.dockerfile,
 							context: input.context,
+							image: input.image,
 						}
 					: {
 							...common,

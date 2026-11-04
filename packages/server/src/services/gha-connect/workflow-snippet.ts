@@ -38,6 +38,11 @@ export type SnippetInput = {
 			dockerfile: string;
 			/** Build context directory; `.` is the repository root. */
 			context: string;
+			/**
+			 * The GHCR repository the workflow pushes (`deriveReleaseImage`): the repository the service already runs, when
+			 * it is inside ghcr.io/<owner>/<repo>/. Defaults to ghcr.io/<owner>/<repo>/<service key>.
+			 */
+			image?: string;
 	  }
 	| {
 			mode: "existing";
@@ -61,6 +66,7 @@ export type SnippetResult =
 const SAFE = /^[A-Za-z0-9._/-]+$/;
 const JOB = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const KEY = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+const IMAGE = /^[a-z0-9][a-z0-9._/-]*$/;
 const REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
 const bad = (error: string): SnippetResult => ({ ok: false, error });
@@ -80,6 +86,17 @@ const common = (input: SnippetInput): string | null => {
 	}
 	return null;
 };
+
+/**
+ * Phase 1 limit, written into the generated text where the user will read it: Dokploy pulls the image without a
+ * GitHub login, so a GHCR package that is private is not pullable until it is made public (or the image is mirrored
+ * to a registry Dokploy can read).
+ */
+const PRIVATE_PACKAGE_NOTE = [
+	"Dokploy pulls the image without a GitHub login. A GHCR package is private by default: make it public",
+	"(Package settings, Change visibility) or mirror the image to a registry Dokploy can read. Until then a",
+	"private package cannot be pulled.",
+];
 
 /** A GitHub Actions expression, written without a template-literal clash. */
 const expr = (inner: string) => `\${{ ${inner} }}`;
@@ -113,6 +130,7 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 		}
 		const yaml = [
 			"  # Added for Dokploy: publishes the release. It needs no Dokploy address and no API key.",
+			...PRIVATE_PACKAGE_NOTE.map((line) => `  # ${line}`),
 			"  dokploy-release:",
 			`    needs: ${input.buildJob}`,
 			`    if: github.ref == 'refs/heads/${input.branch}'`,
@@ -143,12 +161,25 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 		return bad("The build context has characters a workflow cannot take.");
 	}
 	// GHCR names are lower case. The digest comes from the push, so the release names the image exactly.
-	const image = `ghcr.io/${input.repository.toLowerCase()}/${input.serviceKey}`;
+	const namespace = `ghcr.io/${input.repository.toLowerCase()}/`;
+	const image = input.image?.trim() || `${namespace}${input.serviceKey}`;
+	if (
+		!IMAGE.test(image) ||
+		image.endsWith("/") ||
+		image.includes("//") ||
+		image.length <= namespace.length ||
+		image.includes("..") ||
+		!image.toLowerCase().startsWith(namespace) ||
+		image.slice(namespace.length).startsWith("preview/")
+	) {
+		return bad(`The image must be a repository under ${namespace}.`);
+	}
 	const yaml = [
 		"name: Dokploy",
 		"on:",
 		"  push:",
-		`    branches: [${input.branch}]`,
+		// Quoted: a branch such as 1.0 would otherwise be read as a number.
+		`    branches: ['${input.branch}']`,
 		"  workflow_dispatch:",
 		"concurrency:",
 		`  group: dokploy-${expr("github.workflow")}-${expr("github.ref")}`,
@@ -157,6 +188,7 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 		"  contents: read",
 		"jobs:",
 		"  build:",
+		...PRIVATE_PACKAGE_NOTE.map((line) => `    # ${line}`),
 		"    runs-on: ubuntu-latest",
 		"    permissions:",
 		"      contents: read",
@@ -180,10 +212,11 @@ export const buildWorkflowSnippet = (input: SnippetInput): SnippetResult => {
 		`          file: ${input.dockerfile}`,
 		"          push: true",
 		`          tags: ${image}:${expr("github.sha")}`,
-		"          cache-from: type=gha",
-		"          cache-to: type=gha,mode=max",
+		`          cache-from: type=gha,scope=${input.serviceKey}`,
+		`          cache-to: type=gha,mode=max,scope=${input.serviceKey}`,
 		"  release:",
 		"    needs: build",
+		`    if: github.ref == 'refs/heads/${input.branch}'`,
 		"    runs-on: ubuntu-latest",
 		`    environment: ${input.environment}`,
 		"    permissions:",

@@ -10,7 +10,7 @@ import {
 	scopeProblem,
 } from "@dokploy/server/services/gha-connect/connect";
 import type { EnvironmentPolicy } from "@dokploy/server/services/gha-connect/environment-policy";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const SHA = "c".repeat(40);
 const ok = <T>(value: T): ApiResult<T> => ({ kind: "ok", value, etag: null });
@@ -194,6 +194,105 @@ describe("planConnect", () => {
 			reads(),
 		);
 		expect(plan).toMatchObject({ ok: false, code: "repository" });
+	});
+
+	it("asks to pick a repository first when the git application has none, never formatting null", async () => {
+		for (const missing of [
+			{ owner: null, repository: null },
+			{ owner: "Acme", repository: null },
+			{ owner: "", repository: "shop" },
+		]) {
+			const noRepository = { ...githubApp, ...missing } as ServiceFacts;
+			const getRepository = vi.fn(async () => ok(repo()));
+			const plan = await planConnect(
+				{ scopes: SCOPES, service: noRepository, request },
+				reads({ repository: getRepository }),
+			);
+			expect(plan).toMatchObject({ ok: false, code: "repository" });
+			if (plan.ok) throw new Error("unreachable");
+			expect(plan.message).toMatch(/^Pick a repository first/);
+			expect(plan.message).not.toContain("?");
+			// It says so before it asks GitHub anything.
+			expect(getRepository).not.toHaveBeenCalled();
+		}
+	});
+
+	describe("what the service already runs", () => {
+		const D = `sha256:${"a".repeat(64)}`;
+		const docker = (dockerImage: string | null): ServiceFacts => ({
+			kind: "application",
+			sourceType: "docker",
+			owner: null,
+			repository: null,
+			dockerImage,
+			fields: { sourceType: "docker", dockerImage },
+		});
+		const plan = (service: ServiceFacts, over: Partial<ConnectRequest> = {}) =>
+			planConnect(
+				{ scopes: SCOPES, service, request: { ...request, ...over } },
+				reads(),
+			);
+
+		it("refuses an image outside the connection's namespace, before a release can be refused later", async () => {
+			for (const [image, repository] of [
+				[`ghcr.io/acme/app@${D}`, "ghcr.io/acme/app"],
+				["nginx:latest", "nginx"],
+			]) {
+				const refused = await plan(docker(image as string));
+				expect(refused, image).toMatchObject({ ok: false, code: "image" });
+				if (refused.ok) continue;
+				expect(refused.message).toContain(`This service runs ${repository},`);
+				expect(refused.message).toContain("ghcr.io/acme/shop/");
+			}
+		});
+
+		it("refuses a mirror image when the registry prefix does not match, and accepts it when it does", async () => {
+			const mirrored = docker("localhost:5000/registry.devino.ca/shop/web:tag");
+			expect(await plan(mirrored)).toMatchObject({ ok: false, code: "image" });
+			expect(
+				await plan(mirrored, {
+					registryPrefix: "localhost:5000/registry.devino.ca",
+				}),
+			).toMatchObject({ ok: true });
+		});
+
+		it("accepts an image inside ghcr.io/<owner>/<repo>/ and a service that runs nothing yet", async () => {
+			expect(
+				await plan(docker(`ghcr.io/acme/shop/storefront@${D}`)),
+			).toMatchObject({ ok: true });
+			expect(await plan(docker(null))).toMatchObject({ ok: true });
+		});
+
+		it("looks at the stored image whatever the source is: a git application with a stale off-namespace image is refused", async () => {
+			const stale = (dockerImage: string | null): ServiceFacts =>
+				({
+					...githubApp,
+					dockerImage,
+				}) as ServiceFacts;
+			expect(await plan(stale("nginx:latest"))).toMatchObject({
+				ok: false,
+				code: "image",
+			});
+			expect(await plan(stale(`ghcr.io/other/app@${D}`))).toMatchObject({
+				ok: false,
+				code: "image",
+			});
+			// Empty, blank or in-namespace: nothing stops it.
+			for (const image of [null, "", "  ", "ghcr.io/acme/shop/web:old"]) {
+				expect(await plan(stale(image)), String(image)).toMatchObject({
+					ok: true,
+				});
+			}
+		});
+
+		it("does not look at a compose stack: its adopters keep connecting", async () => {
+			expect(
+				await plan(
+					{ kind: "compose", sourceType: "raw" },
+					{ registryPrefix: "localhost:5000/registry.devino.ca" },
+				),
+			).toMatchObject({ ok: true });
+		});
 	});
 
 	it("refuses application sources it cannot flip", async () => {

@@ -226,3 +226,17 @@ export const listPinnedComposeRepositories = (
 		),
 	];
 };
+
+/**
+ * The repository of an image reference as a service runs it: `ghcr.io/org/app@sha256:...` gives `ghcr.io/org/app`
+ * and `localhost:5000/registry.devino.ca/org/app:tag` gives `localhost:5000/registry.devino.ca/org/app` (the
+ * registry port is not a tag). Null for what is no image name: nothing, a variable, or text with spaces.
+ */
+export const runningImageRepository = (
+	reference: string | null | undefined,
+): string | null => {
+	const value = reference?.trim();
+	if (!value || /[\s$]/.test(value)) return null;
+	const repository = repositoryOfReference(value);
+	return repository === "" ? null : repository;
+};

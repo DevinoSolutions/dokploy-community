@@ -31,11 +31,14 @@ import {
 	environmentAdvice,
 	isMirrored,
 	type PillTone,
+	panelImageOfConnection,
 	providerDetailRows,
+	runningImageProblem,
 	type ServiceKind,
 	snippetProblem,
 	toConnectInput,
 	toSnippetInput,
+	workflowImageOfForm,
 } from "./gha-provider-model";
 
 interface Props {
@@ -146,7 +149,20 @@ const ConnectedView = ({
 	const checkNow = api.ghaConnection.checkNow.useMutation();
 	const disconnect = api.ghaConnection.disconnect.useMutation();
 	const status = describeProviderStatus(connection);
-	const rows = providerDetailRows(connection);
+	// What the release will pin, from what the service runs (the same queries the service page already makes).
+	const { data: application } = api.application.one.useQuery(
+		{ applicationId: id },
+		{ enabled: type === "application" },
+	);
+	const { data: composeService } = api.compose.one.useQuery(
+		{ composeId: id },
+		{ enabled: type === "compose" },
+	);
+	const image = panelImageOfConnection(connection, type, {
+		dockerImage: application?.dockerImage,
+		composeFile: composeService?.composeFile,
+	});
+	const rows = providerDetailRows(connection, new Date(), image);
 
 	return (
 		<div className="flex flex-col gap-4 p-2">
@@ -180,6 +196,11 @@ const ConnectedView = ({
 								</a>
 							) : (
 								row.value
+							)}
+							{row.note && (
+								<span className="block font-sans text-xs text-muted-foreground">
+									{row.note}
+								</span>
 							)}
 						</dd>
 					</div>
@@ -280,9 +301,24 @@ const ConnectFlow = ({
 	const mode = effectiveMode(form);
 	const mirrored = isMirrored(form);
 	const snippetInvalid = snippetProblem(form);
-	const problem = connectFormProblem(form);
+	// What the service runs decides the image the workflow pushes and whether a release can ever replace it.
+	const { data: runningApplication } = api.application.one.useQuery(
+		{ applicationId: id },
+		{ enabled: type === "application" },
+	);
+	const { data: runningCompose } = api.compose.one.useQuery(
+		{ composeId: id },
+		{ enabled: type === "compose" },
+	);
+	const running = {
+		dockerImage: runningApplication?.dockerImage,
+		composeFile: runningCompose?.composeFile,
+	};
+	// A running image no release could replace stops Connect here, as it does on the server.
+	const problem =
+		connectFormProblem(form) ?? runningImageProblem(form, type, running);
 	const { data: snippet } = api.ghaConnection.snippet.useQuery(
-		toSnippetInput(form),
+		toSnippetInput(form, workflowImageOfForm(form, type, running)),
 		{ enabled: snippetInvalid === null, retry: false },
 	);
 
@@ -345,16 +381,14 @@ const ConnectFlow = ({
 		return (
 			<div className="flex min-h-[25vh] flex-col items-center justify-center gap-3 text-center">
 				<span className="text-base text-muted-foreground">
-					To follow GitHub Actions releases, connect a GitHub account first.
-					Please, go to{" "}
-					<Link
-						href="/dashboard/settings/git-providers"
-						className="text-foreground underline"
-					>
-						Settings
-					</Link>{" "}
-					to do so.
+					To follow GitHub Actions releases, connect a GitHub account first. It
+					is added under Settings, Git providers.
 				</span>
+				<Button variant="secondary" asChild>
+					<Link href="/dashboard/settings/git-providers">
+						Open Git providers
+					</Link>
+				</Button>
 			</div>
 		);
 	}

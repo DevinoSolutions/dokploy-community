@@ -3,6 +3,7 @@ import type { EnvironmentPolicy } from "./environment-policy";
 import { evaluateEnvironmentPolicy } from "./environment-policy";
 import { type PreviousSource, snapshotPreviousSource } from "./flip";
 import { GHA_SOURCE_TYPE, isGhaSourceType } from "./provider";
+import { deriveReleaseImage } from "./release-image";
 
 /**
  * Connect: every check that has to pass before a service starts following
@@ -19,6 +20,7 @@ export type ConnectCode =
 	| "environment"
 	| "mode"
 	| "registry"
+	| "image"
 	| "github";
 
 export type ConnectRefusal = { ok: false; code: ConnectCode; message: string };
@@ -40,6 +42,8 @@ export type ServiceFacts =
 			/** Settings of a GitHub-sourced application. */
 			owner: string | null;
 			repository: string | null;
+			/** The Docker image the application runs now (its image source), if any. */
+			dockerImage?: string | null;
 			fields: Record<string, unknown>;
 	  }
 	| { kind: "compose"; sourceType: string | null };
@@ -142,6 +146,18 @@ export const planConnect = async (
 	}
 
 	if (
+		service.kind === "application" &&
+		service.sourceType === "github" &&
+		(!service.owner?.trim() || !service.repository?.trim())
+	) {
+		// The application has no repository selected yet: there is nothing to compare the request with.
+		return refuse(
+			"repository",
+			"Pick a repository first. This application has no repository selected: choose one in its GitHub source, save it, then connect GitHub Actions.",
+		);
+	}
+
+	if (
 		request.registryPrefix !== null &&
 		service.kind === "application" &&
 		service.sourceType === "github"
@@ -182,8 +198,22 @@ export const planConnect = async (
 		) {
 			return refuse(
 				"repository",
-				`This application builds from ${service.owner ?? "?"}/${service.repository ?? "?"}, not ${request.owner}/${request.repo}.`,
+				`This application builds from ${service.owner}/${service.repository}, not ${request.owner}/${request.repo}.`,
 			);
+		}
+		// What it runs decides which image a release can ever replace: a repository outside the connection's
+		// namespaces would make every release refuse later, so say so now. Whatever the source is today: once
+		// connected, the service deploys its image and acceptance reads the stored image even if it is stale.
+		if (service.dockerImage?.trim()) {
+			const image = deriveReleaseImage({
+				kind: "application",
+				owner: request.owner,
+				repo: request.repo,
+				registryPrefix: request.registryPrefix,
+				serviceKey: "service",
+				dockerImage: service.dockerImage,
+			});
+			if (!image.ok) return refuse("image", image.message);
 		}
 	}
 
