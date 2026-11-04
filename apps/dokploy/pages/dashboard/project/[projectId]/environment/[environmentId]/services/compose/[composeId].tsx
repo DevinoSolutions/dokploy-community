@@ -205,7 +205,7 @@ const Service = (
 										)}
 									</div>
 								</div>
-								<div className="flex flex-col h-fit w-fit gap-2">
+								<div className="flex flex-col h-fit w-fit min-w-0 gap-2">
 									<div className="flex flex-row gap-2 justify-end flex-wrap">
 										{latestLiveDeployment && (
 											<Badge
@@ -249,7 +249,7 @@ const Service = (
 											</Badge>
 										)}
 									</div>
-									<div className="flex flex-row h-fit w-fit gap-2 items-center">
+									<div className="flex flex-row h-fit w-fit max-w-full min-w-0 gap-2 items-center">
 										<Badge
 											className="cursor-pointer"
 											onClick={() => {

@@ -749,6 +749,22 @@ describe("isGithubActionsPillInteractive", () => {
 		expect(isGithubActionsPillInteractive({})).toBe(true);
 	});
 
+	test("is clickable for a Dokploy origin and for a deployed-at-only release", () => {
+		expect(
+			isGithubActionsPillInteractive(
+				describeGithubActionsOriginPill({ buildOrigin: "dokploy" }),
+			),
+		).toBe(true);
+		expect(
+			isGithubActionsPillInteractive(
+				describeGithubActionsOriginPill({
+					buildOrigin: "github-actions",
+					buildDeployedAt: "2026-11-04T00:00:00.000Z",
+				}),
+			),
+		).toBe(true);
+	});
+
 	test("follows describeGithubActionsOriginPill", () => {
 		const waiting = describeGithubActionsOriginPill({
 			buildOrigin: "github-actions",

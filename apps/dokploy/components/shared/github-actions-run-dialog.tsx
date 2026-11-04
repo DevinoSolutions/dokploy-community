@@ -593,7 +593,7 @@ export const GithubActionsRunPill = ({
 							)}
 							title={GITHUB_ACTIONS_WAITING_PILL_LABEL}
 						>
-							<GithubIcon />
+							<GithubIcon className="shrink-0" />
 							<span className="min-w-0 truncate">
 								{GITHUB_ACTIONS_WAITING_PILL_LABEL}
 							</span>
