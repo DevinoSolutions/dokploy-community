@@ -9,6 +9,7 @@ import {
 	hasGithubActionsTitleMarker,
 	inferBuildOriginFromSource,
 	isGithubActionsDeployment,
+	isGithubActionsPillInteractive,
 	isGithubActionsRollbackTitle,
 	normalizeBuildRunUrl,
 	pickServiceBuildOrigin,
@@ -731,5 +732,32 @@ describe("githubActionsRunsOf", () => {
 		for (const origin of ["dokploy", "external", null, undefined]) {
 			expect(githubActionsRunsOf(all, origin)).toEqual(all);
 		}
+	});
+});
+
+describe("isGithubActionsPillInteractive", () => {
+	it("is inert while the service waits for its first release", () => {
+		expect(
+			isGithubActionsPillInteractive({ waitingForFirstRelease: true }),
+		).toBe(false);
+	});
+
+	it("is clickable once a run exists", () => {
+		expect(
+			isGithubActionsPillInteractive({ waitingForFirstRelease: false }),
+		).toBe(true);
+		expect(isGithubActionsPillInteractive({})).toBe(true);
+	});
+
+	it("follows describeGithubActionsOriginPill", () => {
+		const waiting = describeGithubActionsOriginPill({
+			buildOrigin: "github-actions",
+		});
+		expect(isGithubActionsPillInteractive(waiting)).toBe(false);
+		const released = describeGithubActionsOriginPill({
+			buildOrigin: "github-actions",
+			buildRunId: "42",
+		});
+		expect(isGithubActionsPillInteractive(released)).toBe(true);
 	});
 });

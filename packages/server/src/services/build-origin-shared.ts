@@ -1039,6 +1039,14 @@ export const describeGithubActionsOriginPill = (service: {
 };
 
 /**
+ * Whether the GitHub Actions pill may open the run modal. It may only once there is a run to show: a service that is
+ * connected but still waits for its first release gets a plain, inert badge (no button, hover or click).
+ */
+export const isGithubActionsPillInteractive = (input: {
+	waitingForFirstRelease?: boolean | null;
+}): boolean => !input.waitingForFirstRelease;
+
+/**
  * The one plain line the GitHub Actions run modal shows after the action's rollback deploy. The commit
  * part is left out when the rollback title names none, the run part says "the latest run" when the id is unknown,
  * and the reason is "failed its checks" for a run that deployed, else "failed to deploy".
