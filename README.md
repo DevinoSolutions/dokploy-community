@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.47**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.48**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.47 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.48 \
   --with-registry-auth \
   dokploy
 ```
@@ -121,12 +121,12 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.47
+## What's new in v0.30.8-community.48
 
-- Build on GitHub Actions, natively: connect an application or compose service to its repository from the Provider tab, Dokploy generates one workflow, GitHub builds the image, and Dokploy deploys the digest. A per-service gate decides when: as soon as the image is built, when all checks are green, or when named workflows pass, with "Deploy anyway" for a blocked release. The service shows its connection status, and the Deploy button becomes "Redeploy current image".
-- Deploy from GitHub Deployments: a pull flow for a Dokploy that GitHub Actions cannot reach. Connect GitHub from Settings > Git Providers, watch a service on its Advanced tab, and Dokploy polls GitHub, deploys the digest a workflow asks for and reports the result back.
-- The home "Recent deployments" list has aligned columns, one origin pill style and clean GitHub Actions titles.
-- Five additive database migrations (0228 to 0232); an image-only rollback to the previous release keeps working until a service is switched to the new provider. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Polish for the GitHub Actions provider before its first adopter: a connected service's header now shows its GitHub Actions origin ("GitHub Actions · waiting for the first release", then "GitHub Actions") instead of "Built on Dokploy", and the waiting pill no longer opens a stale Dokploy build.
+- Clear connect-time refusals: Connect and Test connection refuse an application whose running image sits outside the namespace a release can pin, and say "Pick a repository first" instead of "builds from ?/?".
+- One image name everywhere: the generated workflow, the status panel ("Image" / "Expected image", with a compose hint) and Connect share one derivation. The generated workflow's release job only runs on the tracked branch, the build cache is scoped per service, and a note covers private GHCR packages.
+- No database migration and no breaking API change; an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -141,7 +141,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.47
+export DOKPLOY_VERSION=v0.30.8-community.48
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -154,7 +154,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.47      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.48      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -197,7 +197,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.47` is the 47th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.48` is the 48th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
