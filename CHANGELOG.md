@@ -2,6 +2,23 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.49
+
+Clearer deployments table and a GitHub Actions pill that fits narrow headers.
+
+Upgrade notes: no database migration and no API change, so an image-only rollback to v0.30.8-community.48 keeps working. Nothing to configure. This release includes everything in v0.30.8-community.48.
+
+**Deployments table: Hosted on and Built by** (#606, T-13981).
+
+- The Server column is now "Hosted on" and always names where the service runs: the server name with its type badge, or "Dokploy" when it runs on the Dokploy host itself, never a dash.
+- The build server shows only as a muted "built on <name>" line, and only for Dokploy-built rows whose build server differs from the host. GitHub Actions rows get no build line.
+- The Source column is now "Built by", and the filter placeholder reads "Hosted on". Search and sort use the same host name.
+
+**GitHub Actions pill at narrow widths** (#607, T-14008).
+
+- The "GitHub Actions · waiting for the first release" pill truncates with an ellipsis inside narrow service headers (390 px) instead of squeezing the service name, and carries the full text as its title.
+- Before the first release the pill is a plain badge: no button, no hover, no click. Once a run exists it opens the run modal as before.
+
 ### New in v0.30.8-community.48
 
 Polish for the GitHub Actions provider before its first adopter: honest origin header, clear connect-time refusals, one image name everywhere.
