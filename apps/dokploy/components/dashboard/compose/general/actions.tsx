@@ -1,4 +1,5 @@
 import { githubActionsPushTarget } from "@dokploy/server/services/build-origin-shared";
+import { isGhaSourceType } from "@dokploy/server/services/gha-connect/provider";
 import {
 	Ban,
 	CheckCircle2,
@@ -23,6 +24,7 @@ import {
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
 import { DockerTerminalModal } from "../../settings/web-server/docker-terminal-modal";
+import { redeployCopy } from "../../shared/gha-provider-model";
 
 interface Props {
 	composeId: string;
@@ -49,7 +51,15 @@ export const ComposeActions = ({ composeId }: Props) => {
 		api.compose.loadTemplateFromGit.useMutation();
 
 	// Built in GitHub Actions: Dokploy only pulls and starts the image (T-12424).
-	const isGithubActions = data?.buildOrigin === "github-actions";
+	// A stack whose provider is GitHub Actions (T-13879) counts too, before its first release is built.
+	const isGhaProvider = isGhaSourceType(data?.sourceType);
+	const isGithubActions =
+		data?.buildOrigin === "github-actions" || isGhaProvider;
+	const { data: ghaConnection } = api.ghaConnection.one.useQuery(
+		{ serviceType: "compose", serviceId: composeId },
+		{ enabled: isGhaProvider && !!composeId, retry: false },
+	);
+	const redeployLabels = redeployCopy(ghaConnection?.trackedBranch);
 
 	const isGitSource = [
 		"github",
@@ -71,9 +81,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 						}
 					>
 						<DialogAction
-							title={
-								isGithubActions ? "Redeploy current version" : "Deploy Compose"
-							}
+							title={isGithubActions ? redeployLabels.label : "Deploy Compose"}
 							description={
 								isGithubActions
 									? "Dokploy will pull the current images again and restart this compose. Nothing is built."
@@ -109,7 +117,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 									<TooltipTrigger asChild>
 										<div className="flex items-center">
 											<Rocket className="size-4 mr-1" />
-											{isGithubActions ? "Redeploy current version" : "Deploy"}
+											{isGithubActions ? redeployLabels.label : "Deploy"}
 										</div>
 									</TooltipTrigger>
 									<TooltipPrimitive.Portal>
@@ -126,11 +134,14 @@ export const ComposeActions = ({ composeId }: Props) => {
 						</DialogAction>
 						{isGithubActions && (
 							<GithubActionsRedeployHint
-								target={githubActionsPushTarget({
-									branch: data?.branch,
-									sourceType: data?.sourceType,
-									buildRepository: data?.buildRepository,
-								})}
+								target={
+									ghaConnection?.trackedBranch ??
+									githubActionsPushTarget({
+										branch: data?.branch,
+										sourceType: data?.sourceType,
+										buildRepository: data?.buildRepository,
+									})
+								}
 							/>
 						)}
 					</div>

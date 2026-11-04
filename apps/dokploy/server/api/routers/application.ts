@@ -48,13 +48,13 @@ import {
 	writeConfig,
 	writeConfigRemote,
 } from "@dokploy/server";
-import { removeGhaConnectionsForServices } from "@dokploy/server/services/gha-connect/store";
 import { db } from "@dokploy/server/db";
 import { getBuildOriginsByService } from "@dokploy/server/services/build-origin";
 import {
 	buildOriginJobFields,
 	describeServiceBuild,
 } from "@dokploy/server/services/build-origin-shared";
+import { removeGhaConnectionsForServices } from "@dokploy/server/services/gha-connect/store";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
@@ -90,6 +90,10 @@ import {
 	assertCanPrioritize,
 	recordPriorityUse,
 } from "@/server/api/utils/deploy-priority";
+import {
+	assertRedeployable,
+	assertSourceChangeAllowed,
+} from "@/server/api/utils/gha-provider-guard";
 import { cancelRunningDeploymentLocally } from "@/server/api/utils/local-cancel";
 import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { coalesceManualApplicationDeploy } from "@/server/api/utils/manual-application-coalesce";
@@ -601,6 +605,7 @@ export const applicationRouter = createTRPCRouter({
 			}
 			try {
 				const application = await findApplicationById(input.applicationId);
+				await assertRedeployable(application, input.applicationId);
 				const jobData: DeploymentJob = {
 					applicationId: input.applicationId,
 					titleLog: input.title || "Rebuild deployment",
@@ -751,6 +756,11 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: input.applicationId,
+				nextSourceType: "github",
+			});
 			// The provider supplies the credentials this application clones with: it has to be
 			// the caller's organization's (T-6895).
 			await assertServiceReferencesInOrganization(
@@ -794,6 +804,11 @@ export const applicationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
+			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: input.applicationId,
+				nextSourceType: "gitlab",
 			});
 			// The provider supplies the credentials this application clones with: it has to be
 			// the caller's organization's (T-6895).
@@ -843,6 +858,11 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: input.applicationId,
+				nextSourceType: "bitbucket",
+			});
 			// The provider supplies the credentials this application clones with: it has to be
 			// the caller's organization's (T-6895).
 			await assertServiceReferencesInOrganization(
@@ -889,6 +909,11 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: input.applicationId,
+				nextSourceType: "gitea",
+			});
 			// The provider supplies the credentials this application clones with: it has to be
 			// the caller's organization's (T-6895).
 			await assertServiceReferencesInOrganization(
@@ -933,6 +958,11 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: input.applicationId,
+				nextSourceType: "docker",
+			});
 			const fields = resolveDockerProviderFields(input);
 			// The registry supplies the credentials the image is pulled with: it has
 			// to be the caller's organization's (T-6895).
@@ -955,6 +985,11 @@ export const applicationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
+			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: input.applicationId,
+				nextSourceType: "git",
 			});
 			// The SSH key supplies the credentials this application clones with: it has to be
 			// the caller's organization's (T-6895).
@@ -991,6 +1026,11 @@ export const applicationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
+			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: input.applicationId,
+				nextSourceType: "github",
 			});
 			await updateApplication(input.applicationId, {
 				repository: null,
@@ -1082,6 +1122,11 @@ export const applicationRouter = createTRPCRouter({
 				}
 			}
 
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: input.applicationId,
+				nextSourceType: input.sourceType,
+			});
 			const { applicationId, ...rest } = input;
 
 			// A URL that is not a remote repository is refused when it is set or
@@ -1228,6 +1273,7 @@ export const applicationRouter = createTRPCRouter({
 			}
 			try {
 				const application = await findApplicationById(input.applicationId);
+				await assertRedeployable(application, input.applicationId);
 				// Allow overriding the Docker image/tag at deploy time for
 				// Docker-source applications. This mirrors the manual "save Docker
 				// provider then deploy" workaround as a single call so external
@@ -1522,6 +1568,11 @@ export const applicationRouter = createTRPCRouter({
 
 			await checkServicePermissionAndAccess(ctx, applicationId, {
 				deployment: ["create"],
+			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: applicationId,
+				nextSourceType: "drop",
 			});
 			const app = await findApplicationById(applicationId);
 

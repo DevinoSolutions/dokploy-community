@@ -82,6 +82,37 @@ describe("scopeProblem", () => {
 });
 
 describe("planConnect", () => {
+	it("accepts a service already marked github-actions without a connection, and has nothing to restore", async () => {
+		const app = await planConnect(
+			{
+				scopes: SCOPES,
+				service: {
+					kind: "application",
+					sourceType: "github-actions",
+					owner: null,
+					repository: null,
+					fields: { sourceType: "github-actions" },
+				},
+				request,
+			},
+			reads(),
+		);
+		expect(app).toMatchObject({
+			ok: true,
+			previousSource: null,
+			serviceUpdate: { sourceType: "github-actions", autoDeploy: false },
+		});
+		const stack = await planConnect(
+			{
+				scopes: SCOPES,
+				service: { kind: "compose", sourceType: "github-actions" },
+				request,
+			},
+			reads(),
+		);
+		expect(stack).toMatchObject({ ok: true, previousSource: null });
+	});
+
 	it("plans a GitHub application: keep the old source, turn autodeploy off", async () => {
 		const plan = await planConnect(
 			{ scopes: SCOPES, service: githubApp, request },
@@ -92,7 +123,7 @@ describe("planConnect", () => {
 			repoId: 7,
 			repoFullName: "acme/shop",
 			expectedSha: SHA,
-			serviceUpdate: { autoDeploy: false },
+			serviceUpdate: { sourceType: "github-actions", autoDeploy: false },
 		});
 		if (!plan.ok) throw new Error("unreachable");
 		expect(plan.previousSource).toMatchObject({
@@ -103,7 +134,7 @@ describe("planConnect", () => {
 		expect(plan.previousSource).not.toHaveProperty("password");
 	});
 
-	it("changes nothing on a service that already runs an image", async () => {
+	it("keeps what a service that already runs an image was, so Disconnect can restore it", async () => {
 		const plan = await planConnect(
 			{
 				scopes: SCOPES,
@@ -120,8 +151,8 @@ describe("planConnect", () => {
 		);
 		expect(plan).toMatchObject({
 			ok: true,
-			previousSource: null,
-			serviceUpdate: null,
+			previousSource: { sourceType: "docker" },
+			serviceUpdate: { sourceType: "github-actions", autoDeploy: false },
 		});
 	});
 
@@ -134,7 +165,14 @@ describe("planConnect", () => {
 			},
 			reads(),
 		);
-		expect(raw).toMatchObject({ ok: true, serviceUpdate: null });
+		expect(raw).toMatchObject({
+			ok: true,
+			previousSource: { sourceType: "raw" },
+			serviceUpdate: { sourceType: "github-actions" },
+		});
+		expect((raw as { serviceUpdate: object }).serviceUpdate).not.toHaveProperty(
+			"autoDeploy",
+		);
 		const git = await planConnect(
 			{
 				scopes: SCOPES,

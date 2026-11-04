@@ -1,3 +1,4 @@
+import { isGhaSourceType } from "@dokploy/server/services/gha-connect/provider";
 import { GithubActionsAdvanced } from "@/components/shared/github-actions-panel";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -23,7 +24,9 @@ export const ShowGeneralCompose = ({ composeId }: Props) => {
 		},
 	);
 	// Built in GitHub Actions: Dokploy only pulls and starts the image (T-12424).
-	const isGithubActions = data?.buildOrigin === "github-actions";
+	const isGhaProvider = isGhaSourceType(data?.sourceType);
+	const isGithubActions =
+		data?.buildOrigin === "github-actions" || isGhaProvider;
 
 	return (
 		<>
@@ -46,7 +49,9 @@ export const ShowGeneralCompose = ({ composeId }: Props) => {
 					<ComposeActions composeId={composeId} />
 				</CardContent>
 			</Card>
-			{isGithubActions ? (
+			{isGhaProvider ? (
+				<ShowProviderFormCompose composeId={composeId} />
+			) : isGithubActions ? (
 				<GithubActionsAdvanced description="The compose file and where it comes from. Rebuild and autodeploy are hidden because GitHub Actions builds this service.">
 					<ShowProviderFormCompose composeId={composeId} />
 				</GithubActionsAdvanced>

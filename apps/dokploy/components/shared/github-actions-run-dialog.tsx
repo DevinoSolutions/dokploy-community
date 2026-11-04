@@ -531,7 +531,7 @@ const RunDialogBody = ({
 				)}
 				{canRedeploy && (
 					<DialogAction
-						title="Redeploy current version"
+						title="Redeploy current image"
 						description={`Dokploy will pull the current image${
 							isApplication ? "" : "s"
 						} again and restart this ${service.type}. Nothing is built.`}
@@ -540,7 +540,7 @@ const RunDialogBody = ({
 					>
 						<Button variant="outline" isLoading={isDeploying}>
 							<Rocket className="size-4" />
-							Redeploy current version
+							Redeploy current image
 						</Button>
 					</DialogAction>
 				)}

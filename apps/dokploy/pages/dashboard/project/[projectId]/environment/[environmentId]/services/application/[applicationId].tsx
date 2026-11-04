@@ -40,9 +40,8 @@ import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
 import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignNetworks } from "@/components/dashboard/networks/assign-networks";
-import { TransferService } from "@/components/dashboard/shared/transfer-service";
-import { GhaDeployGate } from "@/components/dashboard/shared/gha-deploy-gate";
 import { GithubDeploymentsWatch } from "@/components/dashboard/shared/github-deployments-watch";
+import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -264,7 +263,9 @@ const Service = (
 												</TabsTrigger>
 											)}
 											{permissions?.deployment.read &&
-												supportsApplicationPreviewDeployments(data?.sourceType) && (
+												supportsApplicationPreviewDeployments(
+													data?.sourceType,
+												) && (
 													<TabsTrigger value="preview-deployments">
 														Preview Deployments
 													</TabsTrigger>
@@ -441,7 +442,6 @@ const Service = (
 													id={applicationId}
 													type="application"
 												/>
-												<GhaDeployGate id={applicationId} type="application" />
 												<ShowClusterSettings
 													id={applicationId}
 													type="application"
@@ -451,7 +451,10 @@ const Service = (
 												)}
 												{/* build-policy */}
 												<ShowRequiredChecks applicationId={applicationId} />
-												<WatchdogExclusion id={applicationId} type="application" />
+												<WatchdogExclusion
+													id={applicationId}
+													type="application"
+												/>
 												<ShowResources id={applicationId} type="application" />
 												<ShowVolumes id={applicationId} type="application" />
 												<AssignNetworks id={applicationId} type="application" />

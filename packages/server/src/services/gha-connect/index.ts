@@ -1,5 +1,6 @@
 export * from "./acceptance";
 export * from "./actions-api";
+export * from "./adopt";
 export * from "./connect";
 export * from "./connect-service";
 export * from "./deploy-gate";
@@ -15,8 +16,10 @@ export * from "./namespace";
 export * from "./ordering";
 export * from "./present";
 export * from "./processed";
+export * from "./provider";
 export * from "./registry-probe";
 export * from "./state-machine";
 export * from "./store";
 export * from "./wake-payload";
+export * from "./workflow-snippet";
 export * from "./zip";

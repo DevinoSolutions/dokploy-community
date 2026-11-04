@@ -48,10 +48,9 @@ import { ComposeFreeMonitoring } from "@/components/dashboard/monitoring/free/co
 import { ComposePaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-compose-monitoring";
 import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignComposeNetworks } from "@/components/dashboard/networks/assign-compose-networks";
-import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { ComposePolicyAuditExclusion } from "@/components/dashboard/shared/compose-policy-audit-exclusion";
-import { GhaDeployGate } from "@/components/dashboard/shared/gha-deploy-gate";
 import { GithubDeploymentsWatch } from "@/components/dashboard/shared/github-deployments-watch";
+import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -602,7 +601,6 @@ const Service = (
 												<DeployGuardrailsCompose composeId={composeId} />
 												<RollingReplaceCompose composeId={composeId} />
 												<GithubDeploymentsWatch id={composeId} type="compose" />
-												<GhaDeployGate id={composeId} type="compose" />
 												<WatchdogExclusion id={composeId} type="compose" />
 												<ComposePolicyAuditExclusion composeId={composeId} />
 											</div>
