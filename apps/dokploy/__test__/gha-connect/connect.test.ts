@@ -10,7 +10,7 @@ import {
 	scopeProblem,
 } from "@dokploy/server/services/gha-connect/connect";
 import type { EnvironmentPolicy } from "@dokploy/server/services/gha-connect/environment-policy";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const SHA = "c".repeat(40);
 const ok = <T>(value: T): ApiResult<T> => ({ kind: "ok", value, etag: null });
@@ -194,6 +194,27 @@ describe("planConnect", () => {
 			reads(),
 		);
 		expect(plan).toMatchObject({ ok: false, code: "repository" });
+	});
+
+	it("asks to pick a repository first when the git application has none, never formatting null", async () => {
+		for (const missing of [
+			{ owner: null, repository: null },
+			{ owner: "Acme", repository: null },
+			{ owner: "", repository: "shop" },
+		]) {
+			const noRepository = { ...githubApp, ...missing } as ServiceFacts;
+			const getRepository = vi.fn(async () => ok(repo()));
+			const plan = await planConnect(
+				{ scopes: SCOPES, service: noRepository, request },
+				reads({ repository: getRepository }),
+			);
+			expect(plan).toMatchObject({ ok: false, code: "repository" });
+			if (plan.ok) throw new Error("unreachable");
+			expect(plan.message).toMatch(/^Pick a repository first/);
+			expect(plan.message).not.toContain("?");
+			// It says so before it asks GitHub anything.
+			expect(getRepository).not.toHaveBeenCalled();
+		}
 	});
 
 	it("refuses application sources it cannot flip", async () => {

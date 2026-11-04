@@ -1448,6 +1448,27 @@ describe("testConnection (Test connection in the Connect flow)", () => {
 		nothingWritten();
 	});
 
+	it("refuses with \"Pick a repository first\" when the application has no repository selected", async () => {
+		mocks.findApplicationById.mockResolvedValue({
+			applicationId: "app-1",
+			sourceType: "github",
+			owner: null,
+			repository: null,
+			environment: { project: { organizationId: "org-a" } },
+		});
+		const result = await callerFor("owner").testConnection({
+			...connectInput,
+			serviceType: "application",
+			serviceId: "app-1",
+		});
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.message).toMatch(/^Pick a repository first/);
+		expect(result.message).not.toContain("?/?");
+		expect(mocks.getRepositoryByName).not.toHaveBeenCalled();
+		nothingWritten();
+	});
+
 	it("needs the same access as connect", async () => {
 		await expect(
 			callerFor("member").testConnection(connectInput),

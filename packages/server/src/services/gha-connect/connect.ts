@@ -175,6 +175,16 @@ export const planConnect = async (
 		}
 		if (
 			service.sourceType === "github" &&
+			(!service.owner?.trim() || !service.repository?.trim())
+		) {
+			// The application has no repository selected yet: there is nothing to compare the request with.
+			return refuse(
+				"repository",
+				"Pick a repository first. This application has no repository selected: choose one in its GitHub source, save it, then connect GitHub Actions.",
+			);
+		}
+		if (
+			service.sourceType === "github" &&
 			!(
 				same(service.owner, request.owner) &&
 				same(service.repository, request.repo)
@@ -182,7 +192,7 @@ export const planConnect = async (
 		) {
 			return refuse(
 				"repository",
-				`This application builds from ${service.owner ?? "?"}/${service.repository ?? "?"}, not ${request.owner}/${request.repo}.`,
+				`This application builds from ${service.owner}/${service.repository}, not ${request.owner}/${request.repo}.`,
 			);
 		}
 	}

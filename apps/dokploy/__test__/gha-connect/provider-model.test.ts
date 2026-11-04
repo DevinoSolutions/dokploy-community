@@ -49,6 +49,31 @@ describe("the connect form", () => {
 		expect(connectFormProblem(filled())).toBeNull();
 	});
 
+	it("holds Test connection and Connect until the account, the repository and the branch are chosen", () => {
+		const blank = filled({
+			githubConnectionId: "",
+			repository: "",
+			trackedBranch: "",
+		});
+		expect(connectFormProblem(blank)).not.toBeNull();
+		expect(connectFormProblem({ ...blank, githubConnectionId: "gh-1" })).not.toBeNull();
+		expect(
+			connectFormProblem({
+				...blank,
+				githubConnectionId: "gh-1",
+				repository: "acme/shop",
+			}),
+		).toMatch(/branch/);
+		expect(
+			connectFormProblem(filled({ repository: "  ", trackedBranch: "  " })),
+		).not.toBeNull();
+		expect(
+			connectFormProblem(
+				filled({ repository: "acme/shop", trackedBranch: "main" }),
+			),
+		).toBeNull();
+	});
+
 	it("says the first thing that is missing, in the order the form is read", () => {
 		expect(connectFormProblem(filled({ githubConnectionId: "" }))).toMatch(
 			/GitHub account/,
