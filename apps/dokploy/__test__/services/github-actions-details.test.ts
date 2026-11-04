@@ -1222,7 +1222,8 @@ describe("presentGithubActionsTitle (T-13877)", () => {
 
 	test("only a numeric [run N.M] suffix is plumbing; a subject's own [run ...] stays", () => {
 		expect(
-			presentGithubActionsTitle("GHA production b4f509d2: ship [run 12.3]")?.text,
+			presentGithubActionsTitle("GHA production b4f509d2: ship [run 12.3]")
+				?.text,
 		).toBe("ship (b4f509d2)");
 		expect(
 			presentGithubActionsTitle("GHA production b4f509d2: ship [run 12]")?.text,
@@ -1234,9 +1235,9 @@ describe("presentGithubActionsTitle (T-13877)", () => {
 	});
 
 	test("the commit sha ends at a colon, a space or the end of the title", () => {
-		expect(
-			presentGithubActionsTitle("GHA production b4f509d2:ship")?.sha,
-		).toBe("b4f509d2");
+		expect(presentGithubActionsTitle("GHA production b4f509d2:ship")?.sha).toBe(
+			"b4f509d2",
+		);
 		expect(presentGithubActionsTitle("GHA production b4f509d2")?.sha).toBe(
 			"b4f509d2",
 		);
