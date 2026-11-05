@@ -165,8 +165,8 @@ const Service = (
 				<Card className="h-full bg-sidebar p-2.5 rounded-xl w-full">
 					<div className="rounded-xl bg-background shadow-md ">
 						<div className="flex flex-col gap-4">
-							<CardHeader className="flex flex-row justify-between items-start gap-6">
-								<div className="flex flex-row gap-4 items-center min-w-0">
+							<CardHeader className="flex flex-col items-start gap-4 sm:flex-row sm:justify-between sm:gap-6">
+								<div className="flex w-full flex-row gap-4 items-center min-w-0 sm:w-auto">
 									<div className="relative shrink-0">
 										<ShowIconSettings
 											serviceId={composeId}
@@ -205,8 +205,8 @@ const Service = (
 										)}
 									</div>
 								</div>
-								<div className="flex flex-col h-fit w-fit min-w-0 gap-2">
-									<div className="flex flex-row gap-2 justify-end flex-wrap">
+								<div className="flex flex-col h-fit w-full min-w-0 gap-2 sm:w-fit sm:max-w-[60%]">
+									<div className="flex flex-row gap-2 sm:justify-end flex-wrap">
 										{latestLiveDeployment && (
 											<Badge
 												variant="secondary"
@@ -249,7 +249,7 @@ const Service = (
 											</Badge>
 										)}
 									</div>
-									<div className="flex flex-row h-fit w-fit max-w-full min-w-0 gap-2 items-center">
+									<div className="flex flex-row h-fit w-fit max-w-full min-w-0 gap-2 items-center flex-wrap sm:justify-end">
 										<Badge
 											className="cursor-pointer"
 											onClick={() => {
