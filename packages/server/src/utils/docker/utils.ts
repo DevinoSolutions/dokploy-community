@@ -1295,9 +1295,47 @@ export const waitForSwarmServiceStable = async (
 	let everRunning = false;
 	let lastRunningContainerId: string | undefined;
 	let lastReason = "Service did not reach running state";
+	// The service's current spec version (`TaskTemplate.ForceUpdate`), read from
+	// the first successful inspect and then pinned for the whole wait. `null`
+	// until known, and for good when the service cannot be inspected; the
+	// creation-time window below is only the fallback for that case.
+	let deploymentForceUpdate: number | null = null;
 
 	while (Date.now() < deadline) {
 		try {
+			try {
+				const service = await remoteDocker.getService(appName).inspect();
+				// A failed update that Swarm rolled back (or paused) is a failed
+				// deploy. Without this check a rollback that finished before our
+				// first inspect would pin the previous version below and report
+				// the rolled-back tasks as this deployment's. Swarm clears the
+				// update status when a new spec is accepted, so a rollback or
+				// pause here belongs to the update that was just issued.
+				const updateState = service?.UpdateStatus?.State;
+				if (
+					updateState === "rollback_started" ||
+					updateState === "rollback_completed" ||
+					updateState === "paused"
+				) {
+					const detail = service?.UpdateStatus?.Message;
+					return {
+						stable: false,
+						reason: detail
+							? `Service update ${updateState}: ${detail}`
+							: `Service update ${updateState}`,
+					};
+				}
+				if (deploymentForceUpdate === null) {
+					const forceUpdate = Number(
+						service?.Spec?.TaskTemplate?.ForceUpdate ?? 0,
+					);
+					if (Number.isFinite(forceUpdate)) {
+						deploymentForceUpdate = forceUpdate;
+					}
+				}
+			} catch {
+				// Keep the creation-time fallback; retried on the next poll.
+			}
 			const tasks = await remoteDocker.listTasks({
 				filters: JSON.stringify({ service: [appName] }),
 			});
@@ -1327,21 +1365,32 @@ export const waitForSwarmServiceStable = async (
 			// Stability counts must exclude:
 			//   1. tasks Swarm has already marked for shutdown (the outgoing
 			//      task once the rolling update has flipped it), and
-			//   2. tasks created before this poll started — Swarm briefly
-			//      keeps the outgoing task at DesiredState="running" while the
-			//      new task boots, so filtering on DesiredState alone still
-			//      lets the outgoing task set `everRunning=true`, and the
+			//   2. tasks that belong to an earlier version of the service — Swarm
+			//      briefly keeps the outgoing task at DesiredState="running"
+			//      while the new task boots, so filtering on DesiredState alone
+			//      still lets the outgoing task set `everRunning=true`, and the
 			//      subsequent handover (outgoing → shutdown, incoming still
 			//      starting) then trips the "restarted after running" branch.
-			// Small leeway so a task created in the sub-second between the
-			// service update call and our first Date.now() still counts.
+			// Every Dokploy deploy bumps `TaskTemplate.ForceUpdate`, and Swarm
+			// copies the service's value into `Spec.ForceUpdate` of each task it
+			// creates for that spec. Matching on it identifies this deployment's
+			// tasks however long ago they were created: a slow image pull or a
+			// slow connection to a remote daemon can put our poll start well past
+			// the task's creation time. Only when the service cannot be inspected
+			// do we fall back to a creation-time window (with a small leeway so a
+			// task created in the sub-second between the service update call and
+			// our first Date.now() still counts).
 			const CREATED_AT_LEEWAY_MS = 5_000;
-			const active = tasks.filter(
-				(t) =>
-					t.DesiredState === "running" &&
+			const active = tasks.filter((t) => {
+				if (t.DesiredState !== "running") return false;
+				if (deploymentForceUpdate !== null) {
+					return Number(t.Spec?.ForceUpdate ?? 0) === deploymentForceUpdate;
+				}
+				return (
 					new Date(t.CreatedAt ?? 0).getTime() >=
-						daemonPollStartMs - CREATED_AT_LEEWAY_MS,
-			);
+					daemonPollStartMs - CREATED_AT_LEEWAY_MS
+				);
+			});
 			const sorted = [...active].sort((a, b) => {
 				const at = new Date(a.UpdatedAt ?? 0).getTime();
 				const bt = new Date(b.UpdatedAt ?? 0).getTime();

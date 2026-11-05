@@ -1,16 +1,23 @@
 import { waitForSwarmServiceStable } from "@dokploy/server/utils/docker/utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listTasksMock, infoMock, getRemoteDockerMock } = vi.hoisted(() => {
-	const listTasks = vi.fn();
-	const info = vi.fn();
-	const getRemoteDocker = vi.fn(async () => ({ listTasks, info }));
-	return {
-		listTasksMock: listTasks,
-		infoMock: info,
-		getRemoteDockerMock: getRemoteDocker,
-	};
-});
+const { listTasksMock, infoMock, inspectServiceMock, getRemoteDockerMock } =
+	vi.hoisted(() => {
+		const listTasks = vi.fn();
+		const info = vi.fn();
+		const inspectService = vi.fn();
+		const getRemoteDocker = vi.fn(async () => ({
+			listTasks,
+			info,
+			getService: () => ({ inspect: inspectService }),
+		}));
+		return {
+			listTasksMock: listTasks,
+			infoMock: info,
+			inspectServiceMock: inspectService,
+			getRemoteDockerMock: getRemoteDocker,
+		};
+	});
 
 vi.mock("@dokploy/server/utils/servers/remote-docker", () => ({
 	getRemoteDocker: getRemoteDockerMock,
@@ -35,6 +42,7 @@ type Task = {
 	DesiredState?: string;
 	CreatedAt?: string;
 	UpdatedAt?: string;
+	Spec?: { ForceUpdate?: number };
 };
 
 const now = () => new Date().toISOString();
@@ -60,6 +68,10 @@ describe("waitForSwarmServiceStable", () => {
 	beforeEach(() => {
 		listTasksMock.mockReset();
 		infoMock.mockReset();
+		// Default: the service cannot be inspected, so the gate falls back to the
+		// creation-time window. The version-match tests override this.
+		inspectServiceMock.mockReset();
+		inspectServiceMock.mockRejectedValue(new Error("service inspect failed"));
 		// Default: daemon clock in sync with ours. Individual tests override
 		// with `infoMock.mockResolvedValue({ SystemTime: <skewed> })`.
 		infoMock.mockResolvedValue({ SystemTime: new Date().toISOString() });
@@ -425,6 +437,217 @@ describe("waitForSwarmServiceStable", () => {
 		expect(result).toEqual({
 			stable: false,
 			reason: "No tasks from this deployment found",
+		});
+	});
+	describe("matching tasks by the service's current spec version", () => {
+		// Dokploy bumps `TaskTemplate.ForceUpdate` on every deploy, and Swarm
+		// stamps each new task's `Spec.ForceUpdate` with that value. The wait must
+		// recognise the deploy's tasks by that version, not by how recently they
+		// were created: a slow image pull or a slow connection to a remote
+		// daemon can put the poll start well past the task's creation time.
+		const CURRENT_VERSION = 7;
+		const OLD_VERSION = 6;
+
+		beforeEach(() => {
+			inspectServiceMock.mockResolvedValue({
+				Spec: { TaskTemplate: { ForceUpdate: CURRENT_VERSION } },
+			});
+		});
+
+		it("keeps a task created well before the poll started (slow image pull)", async () => {
+			// Task created 55 s before the poll, still pulling, then running.
+			const createdAt = ago(55_000);
+			listTasksMock
+				.mockResolvedValueOnce([
+					runningTask({
+						CreatedAt: ago(PRE_EXISTING_TASK_AGE_MS),
+						Spec: { ForceUpdate: OLD_VERSION },
+					}),
+					startingTask({
+						Status: { State: "preparing", Message: "pulling image" },
+						CreatedAt: createdAt,
+						Spec: { ForceUpdate: CURRENT_VERSION },
+					}),
+				])
+				.mockResolvedValue([
+					{
+						Status: { State: "shutdown" },
+						DesiredState: "shutdown",
+						CreatedAt: ago(PRE_EXISTING_TASK_AGE_MS),
+						UpdatedAt: now(),
+						Spec: { ForceUpdate: OLD_VERSION },
+					},
+					runningTask({
+						CreatedAt: createdAt,
+						Spec: { ForceUpdate: CURRENT_VERSION },
+						Status: {
+							State: "running",
+							ContainerStatus: { ContainerID: "next-container" },
+						},
+					}),
+				]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+				postRunningObserveMs: WINDOW_MS / 4,
+			});
+
+			expect(result).toEqual({ stable: true, containerId: "next-container" });
+		});
+
+		it("does not count the outgoing task of the previous version, however recent", async () => {
+			// The outgoing task still has DesiredState=running and was even created
+			// a moment ago, but belongs to the previous spec version. It must not
+			// make the deploy look stable while the new task is still pulling.
+			listTasksMock.mockResolvedValue([
+				runningTask({ Spec: { ForceUpdate: OLD_VERSION } }),
+				startingTask({
+					Status: { State: "preparing", Message: "pulling image" },
+					Spec: { ForceUpdate: CURRENT_VERSION },
+				}),
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+				maxWaitMs: WINDOW_MS,
+			});
+
+			expect(result.stable).toBe(false);
+			if (result.stable === false) {
+				expect(result.reason).toContain("preparing");
+			}
+		});
+
+		it("reports no tasks from this deployment when only older versions are visible", async () => {
+			listTasksMock.mockResolvedValue([
+				runningTask({ Spec: { ForceUpdate: OLD_VERSION } }),
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+			});
+
+			expect(result).toEqual({
+				stable: false,
+				reason: "No tasks from this deployment found",
+			});
+		});
+
+		it("treats a missing ForceUpdate on a task as version 0", async () => {
+			// A freshly created service carries ForceUpdate 0, and the daemon may
+			// omit zero values.
+			inspectServiceMock.mockResolvedValue({
+				Spec: { TaskTemplate: {} },
+			});
+			listTasksMock.mockResolvedValue([
+				runningTask({ CreatedAt: ago(30_000) }),
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+			});
+
+			expect(result).toEqual({ stable: true });
+		});
+
+		it("falls back to the creation window when the service cannot be inspected", async () => {
+			inspectServiceMock.mockRejectedValue(new Error("boom"));
+			listTasksMock.mockResolvedValue([
+				runningTask({ CreatedAt: ago(PRE_EXISTING_TASK_AGE_MS) }),
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+			});
+
+			expect(result).toEqual({
+				stable: false,
+				reason: "No tasks from this deployment found",
+			});
+		});
+
+		it("fails when Swarm already rolled the update back before the first inspect", async () => {
+			// The rollback restored the previous spec, so the service now reports
+			// the old version and its (old) tasks are running. That must not read
+			// as a successful deploy.
+			inspectServiceMock.mockResolvedValue({
+				Spec: { TaskTemplate: { ForceUpdate: OLD_VERSION } },
+				UpdateStatus: {
+					State: "rollback_completed",
+					Message: "rollback completed",
+				},
+			});
+			listTasksMock.mockResolvedValue([
+				runningTask({
+					CreatedAt: ago(PRE_EXISTING_TASK_AGE_MS),
+					Spec: { ForceUpdate: OLD_VERSION },
+				}),
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+			});
+
+			expect(result).toEqual({
+				stable: false,
+				reason: "Service update rollback_completed: rollback completed",
+			});
+		});
+
+		it("fails when the update is rolled back while it is being watched", async () => {
+			inspectServiceMock
+				.mockResolvedValueOnce({
+					Spec: { TaskTemplate: { ForceUpdate: CURRENT_VERSION } },
+					UpdateStatus: { State: "updating" },
+				})
+				.mockResolvedValue({
+					Spec: { TaskTemplate: { ForceUpdate: OLD_VERSION } },
+					UpdateStatus: { State: "rollback_started" },
+				});
+			listTasksMock.mockResolvedValue([
+				startingTask({
+					Status: { State: "preparing" },
+					Spec: { ForceUpdate: CURRENT_VERSION },
+				}),
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+			});
+
+			expect(result).toEqual({
+				stable: false,
+				reason: "Service update rollback_started",
+			});
+		});
+
+		it("still reports a task that failed after the poll started", async () => {
+			listTasksMock.mockResolvedValue([
+				{
+					Status: { State: "rejected", Err: "pull access denied" },
+					DesiredState: "shutdown",
+					CreatedAt: ago(40_000),
+					UpdatedAt: now(),
+					Spec: { ForceUpdate: CURRENT_VERSION },
+				},
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+			});
+
+			expect(result).toEqual({
+				stable: false,
+				reason: "Task rejected: pull access denied",
+			});
 		});
 	});
 });
