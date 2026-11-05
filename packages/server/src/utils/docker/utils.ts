@@ -1303,18 +1303,38 @@ export const waitForSwarmServiceStable = async (
 
 	while (Date.now() < deadline) {
 		try {
-			if (deploymentForceUpdate === null) {
-				try {
-					const service = await remoteDocker.getService(appName).inspect();
-					deploymentForceUpdate = Number(
+			try {
+				const service = await remoteDocker.getService(appName).inspect();
+				// A failed update that Swarm rolled back (or paused) is a failed
+				// deploy. Without this check a rollback that finished before our
+				// first inspect would pin the previous version below and report
+				// the rolled-back tasks as this deployment's. Swarm clears the
+				// update status when a new spec is accepted, so a rollback or
+				// pause here belongs to the update that was just issued.
+				const updateState = service?.UpdateStatus?.State;
+				if (
+					updateState === "rollback_started" ||
+					updateState === "rollback_completed" ||
+					updateState === "paused"
+				) {
+					const detail = service?.UpdateStatus?.Message;
+					return {
+						stable: false,
+						reason: detail
+							? `Service update ${updateState}: ${detail}`
+							: `Service update ${updateState}`,
+					};
+				}
+				if (deploymentForceUpdate === null) {
+					const forceUpdate = Number(
 						service?.Spec?.TaskTemplate?.ForceUpdate ?? 0,
 					);
-					if (!Number.isFinite(deploymentForceUpdate)) {
-						deploymentForceUpdate = null;
+					if (Number.isFinite(forceUpdate)) {
+						deploymentForceUpdate = forceUpdate;
 					}
-				} catch {
-					// Keep the creation-time fallback; retried on the next poll.
 				}
+			} catch {
+				// Keep the creation-time fallback; retried on the next poll.
 			}
 			const tasks = await remoteDocker.listTasks({
 				filters: JSON.stringify({ service: [appName] }),

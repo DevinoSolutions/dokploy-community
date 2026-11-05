@@ -571,6 +571,63 @@ describe("waitForSwarmServiceStable", () => {
 			});
 		});
 
+		it("fails when Swarm already rolled the update back before the first inspect", async () => {
+			// The rollback restored the previous spec, so the service now reports
+			// the old version and its (old) tasks are running. That must not read
+			// as a successful deploy.
+			inspectServiceMock.mockResolvedValue({
+				Spec: { TaskTemplate: { ForceUpdate: OLD_VERSION } },
+				UpdateStatus: {
+					State: "rollback_completed",
+					Message: "rollback completed",
+				},
+			});
+			listTasksMock.mockResolvedValue([
+				runningTask({
+					CreatedAt: ago(PRE_EXISTING_TASK_AGE_MS),
+					Spec: { ForceUpdate: OLD_VERSION },
+				}),
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+			});
+
+			expect(result).toEqual({
+				stable: false,
+				reason: "Service update rollback_completed: rollback completed",
+			});
+		});
+
+		it("fails when the update is rolled back while it is being watched", async () => {
+			inspectServiceMock
+				.mockResolvedValueOnce({
+					Spec: { TaskTemplate: { ForceUpdate: CURRENT_VERSION } },
+					UpdateStatus: { State: "updating" },
+				})
+				.mockResolvedValue({
+					Spec: { TaskTemplate: { ForceUpdate: OLD_VERSION } },
+					UpdateStatus: { State: "rollback_started" },
+				});
+			listTasksMock.mockResolvedValue([
+				startingTask({
+					Status: { State: "preparing" },
+					Spec: { ForceUpdate: CURRENT_VERSION },
+				}),
+			]);
+
+			const result = await waitForSwarmServiceStable("app", {
+				windowMs: WINDOW_MS,
+				pollMs: POLL_MS,
+			});
+
+			expect(result).toEqual({
+				stable: false,
+				reason: "Service update rollback_started",
+			});
+		});
+
 		it("still reports a task that failed after the poll started", async () => {
 			listTasksMock.mockResolvedValue([
 				{
