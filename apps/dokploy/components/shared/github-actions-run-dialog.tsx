@@ -590,7 +590,11 @@ export const GithubActionsRunPill = ({
 	// Same query key as the modal, so opening it costs no second request.
 	const { data: waitingDeployments } = api.deployment.allByType.useQuery(
 		{ id: service.id, type: service.type },
-		{ enabled: waitingForFirstRelease },
+		{
+			enabled: waitingForFirstRelease,
+			// A first run can start while the page is open; look again until one shows (the modal polls on its own).
+			refetchInterval: waitingForFirstRelease ? 10_000 : false,
+		},
 	);
 	const runCount = waitingForFirstRelease
 		? githubActionsRunsOf(waitingDeployments ?? [], "github-actions").length
