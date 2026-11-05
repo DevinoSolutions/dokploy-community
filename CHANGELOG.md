@@ -2,6 +2,26 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.50
+
+A GitHub Actions pill that opens during the first build, service headers that fit a phone, and a swarm deploy wait that no longer misses slow image pulls.
+
+Upgrade notes: no database migration and no API change, so an image-only rollback to v0.30.8-community.49 keeps working. Nothing to configure. This release includes everything in v0.30.8-community.49.
+
+**GitHub Actions pill and run modal** (#610, T-14012).
+
+- While a service waits for its first release, the pill now reads the same deployment list as the run modal and polls it every 10 s. It becomes clickable as soon as a run exists, including during that first run's build phase, instead of staying inert until the first release.
+- The run modal row "Source" is now "Built by", and its value no longer repeats "Built by".
+
+**Service headers at 390 px** (#610, T-14029).
+
+- The application and compose service headers stack below the sm breakpoint, with the title column on top and the badges and actions below, both wrapping. The delete button and the GitHub Actions pill are no longer clipped on a phone.
+
+**Swarm deploy wait** (#611, T-13999).
+
+- A deploy to a remote server could end as an error with "No tasks from this deployment found" although the service had updated fine, whenever the poll started more than 5 s after the task was created (a slow image pull). The wait now identifies the deployment's tasks by the service's `TaskTemplate.ForceUpdate` version instead of a creation window, so a long pull is waited for, and the outgoing task of a rolling update is still excluded.
+- The wait also reports a failure on `rollback_started`, `rollback_completed` and `paused` update states. The old creation window remains only as the fallback when the service cannot be inspected.
+
 ### New in v0.30.8-community.49
 
 Clearer deployments table and a GitHub Actions pill that fits narrow headers.
