@@ -742,6 +742,21 @@ describe("isGithubActionsPillInteractive", () => {
 		).toBe(false);
 	});
 
+	test("is clickable while waiting when the modal already lists a run", () => {
+		expect(
+			isGithubActionsPillInteractive({
+				waitingForFirstRelease: true,
+				runCount: 1,
+			}),
+		).toBe(true);
+		expect(
+			isGithubActionsPillInteractive({
+				waitingForFirstRelease: true,
+				runCount: 0,
+			}),
+		).toBe(false);
+	});
+
 	test("is clickable once a run exists", () => {
 		expect(
 			isGithubActionsPillInteractive({ waitingForFirstRelease: false }),

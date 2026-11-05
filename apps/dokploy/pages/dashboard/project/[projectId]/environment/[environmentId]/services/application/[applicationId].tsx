@@ -132,8 +132,8 @@ const Service = (
 			<div className="w-full">
 				<Card className="h-full bg-sidebar p-2.5 rounded-xl w-full">
 					<div className="rounded-xl bg-background shadow-md ">
-						<CardHeader className="flex flex-row justify-between items-center">
-							<div className="flex flex-col min-w-0">
+						<CardHeader className="flex flex-col items-start gap-4 sm:flex-row sm:justify-between sm:items-center">
+							<div className="flex w-full flex-col min-w-0 sm:w-auto">
 								<CardTitle className="text-xl flex flex-row gap-2 items-center">
 									<div className="relative flex flex-row gap-4 items-center">
 										<ShowIconSettings
@@ -155,8 +155,8 @@ const Service = (
 									{data?.appName}
 								</span>
 							</div>
-							<div className="flex flex-col h-fit w-fit min-w-0 gap-2">
-								<div className="flex flex-row h-fit w-fit max-w-full min-w-0 gap-2">
+							<div className="flex flex-col h-fit w-full min-w-0 gap-2 sm:w-fit">
+								<div className="flex flex-row h-fit w-fit max-w-full min-w-0 gap-2 flex-wrap">
 									<Badge
 										className="cursor-pointer"
 										onClick={() => {
@@ -208,7 +208,7 @@ const Service = (
 									)}
 								</div>
 
-								<div className="flex flex-row gap-2 justify-end">
+								<div className="flex flex-row gap-2 sm:justify-end">
 									{permissions?.service.create && (
 										<UpdateApplication applicationId={applicationId} />
 									)}

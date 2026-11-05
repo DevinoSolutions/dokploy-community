@@ -1039,14 +1039,16 @@ export const describeGithubActionsOriginPill = (service: {
 };
 
 /**
- * Whether the GitHub Actions pill may open the run modal. It may only once there is a run to show: a service that is
- * connected but still waits for its first release gets a plain, inert badge (no button, hover or click).
- * "Interactive" means a deployed release exists: during the very first run's build phase (externalBuildOnly rows,
- * dropped by pickServiceBuild) the pill stays inert even though the modal list would have a live run (accepted, follow-up).
+ * Whether the GitHub Actions pill may open the run modal. It may once there is a run to show: a service that is
+ * connected but still waits for its first release gets a plain, inert badge (no button, hover or click), unless the
+ * deployment list the modal reads already holds a run (`runCount`, from githubActionsRunsOf). That covers the very
+ * first run's build phase, whose externalBuildOnly rows pickServiceBuild drops.
  */
 export const isGithubActionsPillInteractive = (input: {
 	waitingForFirstRelease?: boolean | null;
-}): boolean => !input.waitingForFirstRelease;
+	/** Runs the modal would list (githubActionsRunsOf over the service's deployments). */
+	runCount?: number | null;
+}): boolean => !input.waitingForFirstRelease || (input.runCount ?? 0) > 0;
 
 /**
  * The one plain line the GitHub Actions run modal shows after the action's rollback deploy. The commit

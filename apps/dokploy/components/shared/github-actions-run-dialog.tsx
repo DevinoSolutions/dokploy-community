@@ -429,14 +429,16 @@ const RunDialogBody = ({
 										</span>
 									</Row>
 								)}
-								<Row label="Source">
+								<Row label="Built by">
 									{state
-										? describeGithubActionsSource({
-												...state,
-												externalBuildOnly: row.externalBuildOnly,
-												deployQueuedAt: row.deployQueuedAt,
-												buildRunStatus: row.buildRunStatus,
-											})
+										? withBuiltByValue(
+												describeGithubActionsSource({
+													...state,
+													externalBuildOnly: row.externalBuildOnly,
+													deployQueuedAt: row.deployQueuedAt,
+													buildRunStatus: row.buildRunStatus,
+												}),
+											)
 										: null}
 								</Row>
 								{row.startedAt && (
@@ -555,6 +557,12 @@ const RunDialogBody = ({
 	);
 };
 
+/** The row is labelled "Built by", so the value drops the sentence's own "Built by " lead-in. */
+const withBuiltByValue = (text: string): string =>
+	text.startsWith("Built by ")
+		? text.slice("Built by ".length)
+		: `GitHub Actions. ${text}`;
+
 interface Props {
 	service: GithubActionsRunService;
 	/** The deployment row the pill sits on. Left out on the service page, where the run that is deployed now shows. */
@@ -577,10 +585,24 @@ export const GithubActionsRunPill = ({
 }: Props) => {
 	const [open, setOpen] = useState(false);
 	const [logs, setLogs] = useState<LogRequest | null>(null);
+	// The modal's own run source: while the service waits for its first release, a run that is already building
+	// (externalBuildOnly rows, which the service page's build origin does not see) makes the pill clickable.
+	// Same query key as the modal, so opening it costs no second request.
+	const { data: waitingDeployments } = api.deployment.allByType.useQuery(
+		{ id: service.id, type: service.type },
+		{
+			enabled: waitingForFirstRelease,
+			// A first run can start while the page is open; look again until one shows (the modal polls on its own).
+			refetchInterval: waitingForFirstRelease ? 10_000 : false,
+		},
+	);
+	const runCount = waitingForFirstRelease
+		? githubActionsRunsOf(waitingDeployments ?? [], "github-actions").length
+		: 0;
 
 	// No release has arrived: there is no run to open, so the pill only says what Dokploy waits for. It is a plain,
 	// inert badge (no button, no hover, no click) that shrinks and truncates inside a narrow header (390 px).
-	if (!isGithubActionsPillInteractive({ waitingForFirstRelease })) {
+	if (!isGithubActionsPillInteractive({ waitingForFirstRelease, runCount })) {
 		return (
 			<TooltipProvider delayDuration={0}>
 				<Tooltip>
