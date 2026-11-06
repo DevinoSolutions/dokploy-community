@@ -169,7 +169,7 @@ const createPullRequestRequest = (
 			},
 			pull_request: {
 				id: "pr-id-999",
-				number: "42",
+				number: 42,
 				title: "Add feature",
 				html_url: "https://github.com/agentHits/dokploy/pull/42",
 				head: {

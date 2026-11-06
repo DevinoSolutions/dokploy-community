@@ -553,7 +553,7 @@ describe("GitHub app webhook preview deployments", () => {
 				applicationId: "application-id",
 				branch: "feature",
 				pullRequestId: 987,
-				pullRequestNumber: 42,
+				pullRequestNumber: "42",
 			}),
 		);
 		expect(mocks.queueAdd).toHaveBeenCalledWith(
