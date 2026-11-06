@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreatePreviewDeployment,
@@ -219,8 +220,29 @@ const slugify = (value: string): string => {
 		.toLowerCase()
 		.replace(/[^a-z0-9-]/g, "-")
 		.replace(/-+/g, "-")
-		.replace(/^-|-$/g, "")
-		.slice(0, 63);
+		.replace(/^-|-$/g, "");
+};
+
+// RFC 1035 caps a DNS label at 63 characters; a longer one fails to resolve and
+// Let's Encrypt refuses to issue a certificate for it.
+const MAX_DNS_LABEL_LENGTH = 63;
+const BRANCH_HASH_LENGTH = 6;
+
+/**
+ * Shortens a branch slug so that the label it sits in fits in `budget`
+ * characters. A shortened slug ends with a hash of the full slug, so that two
+ * long branches sharing a prefix still get distinct hostnames.
+ */
+const fitBranchSlug = (slug: string, budget: number): string => {
+	if (slug.length <= budget) return slug;
+	const hash = createHash("sha256")
+		.update(slug)
+		.digest("hex")
+		.slice(0, BRANCH_HASH_LENGTH);
+	const head = slug
+		.slice(0, Math.max(0, budget - BRANCH_HASH_LENGTH - 1))
+		.replace(/-+$/, "");
+	return head ? `${head}-${hash}` : hash;
 };
 
 export const interpolateSubdomainTemplate = (
@@ -232,14 +254,33 @@ export const interpolateSubdomainTemplate = (
 		uniqueId: string;
 	},
 ): string => {
+	const branchSlug = slugify(vars.branchName);
+	// The branch is the only variable of unbounded length, so it is the one
+	// shortened, label by label, after the rest of its label is known: the
+	// budget is what the template and the other variables leave free.
 	return template
-		.replace(/\$\{appName\}/g, vars.appName)
-		// Hostnames are case-insensitive and Traefik/Let's Encrypt want them in
-		// lower case; a Docker-image preview identifier may hold capitals (image
-		// tags are case-sensitive, so only the host is lowered).
-		.replace(/\$\{prNumber\}/g, vars.prNumber.toLowerCase())
-		.replace(/\$\{branchName\}/g, slugify(vars.branchName))
-		.replace(/\$\{uniqueId\}/g, vars.uniqueId);
+		.split(".")
+		.map((label) => {
+			const rendered = label
+				.replace(/\$\{appName\}/g, vars.appName)
+				// Hostnames are case-insensitive and Traefik/Let's Encrypt want them in
+				// lower case; a Docker-image preview identifier may hold capitals (image
+				// tags are case-sensitive, so only the host is lowered).
+				.replace(/\$\{prNumber\}/g, vars.prNumber.toLowerCase())
+				.replace(/\$\{uniqueId\}/g, vars.uniqueId);
+			const occurrences = rendered.split("${branchName}").length - 1;
+			if (occurrences === 0) return rendered;
+			const fixedLength =
+				rendered.length - occurrences * "${branchName}".length;
+			const budget = Math.floor(
+				(MAX_DNS_LABEL_LENGTH - fixedLength) / occurrences,
+			);
+			return rendered.replace(
+				/\$\{branchName\}/g,
+				fitBranchSlug(branchSlug, budget),
+			);
+		})
+		.join(".");
 };
 
 export const createPreviewDeployment = async (
