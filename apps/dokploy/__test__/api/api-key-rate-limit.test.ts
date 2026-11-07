@@ -312,3 +312,79 @@ describe("an invalid key is still a 401", () => {
 		expect(verifyApiKey).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("the browser cookie-session path is unchanged", () => {
+	const cookieReq = (url: string) =>
+		({
+			url,
+			method: "GET",
+			headers: { cookie: "better-auth.session_token=abc" },
+		}) as unknown as IncomingMessage;
+
+	const stubCookieSession = () => {
+		getSession.mockResolvedValue({
+			session: { id: "sess-1", activeOrganizationId: "org-1" },
+			user: { id: "user-1", email: "ada@example.com" },
+		});
+		apikeyFindFirst.mockResolvedValue({
+			role: "owner",
+			organization: { id: "org-1", ownerId: "owner-9" },
+			user: {
+				enableEnterpriseFeatures: false,
+				isValidEnterpriseLicense: false,
+			},
+		} as never);
+	};
+
+	it("REST handler: cookie session resolves the context user, no key verification", async () => {
+		stubCookieSession();
+		const res = makeRes();
+
+		await restHandler(cookieReq("/api/user.get") as never, res as never);
+
+		expect(res.statusCode).toBe(200);
+		expect(verifyApiKey).not.toHaveBeenCalled();
+		expect(getSession).toHaveBeenCalledTimes(1);
+		const ctx = (await captureContext?.({
+			req: cookieReq("/api/user.get"),
+			res,
+		})) as { user: { id: string; role: string }; session: unknown };
+		expect(ctx.user.id).toBe("user-1");
+		expect(ctx.user.role).toBe("owner");
+		expect(getSession).toHaveBeenCalledTimes(1);
+	});
+
+	it("tRPC handler: cookie session resolves the context user, no key verification", async () => {
+		stubCookieSession();
+		const res = makeRes();
+
+		await trpcHandler(cookieReq("/api/trpc/user.get") as never, res as never);
+
+		expect(res.statusCode).toBe(200);
+		expect(verifyApiKey).not.toHaveBeenCalled();
+		expect(getSession).toHaveBeenCalledTimes(1);
+		const ctx = (await captureContext?.({
+			req: cookieReq("/api/trpc/user.get"),
+			res,
+		})) as { user: { id: string; role: string } };
+		expect(ctx.user.id).toBe("user-1");
+		expect(ctx.user.role).toBe("owner");
+	});
+
+	it("tRPC handler: an authentication failure is left to the tRPC context (not a bare 500)", async () => {
+		getSession.mockRejectedValueOnce(new Error("db blip"));
+		getSession.mockResolvedValue({
+			session: { id: "sess-1", activeOrganizationId: "org-1" },
+			user: { id: "user-1", email: "ada@example.com" },
+		});
+		apikeyFindFirst.mockResolvedValue(undefined as never);
+		const res = makeRes();
+
+		await trpcHandler(cookieReq("/api/trpc/user.get") as never, res as never);
+
+		// The handler itself did not throw; authentication ran again inside the
+		// tRPC context, where a failure gets tRPC's error reply and onError.
+		expect(res.statusCode).toBe(200);
+		expect(getSession).toHaveBeenCalledTimes(2);
+	});
+});

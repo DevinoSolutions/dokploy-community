@@ -1107,17 +1107,6 @@ export const verifyApiKeyDetailed = async (
 	}
 };
 
-/**
- * Resolves a Dokploy API key to the member session of its owner inside the
- * organization the key was created for. Null for unknown, expired, disabled,
- * throttled or organization-less keys. Used by the REST/tRPC `x-api-key` path;
- * the MCP endpoint uses {@link verifyApiKeyDetailed} to answer 429 on throttling.
- */
-export const validateApiKey = async (apiKey: string) => {
-	const verification = await verifyApiKeyDetailed(apiKey);
-	return verification.status === "valid" ? verification.member : null;
-};
-
 /** A request whose API key is valid but over its per-key rate limit. */
 export type RateLimitedRequest = {
 	rateLimited: true;

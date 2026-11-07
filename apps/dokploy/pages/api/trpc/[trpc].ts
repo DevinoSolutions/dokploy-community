@@ -3,7 +3,10 @@ import { createNextApiHandler } from "@trpc/server/adapters/next";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { respondApiKeyRateLimited } from "@/server/api/api-key-rate-limit";
 import { appRouter } from "@/server/api/root";
-import { createTRPCContextFromAuth } from "@/server/api/trpc";
+import {
+	createTRPCContext,
+	createTRPCContextFromAuth,
+} from "@/server/api/trpc";
 import { captureError } from "@/server/sentry";
 
 // Authenticate once per request (a single API key verification) and answer a
@@ -14,14 +17,26 @@ export default async function handler(
 	req: NextApiRequest,
 	res: NextApiResponse,
 ) {
-	const validation = await validateRequestDetailed(req);
-	if ("rateLimited" in validation) {
+	let validation: Awaited<ReturnType<typeof validateRequestDetailed>> | null =
+		null;
+	try {
+		validation = await validateRequestDetailed(req);
+	} catch {
+		// Authentication threw (e.g. a database blip). Leave it to the tRPC
+		// context, which authenticates inside tRPC, so the failure keeps its
+		// JSON error reply and the onError -> captureError path.
+	}
+	if (validation && "rateLimited" in validation) {
 		respondApiKeyRateLimited(req, res, validation);
 		return;
 	}
+	const verified = validation;
 	return createNextApiHandler({
 		router: appRouter,
-		createContext: (opts) => createTRPCContextFromAuth(opts, validation),
+		createContext: (opts) =>
+			verified
+				? createTRPCContextFromAuth(opts, verified)
+				: createTRPCContext(opts),
 		onError: ({ path, error }) => {
 			if (process.env.NODE_ENV === "development") {
 				console.error(
