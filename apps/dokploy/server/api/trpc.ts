@@ -12,7 +12,7 @@ import { db } from "@dokploy/server/db";
 import { server as serverTable } from "@dokploy/server/db/schema";
 import { hasValidLicense } from "@dokploy/server/index";
 import type { statements } from "@dokploy/server/lib/access-control";
-import { validateRequest } from "@dokploy/server/lib/auth";
+import { validateRequestDetailed } from "@dokploy/server/lib/auth";
 import { checkPermission } from "@dokploy/server/services/permission";
 import type { OpenApiMeta } from "@dokploy/trpc-openapi";
 import { initTRPC, TRPCError } from "@trpc/server";
@@ -21,6 +21,11 @@ import type { Session, User } from "better-auth";
 import { and, eq } from "drizzle-orm";
 import superjson from "superjson";
 import { ZodError } from "zod";
+import {
+	apiKeyRateLimitedMessage,
+	logApiKeyRateLimited,
+	setRetryAfter,
+} from "./api-key-rate-limit";
 import {
 	classifyRemoteUnreachable,
 	findTcpConnectFailure,
@@ -80,18 +85,19 @@ const createInnerTRPCContext = (opts: CreateContextOptions) => {
 	};
 };
 
+type RequestValidation = Awaited<ReturnType<typeof validateRequestDetailed>>;
+type AuthenticatedRequest = Exclude<RequestValidation, { rateLimited: true }>;
+
 /**
- * This is the actual context you will use in your router. It will be used to process every request
- * that goes through your tRPC endpoint.
- *
- * @see https://trpc.io/docs/context
+ * Builds the context from an already-authenticated request. REST entry points
+ * authenticate once and hand the result here, so an `x-api-key` request spends
+ * one rate-limit unit, not one per layer.
  */
-export const createTRPCContext = async (opts: CreateNextContextOptions) => {
+export const createTRPCContextFromAuth = (
+	opts: CreateNextContextOptions,
+	{ session, user }: AuthenticatedRequest,
+) => {
 	const { req, res } = opts;
-
-	// Get from the request
-	const { session, user } = await validateRequest(req);
-
 	return createInnerTRPCContext({
 		req,
 		res,
@@ -113,6 +119,26 @@ export const createTRPCContext = async (opts: CreateNextContextOptions) => {
 				}
 			: null,
 	});
+};
+
+/**
+ * This is the actual context you will use in your router. It will be used to process every request
+ * that goes through your tRPC endpoint. A throttled API key becomes a
+ * TOO_MANY_REQUESTS error (HTTP 429) with `Retry-After`, never a 401.
+ *
+ * @see https://trpc.io/docs/context
+ */
+export const createTRPCContext = async (opts: CreateNextContextOptions) => {
+	const validation = await validateRequestDetailed(opts.req);
+	if ("rateLimited" in validation) {
+		logApiKeyRateLimited(opts.req, validation);
+		setRetryAfter(opts.res, validation.retryAfterSeconds);
+		throw new TRPCError({
+			code: "TOO_MANY_REQUESTS",
+			message: apiKeyRateLimitedMessage(validation.retryAfterSeconds),
+		});
+	}
+	return createTRPCContextFromAuth(opts, validation);
 };
 
 /**

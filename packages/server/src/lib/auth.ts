@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { apiKey } from "@better-auth/api-key";
 import { oauthProvider } from "@better-auth/oauth-provider";
@@ -713,6 +714,18 @@ const createBetterAuth = () =>
 			},
 		},
 		plugins: [
+			// Rate limit semantics (@better-auth/api-key 1.7, `evaluateRateLimit`):
+			// each key carries its own `rateLimitMax` / `rateLimitTimeWindow` (ms),
+			// the plugin-level `rateLimit.{timeWindow,maxRequests}` are only the
+			// defaults for keys created without them. The window is anchored on the
+			// key's `lastRequest`, and every admitted request moves `lastRequest`
+			// to now, so the window slides: a key polled more often than once per
+			// window never gets its counter reset, and any steady poller
+			// eventually reaches `rateLimitMax`. The plugin offers no fixed-window
+			// option, so the fork cannot change that here. That is why the CI
+			// deploy keys (gha-*) carry a raised `rateLimitMax` (120 -> 1200 per
+			// window), and why a throttled key answers 429 + Retry-After
+			// (verifyApiKeyDetailed) instead of looking like an invalid key.
 			apiKey({
 				enableMetadata: true,
 				references: "user",
@@ -993,7 +1006,32 @@ export type ApiKeyVerification =
 			};
 	  }
 	| { status: "invalid" }
-	| { status: "rate_limited"; retryAfterSeconds: number };
+	| {
+			status: "rate_limited";
+			retryAfterSeconds: number;
+			/** First 8 characters of the key id, for logs. Never the key itself. */
+			keyIdPrefix?: string;
+	  };
+
+/**
+ * Best-effort id prefix (8 chars) of a throttled key for the warn log. The
+ * plugin's rate-limit error does not name the key, so look it up by the same
+ * SHA-256/base64url hash it stores. Only runs when a key is already throttled.
+ */
+const lookupKeyIdPrefix = async (apiKey: string) => {
+	try {
+		const row = await db.query.apikey.findFirst({
+			where: eq(
+				schema.apikey.key,
+				createHash("sha256").update(apiKey).digest("base64url"),
+			),
+			columns: { id: true },
+		});
+		return row?.id.slice(0, 8);
+	} catch {
+		return undefined;
+	}
+};
 
 /** Seconds until a throttled key may retry, from better-auth's `tryAgainIn` (ms). */
 const retryAfterSecondsFrom = (error: unknown) => {
@@ -1027,6 +1065,7 @@ export const verifyApiKeyDetailed = async (
 				return {
 					status: "rate_limited",
 					retryAfterSeconds: retryAfterSecondsFrom(error),
+					keyIdPrefix: await lookupKeyIdPrefix(apiKey),
 				};
 			}
 			throw new Error(error.message?.toString() || "Error verifying API key");
@@ -1079,16 +1118,35 @@ export const validateApiKey = async (apiKey: string) => {
 	return verification.status === "valid" ? verification.member : null;
 };
 
-export const validateRequest = async (request: IncomingMessage) => {
+/** A request whose API key is valid but over its per-key rate limit. */
+export type RateLimitedRequest = {
+	rateLimited: true;
+	retryAfterSeconds: number;
+	keyIdPrefix?: string;
+};
+
+/**
+ * Authenticates a request exactly once. An `x-api-key` costs one plugin
+ * verification (one rate-limit unit); callers that need the context must
+ * reuse this result instead of verifying again. A throttled key is reported
+ * as {@link RateLimitedRequest} so the caller can answer 429, not 401.
+ */
+export const validateRequestDetailed = async (request: IncomingMessage) => {
 	const api = getApi();
 	const apiKey = request.headers["x-api-key"] as string;
 	if (apiKey) {
-		return (
-			(await validateApiKey(apiKey)) ?? {
-				session: null,
-				user: null,
-			}
-		);
+		const verification = await verifyApiKeyDetailed(apiKey);
+		if (verification.status === "rate_limited") {
+			const throttled: RateLimitedRequest = {
+				rateLimited: true,
+				retryAfterSeconds: verification.retryAfterSeconds,
+				keyIdPrefix: verification.keyIdPrefix,
+			};
+			return throttled;
+		}
+		return verification.status === "valid"
+			? verification.member
+			: { session: null, user: null };
 	}
 
 	// If no API key, proceed with normal session validation
@@ -1150,4 +1208,15 @@ export const validateRequest = async (request: IncomingMessage) => {
 	}
 
 	return session;
+};
+
+/**
+ * Session/API-key authentication for callers that only need the identity. A
+ * throttled key resolves to no identity here; REST entry points use
+ * {@link validateRequestDetailed} to answer 429 instead.
+ */
+export const validateRequest = async (request: IncomingMessage) => {
+	const result = await validateRequestDetailed(request);
+	if ("rateLimited" in result) return { session: null, user: null };
+	return result;
 };

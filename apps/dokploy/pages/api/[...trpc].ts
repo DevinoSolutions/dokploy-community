@@ -1,15 +1,26 @@
 import {
 	OPENAPI_MAX_JSON_BODY_SIZE,
 	OPENAPI_MAX_UPLOAD_SIZE,
-	validateRequest,
+	validateRequestDetailed,
 } from "@dokploy/server";
 import { createOpenApiNextHandler } from "@dokploy/trpc-openapi";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { appRouter } from "@/server/api/root";
-import { createTRPCContext } from "@/server/api/trpc";
+import { respondApiKeyRateLimited } from "@/server/api/api-key-rate-limit";
+import { createTRPCContextFromAuth } from "@/server/api/trpc";
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
-	const { session, user } = await validateRequest(req);
+	// The one and only authentication of this request: the context below is
+	// built from this result. Verifying again inside createContext would spend
+	// a second rate-limit unit of the API key per request.
+	const validation = await validateRequestDetailed(req);
+
+	if ("rateLimited" in validation) {
+		respondApiKeyRateLimited(req, res, validation);
+		return;
+	}
+
+	const { session, user } = validation;
 
 	if (!user || !session) {
 		res.status(401).json({ message: "Unauthorized" });
@@ -39,7 +50,17 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
 	// @ts-ignore
 	return createOpenApiNextHandler({
 		router: appRouter,
-		createContext: createTRPCContext,
+		createContext: ({
+			req,
+			res,
+		}: {
+			req: NextApiRequest;
+			res: NextApiResponse;
+		}) =>
+			createTRPCContextFromAuth(
+				{ req, res, info: undefined as never },
+				validation,
+			),
 		maxBodySize: OPENAPI_MAX_JSON_BODY_SIZE,
 		onError:
 			process.env.NODE_ENV === "development"
