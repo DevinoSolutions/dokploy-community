@@ -4,7 +4,11 @@ import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-contex
 import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import { getVaultResolutionMessage } from "@dokploy/server/utils/vault/errors";
 import { and, eq, like } from "drizzle-orm";
-import { isRegistryAccessError } from "./gha-connect/registry-retry";
+import {
+	decideRegistryRetry,
+	isRegistryAccessError,
+} from "./gha-connect/registry-retry";
+import { findRegistryRetriesDone } from "./gha-connect/store";
 
 /**
  * Puts the reason a deploy failed on a vault reference that could not be
@@ -95,5 +99,37 @@ export const recordRegistryAccessFailure = async (
 			"Could not record the registry access failure on the deployment",
 			writeError,
 		);
+	}
+};
+
+const DEPLOYMENT_HANDLE = /\[deployment #(\d+)\]\s*$/;
+
+/**
+ * Whether this failed deploy is one the connection poll will retry (T-15783): a
+ * registry access error on a GitHub Actions release that still has retries
+ * left. The deploy path then leaves the service status alone and sends no
+ * failure notification; the notification goes out only if the release finally
+ * settles as failed. `title` is the deployment's title, which ends in the
+ * handle of the GitHub deployment. Never throws: unsure means not retryable,
+ * which is the old behavior.
+ */
+export const willRetryRegistryFailure = async (
+	title: string | null | undefined,
+	serviceId: string,
+	error: unknown,
+): Promise<boolean> => {
+	const message = error instanceof Error ? error.message : String(error);
+	if (!isRegistryAccessError(message)) return false;
+	const handle = DEPLOYMENT_HANDLE.exec(title ?? "");
+	if (!handle?.[1] || !title?.startsWith("GHA ")) return false;
+	try {
+		const done = await findRegistryRetriesDone(serviceId, Number(handle[1]));
+		return (
+			done !== null &&
+			decideRegistryRetry({ registryAccess: true, retriesDone: done }).kind ===
+				"retry"
+		);
+	} catch {
+		return false;
 	}
 };

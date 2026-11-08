@@ -6095,6 +6095,12 @@
           "notNull": true,
           "default": 0
         },
+        "retryGateVersion": {
+          "name": "retryGateVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "pinned": {
           "name": "pinned",
           "type": "boolean",

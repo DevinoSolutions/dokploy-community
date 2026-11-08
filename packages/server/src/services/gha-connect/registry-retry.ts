@@ -27,24 +27,33 @@ export const MAX_REGISTRY_RETRIES = REGISTRY_RETRY_DELAYS_MS.length;
  * writes the wrapped message on the deployment row (`errorMessage`).
  */
 const REJECTED_TASK = /\btask rejected\b/i;
-/** What a docker pull says when the registry refuses a read (a compose stack deploy has no task text). */
+/**
+ * What a docker pull says when the registry refuses a read (a compose stack deploy has no task
+ * text): a manifest or blob URL of the registry API, or docker's own pull wording.
+ */
 const PULL_CONTEXT =
-	/\/v2\/|pull access denied|failed to (?:resolve reference|pull)|error pulling image|toomanyrequests/i;
+	/https?:\/\/[^\s"']+\/v2\/[^\s"']+\/(?:manifests|blobs)\/|pull access denied|failed to (?:resolve reference|pull)|error pulling image/i;
 
-/** The registry's own words for "you may not read this (yet)". */
+/**
+ * The registry's own words for "you may not read this (yet)". A bare "denied" or
+ * "not found" is not enough: `permission denied` (a mount or file problem) and
+ * `exec: node: not found` (a crashed container) are real failures.
+ */
 const ACCESS_ERROR: RegExp[] = [
-	/\bdenied\b/i,
-	/\bunauthorized\b/i,
+	/\bdenied: denied\b/i,
+	/\bpull access denied\b/i,
+	/\brequested access to the resource is denied\b/i,
+	/\bunauthorized: /i,
 	/\bmanifest unknown\b/i,
-	// "manifest ... not found", "repository ... not found", "image ... not found"; the manifest URL counts.
-	/\b(?:manifests?|repository|image)\b[^\n]{0,160}\bnot found\b/i,
+	// A refusal said right after a manifest or blob reference of the registry API.
+	/\/(?:manifests|blobs)\/[^\n]*?(?:(?<!permission )\bdenied\b|\bunauthorized\b|\bnot found\b)/i,
 ];
 
 /**
  * Whether a failed deploy's error text says the registry refused or did not
  * have the released image. Only a rejected swarm task or a pull error counts: a
- * container that crashed (`Task failed`) or any other error mentioning "not
- * found" is a real failure and settles as one.
+ * container that crashed (`Task failed`), `permission denied`, or any other
+ * error mentioning "not found" is a real failure and settles as one.
  */
 export const isRegistryAccessError = (
 	message: string | null | undefined,

@@ -348,6 +348,12 @@ export const settleReleaseFailure = async (
 ): Promise<ReleaseEndVerdict> => {
 	const verdict = await db.transaction(
 		async (tx): Promise<ReleaseEndVerdict | null> => {
+			// The connection is locked first, then the release, as the deploy gate's own write does.
+			const [connection] = await tx
+				.select({ gateVersion: ghaConnection.gateVersion })
+				.from(ghaConnection)
+				.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId))
+				.for("update");
 			const [release] = await tx
 				.select()
 				.from(ghaRelease)
@@ -359,7 +365,7 @@ export const settleReleaseFailure = async (
 				)
 				.for("update");
 			// Settled already (a repeat), superseded or gone: nothing to retry.
-			if (!release || release.status !== "accepted") return null;
+			if (!connection || !release || release.status !== "accepted") return null;
 			if (release.retryAt !== null) {
 				// A repeat of a call that already scheduled the retry.
 				const attempt = release.retryAttempt;
@@ -381,6 +387,7 @@ export const settleReleaseFailure = async (
 					.set({
 						retryAt: new Date(now.getTime() + decision.delayMs),
 						retryAttempt: decision.attempt,
+						retryGateVersion: connection.gateVersion,
 					})
 					.where(eq(ghaRelease.releaseId, release.releaseId));
 				// The connection stays polled at the active cadence while it waits.
@@ -401,6 +408,32 @@ export const settleReleaseFailure = async (
 	if (verdict?.kind === "retry") return verdict;
 	await settleRelease(ghaConnectionId, githubDeploymentId, "failed");
 	return verdict ?? { kind: "settled" };
+};
+
+/**
+ * How many registry retries the release of this GitHub deployment already used, or
+ * null when no accepted pull release of this service has that deployment (a
+ * deploy that is not a GitHub Actions release, or one that is settled).
+ */
+export const findRegistryRetriesDone = async (
+	serviceId: string,
+	githubDeploymentId: number,
+): Promise<number | null> => {
+	const [row] = await db
+		.select({ retryAttempt: ghaRelease.retryAttempt })
+		.from(ghaRelease)
+		.innerJoin(
+			ghaConnection,
+			eq(ghaConnection.ghaConnectionId, ghaRelease.ghaConnectionId),
+		)
+		.where(
+			and(
+				eq(ghaConnection.serviceId, serviceId),
+				eq(ghaRelease.githubDeploymentId, githubDeploymentId),
+				eq(ghaRelease.status, "accepted"),
+			),
+		);
+	return row ? row.retryAttempt : null;
 };
 
 /**

@@ -82,6 +82,7 @@ import {
 import {
 	recordRegistryAccessFailure,
 	recordVaultFailureReason,
+	willRetryRegistryFailure,
 } from "./deployment-error-message";
 import {
 	getBuildStartCommand,
@@ -572,9 +573,25 @@ export const deployApplication = async ({
 			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
+		// A registry that does not serve the image yet is retried by the GitHub Actions poll
+		// (T-15783): the row below still ends as `error`, but the service is not broken (the
+		// previous release keeps serving after the swarm rollback) and nobody is notified
+		// until the release finally settles as failed.
+		const retryLater = await willRetryRegistryFailure(
+			deployment.title,
+			applicationId,
+			error,
+		);
 		await recordRegistryAccessFailure(deployment.deploymentId, error);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
+		if (retryLater) {
+			await updateApplicationStatus(
+				applicationId,
+				await statusAfterCancelledDeploy({ applicationId }),
+			);
+			throw error;
+		}
 		await updateApplicationStatus(applicationId, "error");
 
 		const errorMessage = await getDeploymentErrorMessage({

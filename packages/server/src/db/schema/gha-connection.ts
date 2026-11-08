@@ -259,6 +259,8 @@ export const ghaRelease = pgTable(
 		 */
 		retryAt: timestamp("retryAt"),
 		retryAttempt: integer("retryAttempt").notNull().default(0),
+		/** The connection's `gateVersion` when the retry was scheduled: a change since then makes the gate look again. */
+		retryGateVersion: integer("retryGateVersion"),
 		/** Kept by retention and never garbage collected. */
 		pinned: boolean("pinned").notNull().default(false),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),

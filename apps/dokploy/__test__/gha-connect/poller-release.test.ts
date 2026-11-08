@@ -54,6 +54,12 @@ vi.mock("@dokploy/server/db", async () => {
 		if (!row) return false;
 		const { sql, params } = dialect.sqlToQuery(condition as never);
 		const values = params.map(String);
+		// A row that ended before the attempt was claimed is the previous attempt's (T-15783).
+		if (/"finishedAt"/.test(sql)) {
+			const claimed = values.find((v) => /^\d{4}-\d\d-\d\dT/.test(v));
+			const finished = row.finishedAt ? String(row.finishedAt) : null;
+			if (claimed && finished !== null && finished < claimed) return false;
+		}
 		if (/"title" like/.test(sql)) {
 			const pattern = values.find((v) => v.includes("%"));
 			if (!pattern) return false;
@@ -104,7 +110,12 @@ vi.mock("@dokploy/server/db", async () => {
 								orderBy: () => ({
 									limit: async () =>
 										table === deployments && rowMatches(condition)
-											? [{ status: mocks.deploymentRow?.status }]
+											? [
+													{
+														status: mocks.deploymentRow?.status,
+														errorMessage: mocks.deploymentRow?.errorMessage,
+													},
+												]
 											: [],
 								}),
 							},
@@ -654,6 +665,61 @@ describe("a release that continues the row registered for its run", () => {
 	it("is still running while the reused row is open", async () => {
 		const watch = await started();
 		expect(await inflight(watch)).toMatchObject({ state: "running" });
+	});
+
+	describe("a retry after the registry refused the image (T-15783)", () => {
+		const CLAIMED = new Date("2026-11-08T10:05:00.000Z");
+		const previousAttempt = {
+			deploymentId: "dep-old",
+			title: "GHA development aaaaaaaa [deployment #120]",
+			buildRunId: "555",
+			externalBuildOnly: false,
+			status: "error",
+			errorMessage:
+				'Container did not stay running after deployment: Task rejected: Get "https://ghcr.io/v2/o/r/manifests/sha256:a": denied: denied',
+			finishedAt: "2026-11-08T10:00:20.000Z",
+		};
+		const retry = (watch: WatchRow) =>
+			deps().inspectInflight({
+				...watch,
+				inflightDeploymentId: 120,
+				inflightStartedAt: CLAIMED,
+			});
+
+		it("does not read the previous attempt's error row while the new attempt has no row yet", async () => {
+			const watch = watchRow();
+			mocks.deploymentRow = { ...previousAttempt };
+			mocks.releaseRows = [{ releaseId: "rel-1", runId: 555 }];
+			// The new job is still waiting in the queue: the retry is in flight.
+			mocks.getJobs.mockResolvedValue([
+				{ data: { titleLog: "GHA development aaaaaaaa [deployment #120]" } },
+			]);
+			expect(await retry(watch)).toEqual({ state: "running" });
+			// Nothing queued either (the enqueue was lost): missing, never the old error.
+			mocks.getJobs.mockResolvedValue([]);
+			expect(await retry(watch)).toEqual({ state: "missing" });
+		});
+
+		it("reads the new attempt's own row once it ended after the claim", async () => {
+			mocks.deploymentRow = {
+				...previousAttempt,
+				deploymentId: "dep-new",
+				finishedAt: "2026-11-08T10:06:10.000Z",
+			};
+			expect(await retry(watchRow())).toMatchObject({
+				state: "error",
+				registryAccess: true,
+			});
+		});
+
+		it("still reads a row that is open (the one the run registered before the claim)", async () => {
+			mocks.deploymentRow = {
+				...previousAttempt,
+				status: "running",
+				finishedAt: null,
+			};
+			expect(await retry(watchRow())).toEqual({ state: "running" });
+		});
 	});
 
 	it("was missing before the fix: an untitled row and no run lookup is never found", async () => {

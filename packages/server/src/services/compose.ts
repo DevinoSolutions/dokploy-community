@@ -103,6 +103,7 @@ import {
 import {
 	recordRegistryAccessFailure,
 	recordVaultFailureReason,
+	willRetryRegistryFailure,
 } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
 import { asDeployable } from "./gha-connect/provider";
@@ -1048,9 +1049,23 @@ export const deployCompose = async ({
 			error,
 			extraLog,
 		);
+		// A registry that does not serve the image yet is retried by the GitHub Actions poll
+		// (T-15783): the row still ends as `error`, but the stack is not marked broken and
+		// nobody is notified until the release finally settles as failed.
+		const retryLater = await willRetryRegistryFailure(
+			deployment.title,
+			composeId,
+			error,
+		);
 		await recordRegistryAccessFailure(deployment.deploymentId, error);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
+		if (retryLater) {
+			await updateCompose(composeId, {
+				composeStatus: await statusAfterCancelledDeploy({ composeId }),
+			});
+			throw error;
+		}
 		// The deployment itself always records the failure; the *service* is only
 		// marked broken when the previous release could not be brought back.
 		const rollbackSucceeded = await didRollbackSucceed(

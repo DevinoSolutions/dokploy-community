@@ -273,6 +273,25 @@ describe.skipIf(!ready)("a release the registry refuses is retried", () => {
 		});
 	});
 
+	it("remembers the gate version the release had passed under", async () => {
+		await accept(100, 11);
+		await client?.exec(`UPDATE "gha_connection" SET "gateVersion" = 7`);
+		await store.settleReleaseFailure(connectionId, 11, DENIED, T0);
+		expect((await releaseOf(11)).retryGateVersion).toBe(7);
+	});
+
+	it("tells the deploy path how many retries a release used, or null when it is not an open release of that service", async () => {
+		await accept(100, 11);
+		expect(await store.findRegistryRetriesDone("app-1", 11)).toBe(0);
+		await store.settleReleaseFailure(connectionId, 11, DENIED, T0);
+		expect(await store.findRegistryRetriesDone("app-1", 11)).toBe(1);
+		// Another service, an unknown deployment, a settled release.
+		expect(await store.findRegistryRetriesDone("app-2", 11)).toBeNull();
+		expect(await store.findRegistryRetriesDone("app-1", 99)).toBeNull();
+		await store.settleRelease(connectionId, 11, "deployed");
+		expect(await store.findRegistryRetriesDone("app-1", 11)).toBeNull();
+	});
+
 	it("only a pending release with a retry time is listed as waiting", async () => {
 		await accept(100, 11);
 		await store.settleReleaseFailure(connectionId, 11, DENIED, T0);

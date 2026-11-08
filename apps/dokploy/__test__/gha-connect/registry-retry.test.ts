@@ -62,6 +62,30 @@ describe("which failed deploys are registry access errors", () => {
 			"Container did not stay running after deployment: Service update rollback_started: update rolled back",
 		],
 		["a build error", "Error building, check the logs for details."],
+		[
+			"a mount problem (permission denied)",
+			'Container did not stay running after deployment: Task rejected: invalid mount config for type "bind": mkdir /data: permission denied',
+		],
+		[
+			"permission denied next to a manifest URL",
+			"Task rejected: open /var/lib/docker/v2/o/r/manifests/sha256:a: permission denied",
+		],
+		[
+			"a plain not found that is not tied to a registry URL",
+			"Container did not stay running after deployment: Task rejected: image not found in the local cache",
+		],
+		[
+			"a bare denied with no registry wording",
+			"Container did not stay running after deployment: Task rejected: denied",
+		],
+		[
+			"a /v2/ URL that is not the registry API",
+			"Task failed: GET https://api.example.com/v2/users unauthorized",
+		],
+		[
+			"an unauthorized API call during a failed task",
+			"Task rejected: hook GET https://api.example.com/v2/users/manifests-list unauthorized",
+		],
 	])("does not match %s", (_name, message) => {
 		expect(isRegistryAccessError(message)).toBe(false);
 	});

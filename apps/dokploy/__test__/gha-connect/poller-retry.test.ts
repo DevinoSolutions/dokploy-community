@@ -71,6 +71,58 @@ describe("a release that waits for the registry is started again by the poll", (
 		});
 	});
 
+	it("looks at the gate again when its settings changed since the release passed it", async () => {
+		const h = harness({
+			deployments: null,
+			// The gate version in the harness is 3.
+			pending: [
+				pending(100, 11, {
+					retryAt: new Date(NOW - 1_000),
+					retryAttempt: 1,
+					retryGateVersion: 2,
+				}),
+			],
+			decision: {
+				state: "waiting",
+				reason: "checks running",
+				pendingNames: [],
+			},
+		});
+		await pollConnectionWatch(watchRow(), h.deps);
+		expect(h.gateCalls).toHaveLength(1);
+		expect(h.started).toHaveLength(0);
+		// Once the gate lets it go, it starts.
+		const passing = harness({
+			deployments: null,
+			pending: [
+				pending(100, 11, {
+					retryAt: new Date(NOW - 1_000),
+					retryAttempt: 1,
+					retryGateVersion: 2,
+				}),
+			],
+		});
+		await pollConnectionWatch(watchRow(), passing.deps);
+		expect(passing.gateCalls).toHaveLength(1);
+		expect(passing.started).toHaveLength(1);
+	});
+
+	it("skips the gate when its settings are the ones the release passed under", async () => {
+		const h = harness({
+			deployments: null,
+			pending: [
+				pending(100, 11, {
+					retryAt: new Date(NOW - 1_000),
+					retryAttempt: 1,
+					retryGateVersion: 3,
+				}),
+			],
+		});
+		await pollConnectionWatch(watchRow(), h.deps);
+		expect(h.gateCalls).toHaveLength(0);
+		expect(h.started).toHaveLength(1);
+	});
+
 	it("a retry whose start is stale waits for the next tick instead of failing", async () => {
 		const h = harness({
 			deployments: null,
