@@ -6,6 +6,17 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 **Swarm no longer replays old registry credentials** (T-15783). A service update that has no registry credentials now sends an anonymous registry auth for the image host, so a public ghcr.io image is no longer refused with `denied: denied` by credentials stored on the service for another registry.
 
+A GitHub Actions release whose image the registry does not serve yet is retried instead of failed.
+
+Upgrade notes: one additive database migration (0233, two columns on `gha_release`). An image-only rollback to v0.30.8-community.50 keeps working: the columns are unused there. Nothing to configure.
+
+**Native pull mode retries a registry that is not ready** (T-15783).
+
+- GHCR can take a while to make a freshly pushed manifest readable without a login, so a host that pulls anonymously could have its swarm task Rejected with `denied: denied` seconds after the push, and the release was settled as failed for good. Only a rejected task or pull error that says `denied`, `unauthorized`, `manifest unknown` or `not found` counts; every other failure settles as failed as before.
+- The release now stays accepted and the connection poll starts it again after 60 s, 120 s, 240 s and 300 s (four retries, 12 minutes), then settles it failed with a note. The retry time is stored on the release (`retryAt`, `retryAttempt`), so a Dokploy restart does not lose it.
+- A newer release supersedes a waiting one, as it does any older accepted release. A retry skips the deploy gate, which the release already passed.
+- The GitHub deployment is answered with a queued status ("Image not readable at the registry yet; retrying in 60 s (1/4)") instead of a failure, and the Provider tab shows a Retrying pill with the same sentence. `ghaConnection.one` reports the release as `retrying`.
+
 ### New in v0.30.8-community.50
 
 A GitHub Actions pill that opens during the first build, service headers that fit a phone, and a swarm deploy wait that no longer misses slow image pulls.

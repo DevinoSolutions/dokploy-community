@@ -78,7 +78,9 @@ beforeAll(async () => {
 		"0230_gha_deploy_gate.sql",
 		"0230_gha_deploy_gate.sql",
 		"0231_gha_release_source.sql",
+		"0233_gha_release_registry_retry.sql",
 		"0231_gha_release_source.sql",
+		"0233_gha_release_registry_retry.sql",
 	]) {
 		for (const statement of migrationStatements(file)) await pg.exec(statement);
 	}

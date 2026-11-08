@@ -21,6 +21,7 @@ import {
 	deleteGhaConnection,
 	findReleaseByDeployment,
 	isDue,
+	isRegistryAccessError,
 	listGhaConnections,
 	planApplicationFlip,
 	snapshotPreviousSource,
@@ -416,7 +417,8 @@ const prepareReleaseDeploy = async (
 	const saveBackup = (backup: Record<string, unknown>) =>
 		tx
 			.update(ghaRelease)
-			.set({ sourceBackup: backup })
+			// A retry that waited for the registry (T-15783) starts here: its time is used up.
+			.set({ sourceBackup: backup, retryAt: null })
 			.where(eq(ghaRelease.releaseId, stored.releaseId));
 	const clearBackup = (tx2: Tx) =>
 		tx2
@@ -722,6 +724,7 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 			: eq(deployments.composeId, watch.serviceId);
 	const statusOf = {
 		status: deployments.status,
+		errorMessage: deployments.errorMessage,
 	};
 	const [titled] = await db
 		.select(statusOf)
@@ -787,7 +790,15 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 		case "done":
 			return { state: "done", logUrl };
 		case "error":
-			return { state: "error", logUrl };
+			// The error text is read only to tell a registry that refused the image from any other
+			// failure; the text itself goes no further.
+			return {
+				state: "error",
+				logUrl,
+				...(isRegistryAccessError(row.errorMessage)
+					? { registryAccess: true }
+					: {}),
+			};
 		case "cancelled":
 			return { state: "cancelled", logUrl };
 		default:

@@ -252,6 +252,13 @@ export const ghaRelease = pgTable(
 		gateCheckedAt: timestamp("gateCheckedAt"),
 		gateExpected: jsonb("gateExpected").$type<GhaGateExpected>(),
 		gateOverride: jsonb("gateOverride").$type<GhaGateOverride>(),
+		/**
+		 * The registry did not serve the image yet (T-15783): the release stays accepted and the
+		 * poller starts it again at `retryAt`. `retryAttempt` counts the retries scheduled so far
+		 * (at most 4); `retryAt` is cleared when a retry starts and when the release settles.
+		 */
+		retryAt: timestamp("retryAt"),
+		retryAttempt: integer("retryAttempt").notNull().default(0),
 		/** Kept by retention and never garbage collected. */
 		pinned: boolean("pinned").notNull().default(false),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),

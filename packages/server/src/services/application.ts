@@ -79,7 +79,10 @@ import {
 	runRemoteBuildScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { recordVaultFailureReason } from "./deployment-error-message";
+import {
+	recordRegistryAccessFailure,
+	recordVaultFailureReason,
+} from "./deployment-error-message";
 import {
 	getBuildStartCommand,
 	getBuildStartLine,
@@ -569,6 +572,7 @@ export const deployApplication = async ({
 			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
+		await recordRegistryAccessFailure(deployment.deploymentId, error);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updateApplicationStatus(applicationId, "error");

@@ -100,7 +100,10 @@ import {
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { recordVaultFailureReason } from "./deployment-error-message";
+import {
+	recordRegistryAccessFailure,
+	recordVaultFailureReason,
+} from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
 import { asDeployable } from "./gha-connect/provider";
 import {
@@ -1045,6 +1048,7 @@ export const deployCompose = async ({
 			error,
 			extraLog,
 		);
+		await recordRegistryAccessFailure(deployment.deploymentId, error);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		// The deployment itself always records the failure; the *service* is only

@@ -231,6 +231,8 @@ export type ProviderConnection = {
 	deployedRunId: number | null;
 	deployedAt: Date | string | null;
 	lastActivityAt: Date | string | null;
+	/** A release waits for the registry to serve its image and is started again on its own (T-15783). */
+	retry?: { attempt: number; max: number } | null;
 };
 
 export type ProviderStatus = {
@@ -251,6 +253,19 @@ export const describeProviderStatus = (
 	connection: ProviderConnection,
 ): ProviderStatus => {
 	const sentence = connection.statusText ?? "";
+	// The registry does not serve the new image yet: Dokploy waits and starts the release again.
+	if (
+		connection.retry &&
+		connection.state !== "blocked" &&
+		connection.state !== "disconnected"
+	) {
+		return {
+			pill: { label: "Retrying", tone: "warn" },
+			sentence,
+			exit: "Dokploy tries again by itself; nothing to do unless it keeps failing.",
+			actions: ["checkNow"],
+		};
+	}
 	switch (connection.state) {
 		case "connected":
 			return {

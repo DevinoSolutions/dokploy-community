@@ -96,6 +96,10 @@ export interface PendingRelease {
 	gateState: GateRelease["gateState"];
 	gateExpected: GateRelease["gateExpected"];
 	gateCheckedAt: Date | null;
+	/** The registry did not serve the image yet: the release is started again at this time (T-15783). */
+	retryAt?: Date | null;
+	/** Retries scheduled so far (at most four). */
+	retryAttempt?: number;
 }
 
 export interface ConnectionPollDeps extends PollDeps {
@@ -778,6 +782,14 @@ const settle = async (
 	}
 	if (newest.githubDeploymentId === null) {
 		await deps.failRelease(record.connectionId, newest.releaseId);
+		return;
+	}
+
+	// The registry did not serve this release's image yet (T-15783). It passed the gate when it
+	// first went out; it only waits for its time and then starts again.
+	if (newest.retryAt) {
+		if (newest.retryAt.getTime() > deps.now()) return;
+		await startRelease(watch, deps, tick, record, newest);
 		return;
 	}
 

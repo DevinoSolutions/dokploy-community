@@ -1,4 +1,5 @@
 import { redactSecrets } from "../../utils/process/redactSecrets";
+import type { ReleaseEndVerdict } from "../gha-connect/registry-retry";
 import type { FetchLike } from "./device-flow";
 import {
 	createDeploymentStatus,
@@ -62,7 +63,11 @@ export type StartOutcome =
 export type InflightState =
 	| { state: "running" }
 	| { state: "done"; logUrl?: string }
-	| { state: "error"; logUrl?: string }
+	/**
+	 * `registryAccess`: the deploy failed because the registry refused or did not have the image
+	 * (T-15783). Only this verdict is carried; the error text itself never leaves the reader.
+	 */
+	| { state: "error"; logUrl?: string; registryAccess?: boolean }
 	| { state: "cancelled"; logUrl?: string }
 	/** No Dokploy deployment row for this GitHub deployment (yet). */
 	| { state: "missing" };
@@ -111,9 +116,15 @@ export interface PollDeps {
 	/**
 	 * Connection watches only: the Dokploy deployment ended. Called before
 	 * GitHub is told, and again when telling GitHub has to be retried, so it
-	 * must be safe to repeat.
+	 * must be safe to repeat. Answers `retry` when the release is not over
+	 * (the registry does not serve its image yet): GitHub is then told the
+	 * `text` as a queued status instead of a failure, and the connection poll
+	 * starts the release again later (T-15783).
 	 */
-	onDeployEnded?: (watch: WatchRow, end: EndState) => Promise<void>;
+	onDeployEnded?: (
+		watch: WatchRow,
+		end: EndState,
+	) => Promise<ReleaseEndVerdict | undefined | void>;
 	log: (message: string) => void;
 }
 
@@ -412,7 +423,28 @@ export const prepareTick = async (
 			end = state;
 		}
 		if (!end) return null;
-		if (watch.ghaConnectionId) await deps.onDeployEnded?.(watch, end);
+		const verdict = (
+			watch.ghaConnectionId ? await deps.onDeployEnded?.(watch, end) : undefined
+		) as ReleaseEndVerdict | undefined;
+		if (verdict?.kind === "retry") {
+			// Not over: GitHub is told the release waits, not that it failed.
+			const waiting = await postStatus(
+				deps,
+				watch,
+				token,
+				watch.inflightDeploymentId as number,
+				"queued",
+				verdict.text,
+			);
+			if (waiting.settled) {
+				await deps.patchWatch(watch.watchId, {
+					inflightDeploymentId: null,
+					inflightStartedAt: null,
+					lastError: null,
+				});
+			}
+			return null;
+		}
 		const reported = await reportEnd(deps, watch, token, end);
 		if (reported.settled) {
 			await deps.patchWatch(watch.watchId, {

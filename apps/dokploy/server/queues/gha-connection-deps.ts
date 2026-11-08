@@ -39,6 +39,7 @@ import {
 	renameGhaConnectionRepository,
 	runUpkeep,
 	settleRelease,
+	settleReleaseFailure,
 	supersedeReleases,
 	toPendingRelease,
 } from "@dokploy/server/services/gha-connect";
@@ -272,6 +273,23 @@ export const createGhaConnectionPollDeps = (
 		},
 		onDeployEnded: async (watch, end) => {
 			if (!watch.ghaConnectionId || watch.inflightDeploymentId === null) return;
+			if (end.state === "error") {
+				// The registry may not serve a fresh image yet (T-15783): the release then waits
+				// for a retry instead of ending as failed. Any other error settles as before.
+				const verdict = await settleReleaseFailure(
+					watch.ghaConnectionId,
+					watch.inflightDeploymentId,
+					end.registryAccess === true,
+				);
+				if (verdict.kind === "exhausted") {
+					await applyConnectionEvent(
+						watch.ghaConnectionId,
+						{ type: "release-refused", message: verdict.note, block: false },
+						verdict.note,
+					);
+				}
+				return verdict;
+			}
 			await settleRelease(
 				watch.ghaConnectionId,
 				watch.inflightDeploymentId,
