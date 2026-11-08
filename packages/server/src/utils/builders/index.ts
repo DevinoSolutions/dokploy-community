@@ -20,6 +20,7 @@ import {
 	mergePredefinedEnvVariables,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
+import { anonymousRegistryAuth } from "../docker/registry-auth-clear";
 import { getRemoteDocker } from "../servers/remote-docker";
 import { removeStagedFiles, type StageOptions } from "../docker/staging";
 import { withResolvedVaultRefs } from "../vault";
@@ -219,7 +220,10 @@ export const mechanizeDockerContainer = async (
 	);
 
 	const image = await getImageName(application);
-	const authConfig = await getAuthConfig(application);
+	// No credentials for this image: send an explicit anonymous auth so swarm
+	// replaces, not keeps, the registry auth stored on the service (T-15783).
+	const authConfig =
+		(await getAuthConfig(application)) ?? anonymousRegistryAuth(image);
 	const docker = await getRemoteDocker(application.serverId);
 
 	const settings: CreateServiceOptions = {
@@ -283,11 +287,9 @@ export const mechanizeDockerContainer = async (
 		});
 	} catch (error) {
 		console.log(error);
-		if (authConfig) {
-			await docker.createService(authConfig, settings);
-		} else {
-			await docker.createService(settings);
-		}
+		// Pass the auth explicitly: dockerode's one-argument createService(opts)
+		// takes `opts` itself as the auth object, not `opts.authconfig`.
+		await docker.createService(authConfig, settings);
 	}
 };
 

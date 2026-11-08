@@ -17,7 +17,7 @@ const { inspectMock, getServiceMock, createServiceMock, getRemoteDockerMock } =
 		const inspect = vi.fn<() => Promise<never>>();
 		const getService = vi.fn(() => ({ inspect }));
 		const createService = vi.fn<
-			(opts: MockCreateServiceOptions) => Promise<void>
+			(auth: unknown, opts: MockCreateServiceOptions) => Promise<void>
 		>(async () => undefined);
 		const getRemoteDocker = vi.fn(async () => ({
 			getService,
@@ -83,12 +83,12 @@ describe("mechanizeDockerContainer", () => {
 
 		expect(createServiceMock).toHaveBeenCalledTimes(1);
 		const call = createServiceMock.mock.calls[0] as
-			| [MockCreateServiceOptions]
+			| [unknown, MockCreateServiceOptions]
 			| undefined;
 		if (!call) {
 			throw new Error("createServiceMock should have been called once");
 		}
-		const [settings] = call;
+		const [, settings] = call;
 		expect(settings.TaskTemplate?.ContainerSpec?.StopGracePeriod).toBe(0);
 		expect(typeof settings.TaskTemplate?.ContainerSpec?.StopGracePeriod).toBe(
 			"number",
@@ -102,12 +102,12 @@ describe("mechanizeDockerContainer", () => {
 
 		expect(createServiceMock).toHaveBeenCalledTimes(1);
 		const call = createServiceMock.mock.calls[0] as
-			| [MockCreateServiceOptions]
+			| [unknown, MockCreateServiceOptions]
 			| undefined;
 		if (!call) {
 			throw new Error("createServiceMock should have been called once");
 		}
-		const [settings] = call;
+		const [, settings] = call;
 		expect(settings.TaskTemplate?.ContainerSpec).not.toHaveProperty(
 			"StopGracePeriod",
 		);
@@ -127,7 +127,7 @@ describe("mechanizeDockerContainer", () => {
 		if (!call) {
 			throw new Error("createServiceMock should have been called once");
 		}
-		const [settings] = call;
+		const [, settings] = call;
 		expect(settings.TaskTemplate?.ContainerSpec?.Ulimits).toEqual(ulimits);
 	});
 
@@ -141,7 +141,7 @@ describe("mechanizeDockerContainer", () => {
 		if (!call) {
 			throw new Error("createServiceMock should have been called once");
 		}
-		const [settings] = call;
+		const [, settings] = call;
 		expect(settings.TaskTemplate?.ContainerSpec).not.toHaveProperty("Ulimits");
 	});
 
@@ -155,7 +155,7 @@ describe("mechanizeDockerContainer", () => {
 		if (!call) {
 			throw new Error("createServiceMock should have been called once");
 		}
-		const [settings] = call;
+		const [, settings] = call;
 		expect(settings.TaskTemplate?.ContainerSpec).not.toHaveProperty("Ulimits");
 	});
 
@@ -197,6 +197,97 @@ describe("mechanizeDockerContainer", () => {
 
 			expect(updateMock).toHaveBeenCalledTimes(1);
 			expect(updateMock.mock.calls[0]?.[0].Labels).toEqual({});
+		});
+	});
+
+	// T-15783: swarm keeps the registry auth stored on a service when an update
+	// carries no X-Registry-Auth header, so an image without credentials must
+	// still send an explicit anonymous auth.
+	describe("registry auth on service update", () => {
+		const updateMock = vi.fn<(opts: MockCreateServiceOptions) => Promise<void>>(
+			async () => undefined,
+		);
+
+		beforeEach(() => {
+			updateMock.mockClear();
+			inspectMock.mockResolvedValue({
+				Version: { Index: 7 },
+				Spec: { TaskTemplate: { ForceUpdate: 2 } },
+			} as never);
+			getServiceMock.mockReturnValue({
+				inspect: inspectMock,
+				update: updateMock,
+			} as never);
+		});
+
+		const sentAuth = () => updateMock.mock.calls[0]?.[0].authconfig;
+
+		it("sends an anonymous auth for the image host when there are no credentials", async () => {
+			await mechanizeDockerContainer(
+				createApplication({
+					dockerImage: "ghcr.io/devinosolutions/app@sha256:abc",
+				}),
+			);
+
+			expect(updateMock).toHaveBeenCalledTimes(1);
+			expect(sentAuth()).toEqual({ serveraddress: "ghcr.io" });
+			expect(sentAuth()).not.toHaveProperty("username");
+			expect(sentAuth()).not.toHaveProperty("password");
+		});
+
+		it("encodes to a non-empty X-Registry-Auth header holding only the server address", async () => {
+			await mechanizeDockerContainer(
+				createApplication({ dockerImage: "ghcr.io/devinosolutions/app:1" }),
+			);
+
+			// docker-modem sends base64(JSON(authconfig)) when authconfig is truthy.
+			const auth = sentAuth();
+			expect(auth).toBeTruthy();
+			const header = Buffer.from(JSON.stringify(auth)).toString("base64");
+			expect(header).not.toBe("");
+			expect(JSON.parse(Buffer.from(header, "base64").toString())).toEqual({
+				serveraddress: "ghcr.io",
+			});
+		});
+
+		it("defaults the host to docker.io for an image without a registry host", async () => {
+			await mechanizeDockerContainer(
+				createApplication({ dockerImage: "nginx:1.27" }),
+			);
+
+			expect(sentAuth()).toEqual({ serveraddress: "docker.io" });
+		});
+
+		it("keeps the real credentials when getAuthConfig returns them", async () => {
+			await mechanizeDockerContainer(
+				createApplication({
+					dockerImage: "registry.example.com:8443/team/app:1",
+					username: "deploy",
+					password: "s3cret",
+					registryUrl: "registry.example.com:8443",
+				}),
+			);
+
+			expect(sentAuth()).toEqual({
+				username: "deploy",
+				password: "s3cret",
+				serveraddress: "registry.example.com:8443",
+			});
+		});
+
+		it("passes the same auth to createService when the service does not exist yet", async () => {
+			inspectMock.mockRejectedValue(new Error("service not found"));
+
+			await mechanizeDockerContainer(
+				createApplication({
+					dockerImage: "ghcr.io/devinosolutions/app@sha256:abc",
+				}),
+			);
+
+			expect(createServiceMock).toHaveBeenCalledTimes(1);
+			const [auth, settings] = createServiceMock.mock.calls[0] ?? [];
+			expect(auth).toEqual({ serveraddress: "ghcr.io" });
+			expect(settings?.authconfig).toEqual({ serveraddress: "ghcr.io" });
 		});
 	});
 });
