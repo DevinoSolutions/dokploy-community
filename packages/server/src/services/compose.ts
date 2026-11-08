@@ -100,6 +100,7 @@ import {
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
+import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
 import {
 	recordRegistryAccessFailure,
 	recordVaultFailureReason,
@@ -1061,10 +1062,14 @@ export const deployCompose = async ({
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		if (retryLater) {
-			await updateCompose(composeId, {
-				composeStatus: await statusAfterCancelledDeploy({ composeId }),
-			});
-			throw error;
+			// The queue puts back the status the stack had when this job started.
+			const settledStatus = await statusAfterCancelledDeploy({ composeId });
+			await updateCompose(composeId, { composeStatus: settledStatus });
+			throw new RegistryRetryPendingError(
+				error instanceof Error ? error.message : String(error),
+				settledStatus,
+				{ cause: error },
+			);
 		}
 		// The deployment itself always records the failure; the *service* is only
 		// marked broken when the previous release could not be brought back.

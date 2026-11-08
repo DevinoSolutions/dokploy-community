@@ -103,6 +103,26 @@ export const decideRegistryRetry = (input: {
 	return { kind: "retry", attempt: input.retriesDone + 1, delayMs };
 };
 
+/**
+ * What a deploy throws when the registry refused the image of a GitHub Actions
+ * release and the connection poll will retry it. It ends the job like any failed
+ * deploy, but the deployment queue does not flip the service to `error`: it puts
+ * back the status the service had when the job started (`settledStatus` is the
+ * fallback the deploy already wrote). Matched by property, like the cancel and
+ * rebuild-refused errors, so any module copy's error works.
+ */
+export class RegistryRetryPendingError extends Error {
+	readonly registryRetryPending = true as const;
+	constructor(
+		message: string,
+		readonly settledStatus: "idle" | "done",
+		options?: { cause?: unknown },
+	) {
+		super(message, options);
+		this.name = "RegistryRetryPendingError";
+	}
+}
+
 /** What a settled deploy tells the poll: keep the GitHub Deployment open and wait, or report its end. */
 export type ReleaseEndVerdict =
 	| { kind: "retry"; text: string }

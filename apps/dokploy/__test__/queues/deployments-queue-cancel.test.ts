@@ -57,6 +57,13 @@ const refused = (settledStatus?: string) =>
 		settledStatus,
 	});
 
+/** What a deploy throws when the registry refused a GitHub Actions release that will be retried (T-15783). */
+const retryPending = (settledStatus?: string) =>
+	Object.assign(new Error("Task rejected: denied: denied"), {
+		registryRetryPending: true,
+		settledStatus,
+	});
+
 const composeJob = {
 	data: {
 		applicationType: "compose",
@@ -86,6 +93,52 @@ beforeEach(() => {
 	mocks.updateApplicationStatus.mockResolvedValue(undefined);
 	mocks.readServiceStatus.mockResolvedValue("done");
 	mocks.restoreServiceStatusIfUnchanged.mockResolvedValue(true);
+});
+
+describe("processDeploymentJob: a release the registry will serve later", () => {
+	it("puts back the status the service had, not error and not a guess", async () => {
+		mocks.readServiceStatus.mockImplementation(async (service: object) =>
+			"composeId" in service ? "error" : "idle",
+		);
+		mocks.deployCompose.mockRejectedValue(retryPending("done"));
+		mocks.deployApplication.mockRejectedValue(retryPending("done"));
+
+		await expect(processDeploymentJob(composeJob)).resolves.toBe("failed");
+		await expect(processDeploymentJob(applicationJob)).resolves.toBe("failed");
+
+		// A stack that was already in error stays in error; a first-ever deploy goes back to idle.
+		expect(mocks.restoreServiceStatusIfUnchanged.mock.calls).toEqual([
+			[{ composeId: "c1" }, "done", "error"],
+			[{ applicationId: "a1" }, "done", "idle"],
+		]);
+		// Only "running" is written unconditionally; nothing is flipped to error.
+		expect(composeStatuses()).toEqual(["running"]);
+		expect(mocks.updateApplicationStatus.mock.calls).toEqual([
+			["a1", "running"],
+		]);
+	});
+
+	it("keeps the done status of a service that was serving", async () => {
+		mocks.deployCompose.mockRejectedValue(retryPending("done"));
+
+		await processDeploymentJob(composeJob);
+
+		expect(mocks.restoreServiceStatusIfUnchanged).toHaveBeenCalledWith(
+			{ composeId: "c1" },
+			"done",
+			"done",
+		);
+		expect(composeStatuses()).toEqual(["running"]);
+	});
+
+	it("any other failure still ends the service as error", async () => {
+		mocks.deployCompose.mockRejectedValue(new Error("boom"));
+
+		await expect(processDeploymentJob(composeJob)).resolves.toBe("failed");
+
+		expect(composeStatuses()).toEqual(["running", "error"]);
+		expect(mocks.restoreServiceStatusIfUnchanged).not.toHaveBeenCalled();
+	});
 });
 
 describe("processDeploymentJob", () => {

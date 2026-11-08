@@ -79,6 +79,7 @@ import {
 	runRemoteBuildScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
+import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
 import {
 	recordRegistryAccessFailure,
 	recordVaultFailureReason,
@@ -586,11 +587,14 @@ export const deployApplication = async ({
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		if (retryLater) {
-			await updateApplicationStatus(
-				applicationId,
-				await statusAfterCancelledDeploy({ applicationId }),
+			// The queue puts back the status the service had when this job started.
+			const settledStatus = await statusAfterCancelledDeploy({ applicationId });
+			await updateApplicationStatus(applicationId, settledStatus);
+			throw new RegistryRetryPendingError(
+				error instanceof Error ? error.message : String(error),
+				settledStatus,
+				{ cause: error },
 			);
-			throw error;
 		}
 		await updateApplicationStatus(applicationId, "error");
 

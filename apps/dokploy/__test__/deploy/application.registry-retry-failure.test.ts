@@ -274,7 +274,12 @@ describe("deployApplication: a registry that refuses the image of a GitHub Actio
 			primeMocks(TITLE);
 			vi.mocked(ghaStore.findRegistryRetriesDone).mockResolvedValue(used);
 
-			await expect(run()).rejects.toThrow("denied: denied");
+			// The queue reads this to put back the status the service had when the job started.
+			await expect(run()).rejects.toMatchObject({
+				registryRetryPending: true,
+				settledStatus: "done",
+				message: expect.stringContaining("denied: denied"),
+			});
 
 			expect(ghaStore.findRegistryRetriesDone).toHaveBeenCalledWith(
 				"test-app-id",

@@ -156,7 +156,11 @@ describe("deployCompose: a registry that refuses the image of a GitHub Actions r
 			prime(TITLE);
 			vi.mocked(ghaStore.findRegistryRetriesDone).mockResolvedValue(used);
 
-			await expect(deploy()).rejects.toThrow("denied: denied");
+			await expect(deploy()).rejects.toMatchObject({
+				registryRetryPending: true,
+				settledStatus: "done",
+				message: expect.stringContaining("denied: denied"),
+			});
 
 			expect(ghaStore.findRegistryRetriesDone).toHaveBeenCalledWith(
 				"compose-1",
