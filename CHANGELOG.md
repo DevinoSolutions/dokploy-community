@@ -2,6 +2,16 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.31.0-community.2
+
+A compose no longer recreates its containers, databases included, on its first deploy after upgrading to v0.31.
+
+Upgrade notes: no database migration and nothing to configure. If you are on v0.31.0-community.1, update to this release before redeploying composes. Turning on logs and metrics telemetry for an organization adds Dokploy's metadata labels to its composes once, so each of them recreates its containers on its next deploy. This release includes everything in v0.31.0-community.1.
+
+**Fixed.**
+
+- Composes no longer recreate every container (databases included) on their first deploy after upgrading to v0.31: Dokploy's new metadata labels are only added to compose services when the organization uses logs and metrics telemetry.
+
 ### New in v0.31.0-community.1
 
 Upstream Dokploy v0.31.0 is merged into the fork: logs and metrics telemetry providers, backup custom names, Fresh Volumes and upstream's service transfer, with everything the fork adds on top kept.
