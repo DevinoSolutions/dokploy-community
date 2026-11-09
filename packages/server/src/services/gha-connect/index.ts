@@ -23,6 +23,7 @@ export * from "./present";
 export * from "./processed";
 export * from "./provider";
 export * from "./registry-probe";
+export * from "./registry-retry";
 export * from "./stale";
 export * from "./state-machine";
 export * from "./store";

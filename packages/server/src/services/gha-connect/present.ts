@@ -1,3 +1,4 @@
+import { describeRegistryRetry, MAX_REGISTRY_RETRIES } from "./registry-retry";
 import { describeState } from "./state-machine";
 
 /**
@@ -83,3 +84,50 @@ export const presentGhaConnection = (
 });
 
 export type PresentedGhaConnection = ReturnType<typeof presentGhaConnection>;
+
+export interface PresentableRelease {
+	status: string;
+	delivery: string;
+	retryAt: Date | null;
+	retryAttempt: number;
+}
+
+/**
+ * A pull release that waits for the registry (T-15783) is stored as accepted
+ * with `retryAt` set; the API calls it `retrying`.
+ */
+export const presentReleaseStatus = (release: PresentableRelease): string =>
+	release.status === "accepted" && release.retryAt
+		? "retrying"
+		: release.status;
+
+export interface PresentedRetry {
+	attempt: number;
+	max: number;
+	retryAt: Date;
+	/** The sentence the service shows instead of the state's own. */
+	statusText: string;
+}
+
+/** The release that waits for its retry, newest first as the list is read; null when none does. */
+export const presentRetry = (
+	releases: PresentableRelease[],
+	now: Date = new Date(),
+): PresentedRetry | null => {
+	const waiting = releases.find(
+		(release) =>
+			release.delivery === "pull" &&
+			release.status === "accepted" &&
+			Boolean(release.retryAt),
+	);
+	if (!waiting?.retryAt) return null;
+	return {
+		attempt: waiting.retryAttempt,
+		max: MAX_REGISTRY_RETRIES,
+		retryAt: waiting.retryAt,
+		statusText: describeRegistryRetry(
+			{ attempt: waiting.retryAttempt, retryAt: waiting.retryAt },
+			now,
+		),
+	};
+};

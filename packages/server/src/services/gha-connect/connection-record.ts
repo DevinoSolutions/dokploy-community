@@ -73,4 +73,7 @@ export const toPendingRelease = (row: GhaReleaseRow): PendingRelease => ({
 	gateState: row.gateState,
 	gateExpected: row.gateExpected,
 	gateCheckedAt: row.gateCheckedAt,
+	retryAt: row.retryAt,
+	retryAttempt: row.retryAttempt,
+	retryGateVersion: row.retryGateVersion,
 });

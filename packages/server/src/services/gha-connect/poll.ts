@@ -96,6 +96,12 @@ export interface PendingRelease {
 	gateState: GateRelease["gateState"];
 	gateExpected: GateRelease["gateExpected"];
 	gateCheckedAt: Date | null;
+	/** The registry did not serve the image yet: the release is started again at this time (T-15783). */
+	retryAt?: Date | null;
+	/** Retries scheduled so far (at most four). */
+	retryAttempt?: number;
+	/** The gate version the release had passed under; a different one now means the settings changed. */
+	retryGateVersion?: number | null;
 }
 
 export interface ConnectionPollDeps extends PollDeps {
@@ -779,6 +785,22 @@ const settle = async (
 	if (newest.githubDeploymentId === null) {
 		await deps.failRelease(record.connectionId, newest.releaseId);
 		return;
+	}
+
+	// The registry did not serve this release's image yet (T-15783). It passed the gate when it
+	// first went out, so it only waits for its time and then starts again. If the gate settings
+	// changed meanwhile (gateVersion moves on every change and on Deploy anyway), the gate looks
+	// again before it goes out.
+	if (newest.retryAt) {
+		if (newest.retryAt.getTime() > deps.now()) return;
+		const gateUnchanged =
+			newest.retryGateVersion === undefined ||
+			newest.retryGateVersion === null ||
+			newest.retryGateVersion === record.gate.gateVersion;
+		if (gateUnchanged) {
+			await startRelease(watch, deps, tick, record, newest);
+			return;
+		}
 	}
 
 	const run = deps.runGate ?? runDeployGate;

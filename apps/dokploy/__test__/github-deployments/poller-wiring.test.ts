@@ -460,11 +460,36 @@ describe("inspectInflight", () => {
 			...overrides,
 		});
 
-	it("reads only the status of the Dokploy deployment, never its error message", async () => {
-		mocks.selectRows = [{ status: "error" }];
+	it("reads the error message only to tell a registry refusal from any other failure, and passes on nothing but that verdict", async () => {
+		mocks.selectRows = [
+			{ status: "error", errorMessage: "Boom: secret-token" },
+		];
 		const state = await deps().inspectInflight(inflight());
 		expect(state).toEqual({ state: "error", logUrl: undefined });
-		expect(Object.keys(mocks.selectFields[0] as object)).toEqual(["status"]);
+		expect(JSON.stringify(state)).not.toContain("secret-token");
+		expect(Object.keys(mocks.selectFields[0] as object)).toEqual([
+			"status",
+			"errorMessage",
+		]);
+	});
+
+	it("an error the registry caused (the image was denied) is passed on as a verdict, not as text (T-15783)", async () => {
+		const message =
+			'Container did not stay running after deployment: Task rejected: Get "https://ghcr.io/v2/o/r/manifests/sha256:a": denied: denied';
+		mocks.selectRows = [{ status: "error", errorMessage: message }];
+		const state = await deps().inspectInflight(inflight());
+		expect(state).toEqual({
+			state: "error",
+			logUrl: undefined,
+			registryAccess: true,
+		});
+		expect(JSON.stringify(state)).not.toContain("ghcr.io");
+		// A deployment that did not end in error carries no verdict.
+		mocks.selectRows = [{ status: "done", errorMessage: message }];
+		expect(await deps().inspectInflight(inflight())).toEqual({
+			state: "done",
+			logUrl: undefined,
+		});
 	});
 
 	it("builds a link only for a watch that opted in", async () => {

@@ -39,6 +39,18 @@ const readStatusBeforeJob = async (job: InMemoryJob) => {
 	return undefined;
 };
 
+/**
+ * A GitHub Actions release the registry did not serve yet (T-15783): the deploy
+ * failed, the connection poll retries it, and the service keeps the status it
+ * had instead of becoming "error". Matched by property, like the errors below.
+ */
+const isRegistryRetryPending = (
+	error: unknown,
+): error is { settledStatus?: unknown } =>
+	typeof error === "object" &&
+	error !== null &&
+	(error as { registryRetryPending?: unknown }).registryRetryPending === true;
+
 const isRestorableStatus = (
 	status: unknown,
 ): status is "idle" | "done" | "error" =>
@@ -236,6 +248,29 @@ export const processDeploymentJob = async (
 					settledStatus,
 					statusBeforeJob,
 				).catch(() => {});
+			}
+			return "failed";
+		}
+		if (isRegistryRetryPending(error)) {
+			console.log(`Deployment will be retried: ${(error as Error).message}`);
+			const { settledStatus } = error;
+			if (
+				isRestorableStatus(statusBeforeJob) &&
+				isRestorableStatus(settledStatus)
+			) {
+				if (job.data.applicationType === "application") {
+					await restoreServiceStatusIfUnchanged(
+						{ applicationId: job.data.applicationId },
+						settledStatus,
+						statusBeforeJob,
+					).catch(() => {});
+				} else if (job.data.applicationType === "compose") {
+					await restoreServiceStatusIfUnchanged(
+						{ composeId: job.data.composeId },
+						settledStatus,
+						statusBeforeJob,
+					).catch(() => {});
+				}
 			}
 			return "failed";
 		}

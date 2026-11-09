@@ -21,6 +21,7 @@ import {
 	deleteGhaConnection,
 	findReleaseByDeployment,
 	isDue,
+	isRegistryAccessError,
 	listGhaConnections,
 	planApplicationFlip,
 	snapshotPreviousSource,
@@ -53,7 +54,7 @@ import {
 	type WatchRow,
 } from "@dokploy/server/services/github-deployments";
 import { runBackgroundJob } from "@dokploy/server/utils/process/background";
-import { and, asc, desc, eq, gte, like } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, like, or } from "drizzle-orm";
 import {
 	createGhaConnectionPollDeps,
 	pollGhaConnection,
@@ -416,7 +417,8 @@ const prepareReleaseDeploy = async (
 	const saveBackup = (backup: Record<string, unknown>) =>
 		tx
 			.update(ghaRelease)
-			.set({ sourceBackup: backup })
+			// A retry that waited for the registry (T-15783) starts here: its time is used up.
+			.set({ sourceBackup: backup, retryAt: null })
 			.where(eq(ghaRelease.releaseId, stored.releaseId));
 	const clearBackup = (tx2: Tx) =>
 		tx2
@@ -722,11 +724,27 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 			: eq(deployments.composeId, watch.serviceId);
 	const statusOf = {
 		status: deployments.status,
+		errorMessage: deployments.errorMessage,
 	};
+	// A retry (T-15783) reuses the GitHub deployment id and so the title handle: a row that
+	// ended before this attempt was claimed is the previous attempt's, never this one's. A row
+	// that is still open (the one the run registered earlier) or ended after the claim counts.
+	const notEndedBeforeClaim = watch.inflightStartedAt
+		? or(
+				isNull(deployments.finishedAt),
+				gte(deployments.finishedAt, watch.inflightStartedAt.toISOString()),
+			)
+		: undefined;
 	const [titled] = await db
 		.select(statusOf)
 		.from(deployments)
-		.where(and(owner, like(deployments.title, `GHA %${handle}`)))
+		.where(
+			and(
+				owner,
+				like(deployments.title, `GHA %${handle}`),
+				notEndedBeforeClaim,
+			),
+		)
 		.orderBy(desc(deployments.createdAt))
 		.limit(1);
 	let row = titled;
@@ -741,7 +759,13 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 			[row] = await db
 				.select(statusOf)
 				.from(deployments)
-				.where(and(owner, eq(deployments.buildRunId, String(release.runId))))
+				.where(
+					and(
+						owner,
+						eq(deployments.buildRunId, String(release.runId)),
+						notEndedBeforeClaim,
+					),
+				)
 				.orderBy(desc(deployments.createdAt))
 				.limit(1);
 		}
@@ -787,7 +811,15 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 		case "done":
 			return { state: "done", logUrl };
 		case "error":
-			return { state: "error", logUrl };
+			// The error text is read only to tell a registry that refused the image from any other
+			// failure; the text itself goes no further.
+			return {
+				state: "error",
+				logUrl,
+				...(isRegistryAccessError(row.errorMessage)
+					? { registryAccess: true }
+					: {}),
+			};
 		case "cancelled":
 			return { state: "cancelled", logUrl };
 		default:

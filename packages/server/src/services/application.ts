@@ -79,7 +79,12 @@ import {
 	runRemoteBuildScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { recordVaultFailureReason } from "./deployment-error-message";
+import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
+import {
+	recordRegistryAccessFailure,
+	recordVaultFailureReason,
+	willRetryRegistryFailure,
+} from "./deployment-error-message";
 import {
 	getBuildStartCommand,
 	getBuildStartLine,
@@ -569,8 +574,28 @@ export const deployApplication = async ({
 			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
+		// A registry that does not serve the image yet is retried by the GitHub Actions poll
+		// (T-15783): the row below still ends as `error`, but the service is not broken (the
+		// previous release keeps serving after the swarm rollback) and nobody is notified
+		// until the release finally settles as failed.
+		const retryLater = await willRetryRegistryFailure(
+			deployment.title,
+			applicationId,
+			error,
+		);
+		await recordRegistryAccessFailure(deployment.deploymentId, error);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
+		if (retryLater) {
+			// The queue puts back the status the service had when this job started.
+			const settledStatus = await statusAfterCancelledDeploy({ applicationId });
+			await updateApplicationStatus(applicationId, settledStatus);
+			throw new RegistryRetryPendingError(
+				error instanceof Error ? error.message : String(error),
+				settledStatus,
+				{ cause: error },
+			);
+		}
 		await updateApplicationStatus(applicationId, "error");
 
 		const errorMessage = await getDeploymentErrorMessage({

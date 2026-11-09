@@ -13,6 +13,12 @@ import {
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { mergeProcessed } from "./processed";
 import {
+	decideRegistryRetry,
+	exhaustedNote,
+	type ReleaseEndVerdict,
+	registryRetryText,
+} from "./registry-retry";
+import {
 	type ConnectionEvent,
 	reduceConnection,
 	type StateView,
@@ -305,7 +311,7 @@ export const settleRelease = async (
 		if (!release) return;
 		await tx
 			.update(ghaRelease)
-			.set({ status: outcome, settledAt: new Date() })
+			.set({ status: outcome, settledAt: new Date(), retryAt: null })
 			.where(eq(ghaRelease.releaseId, release.releaseId));
 		if (outcome === "deployed") {
 			await tx
@@ -321,6 +327,113 @@ export const settleRelease = async (
 				.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId));
 		}
 	});
+};
+
+/**
+ * A Dokploy deployment of a release ended in error. When the registry did not
+ * serve the image yet (T-15783: GHCR lags making a pushed manifest readable
+ * without a login), the release is not settled: it stays accepted with
+ * `retryAt` and `retryAttempt` set, and the poller starts it again at that time
+ * (60, 120, 240, then 300 seconds; four retries at most). Any other error, and a
+ * registry error with no retry left, settles as failed like before.
+ *
+ * Safe to repeat: the poll calls it again when telling GitHub has to be retried,
+ * and a retry that is already scheduled answers the same without a new one.
+ */
+export const settleReleaseFailure = async (
+	ghaConnectionId: string,
+	githubDeploymentId: number,
+	registryAccess: boolean,
+	now: Date = new Date(),
+): Promise<ReleaseEndVerdict> => {
+	const verdict = await db.transaction(
+		async (tx): Promise<ReleaseEndVerdict | null> => {
+			// The connection is locked first, then the release, as the deploy gate's own write does.
+			const [connection] = await tx
+				.select({ gateVersion: ghaConnection.gateVersion })
+				.from(ghaConnection)
+				.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId))
+				.for("update");
+			const [release] = await tx
+				.select()
+				.from(ghaRelease)
+				.where(
+					and(
+						eq(ghaRelease.ghaConnectionId, ghaConnectionId),
+						eq(ghaRelease.githubDeploymentId, githubDeploymentId),
+					),
+				)
+				.for("update");
+			// Settled already (a repeat), superseded or gone: nothing to retry.
+			if (!connection || !release || release.status !== "accepted") return null;
+			if (release.retryAt !== null) {
+				// A repeat of a call that already scheduled the retry.
+				const attempt = release.retryAttempt;
+				return {
+					kind: "retry",
+					text: registryRetryText(
+						attempt,
+						Math.max(0, release.retryAt.getTime() - now.getTime()),
+					),
+				};
+			}
+			const decision = decideRegistryRetry({
+				registryAccess,
+				retriesDone: release.retryAttempt,
+			});
+			if (decision.kind === "retry") {
+				await tx
+					.update(ghaRelease)
+					.set({
+						retryAt: new Date(now.getTime() + decision.delayMs),
+						retryAttempt: decision.attempt,
+						retryGateVersion: connection.gateVersion,
+					})
+					.where(eq(ghaRelease.releaseId, release.releaseId));
+				// The connection stays polled at the active cadence while it waits.
+				await tx
+					.update(ghaConnection)
+					.set({ lastActivityAt: now })
+					.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId));
+				return {
+					kind: "retry",
+					text: registryRetryText(decision.attempt, decision.delayMs),
+				};
+			}
+			return decision.kind === "exhausted"
+				? { kind: "exhausted", note: exhaustedNote(release.sha) }
+				: null;
+		},
+	);
+	if (verdict?.kind === "retry") return verdict;
+	await settleRelease(ghaConnectionId, githubDeploymentId, "failed");
+	return verdict ?? { kind: "settled" };
+};
+
+/**
+ * How many registry retries the release of this GitHub deployment already used, or
+ * null when no accepted pull release of this service has that deployment (a
+ * deploy that is not a GitHub Actions release, or one that is settled).
+ */
+export const findRegistryRetriesDone = async (
+	serviceId: string,
+	githubDeploymentId: number,
+): Promise<number | null> => {
+	const [row] = await db
+		.select({ retryAttempt: ghaRelease.retryAttempt })
+		.from(ghaRelease)
+		.innerJoin(
+			ghaConnection,
+			eq(ghaConnection.ghaConnectionId, ghaRelease.ghaConnectionId),
+		)
+		.where(
+			and(
+				eq(ghaConnection.serviceId, serviceId),
+				eq(ghaRelease.githubDeploymentId, githubDeploymentId),
+				eq(ghaRelease.status, "accepted"),
+			),
+		);
+	return row ? row.retryAttempt : null;
 };
 
 /**
@@ -377,7 +490,7 @@ export const supersedeReleases = async (
 	if (releaseIds.length === 0) return;
 	await db
 		.update(ghaRelease)
-		.set({ status: "superseded", settledAt: new Date() })
+		.set({ status: "superseded", settledAt: new Date(), retryAt: null })
 		.where(
 			and(
 				eq(ghaRelease.ghaConnectionId, ghaConnectionId),
@@ -394,7 +507,7 @@ export const failAcceptedRelease = async (
 ) => {
 	await db
 		.update(ghaRelease)
-		.set({ status: "failed", settledAt: new Date() })
+		.set({ status: "failed", settledAt: new Date(), retryAt: null })
 		.where(
 			and(
 				eq(ghaRelease.ghaConnectionId, ghaConnectionId),

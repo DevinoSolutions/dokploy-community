@@ -42,6 +42,8 @@ import {
 	overrideGate,
 	planSourceRestore,
 	presentGhaConnection,
+	presentReleaseStatus,
+	presentRetry,
 	type ServiceFacts,
 	serviceRowExists,
 	touchConnectionActivity,
@@ -380,7 +382,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 				method: "GET",
 				path: "/ghaConnection.one",
 				description:
-					"Read how an application or compose stack follows GitHub Actions releases, or null when it does not: repository, workflow file, tracked branch, environment, service key, state (waiting, connected, stale, blocked, disconnected), the sentence the dashboard shows, the commit and run deployed, the last activity and error, and the last five releases (commit, run, attempt, delivery, status). The GitHub token, the saved source settings and the list of handled runs are never returned.",
+					"Read how an application or compose stack follows GitHub Actions releases, or null when it does not: repository, workflow file, tracked branch, environment, service key, state (waiting, connected, stale, blocked, disconnected), the sentence the dashboard shows, the commit and run deployed, the last activity and error, and the last five releases (commit, run, attempt, delivery, status: accepted, deployed, failed, noop, verified, superseded or retrying while the registry does not serve the image yet), and retry when a release waits for the registry (attempt, max, retryAt). The GitHub token, the saved source settings and the list of handled runs are never returned.",
 			},
 		})
 		.input(apiGhaConnectionOne)
@@ -393,15 +395,19 @@ export const ghaConnectionRouter = createTRPCRouter({
 				return null;
 			}
 			const releases = await listReleases(row.ghaConnectionId, 5);
+			// A release waiting for the registry to serve its image (T-15783) is what the service says.
+			const retry = presentRetry(releases);
 			return {
 				...presentGhaConnection(row),
+				...(retry ? { statusText: retry.statusText } : {}),
+				retry,
 				releases: releases.map((release) => ({
 					releaseId: release.releaseId,
 					sha: release.sha,
 					runId: release.runId,
 					runAttempt: release.runAttempt,
 					delivery: release.delivery,
-					status: release.status,
+					status: presentReleaseStatus(release),
 					gateState: release.gateState,
 					gateReason: release.gateReason,
 					createdAt: release.createdAt,

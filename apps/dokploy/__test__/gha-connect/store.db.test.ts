@@ -47,11 +47,13 @@ const ALL_FILES = [
 	"0229_gha_connection.sql",
 	"0230_gha_deploy_gate.sql",
 	"0231_gha_release_source.sql",
+	"0233_gha_release_registry_retry.sql",
 	// A second run of each: every statement is guarded, a replay is a no-op.
 	"0228_github_deployment_watch.sql",
 	"0229_gha_connection.sql",
 	"0230_gha_deploy_gate.sql",
 	"0231_gha_release_source.sql",
+	"0233_gha_release_registry_retry.sql",
 ];
 
 beforeAll(async () => {
