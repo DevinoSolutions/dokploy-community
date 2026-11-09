@@ -48,3 +48,38 @@ export const registryHostOfImage = (image: string): string => {
  */
 export const anonymousRegistryAuth = (image: string): AuthConfig =>
 	({ serveraddress: registryHostOfImage(image) }) as AuthConfig;
+
+const DOCKER_HUB_ALIASES = new Set([
+	"docker.io",
+	"index.docker.io",
+	"registry-1.docker.io",
+]);
+
+/** Lower-case host[:port], with every Docker Hub alias folded to `docker.io`. */
+const canonicalRegistryHost = (host: string): string => {
+	const lower = host.trim().toLowerCase();
+	return DOCKER_HUB_ALIASES.has(lower) ? "docker.io" : lower;
+};
+
+/**
+ * Does `registryUrl` (as stored on a registry row: `host`, `host:port`, or a
+ * URL such as `https://host:port/`) name the registry the `image` lives on?
+ * Scheme, path and case are ignored; docker.io, index.docker.io and
+ * registry-1.docker.io are the same registry. Credentials for a registry must
+ * only be offered to an image hosted there (T-15783).
+ */
+export const registryUrlMatchesImage = (
+	registryUrl: string | null | undefined,
+	image: string | null | undefined,
+): boolean => {
+	if (!registryUrl || !image) return false;
+	const host = registryUrl
+		.trim()
+		.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+		.split(/[/?#]/)[0];
+	if (!host) return false;
+	return (
+		canonicalRegistryHost(host) ===
+		canonicalRegistryHost(registryHostOfImage(image))
+	);
+};

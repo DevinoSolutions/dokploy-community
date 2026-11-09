@@ -20,7 +20,10 @@ import {
 	mergePredefinedEnvVariables,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
-import { anonymousRegistryAuth } from "../docker/registry-auth-clear";
+import {
+	anonymousRegistryAuth,
+	registryUrlMatchesImage,
+} from "../docker/registry-auth-clear";
 import { getRemoteDocker } from "../servers/remote-docker";
 import { removeStagedFiles, type StageOptions } from "../docker/staging";
 import { withResolvedVaultRefs } from "../vault";
@@ -364,7 +367,18 @@ export const getAuthConfig = async (application: ApplicationNested) => {
 		if (username && password) {
 			return { password, username, serveraddress: registryUrl || "" };
 		}
-		if (buildRegistry) return await authFromRegistry(buildRegistry);
+		// The build registry's credentials only go to an image hosted there. A
+		// service cut over to GitHub Actions keeps its old buildRegistryId while
+		// the release image lives on ghcr.io, and must not offer it those.
+		if (
+			buildRegistry &&
+			registryUrlMatchesImage(
+				buildRegistry.registryUrl,
+				application.buildPolicyImage || application.dockerImage,
+			)
+		) {
+			return await authFromRegistry(buildRegistry);
+		}
 	} else if (registry) {
 		return await authFromRegistry(registry);
 	} else if (buildRegistry) {

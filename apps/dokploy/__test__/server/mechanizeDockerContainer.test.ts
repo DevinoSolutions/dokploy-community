@@ -31,9 +31,20 @@ const { inspectMock, getServiceMock, createServiceMock, getRemoteDockerMock } =
 		};
 	});
 
-const { findRegistryMock } = vi.hoisted(() => ({
+const { findRegistryMock, ghcrAuthMock } = vi.hoisted(() => ({
 	findRegistryMock: vi.fn(),
+	ghcrAuthMock: vi.fn(),
 }));
+
+vi.mock(
+	"@dokploy/server/services/github-deployments/registry-auth",
+	async (importOriginal) => ({
+		...(await importOriginal<
+			typeof import("@dokploy/server/services/github-deployments/registry-auth")
+		>()),
+		ghcrAuthConfigForApplication: ghcrAuthMock,
+	}),
+);
 
 vi.mock("@dokploy/server/services/registry", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@dokploy/server/services/registry")>()),
@@ -219,6 +230,9 @@ describe("mechanizeDockerContainer", () => {
 
 		beforeEach(() => {
 			updateMock.mockClear();
+			findRegistryMock.mockReset();
+			ghcrAuthMock.mockReset();
+			ghcrAuthMock.mockResolvedValue(undefined);
 			inspectMock.mockResolvedValue({
 				Version: { Index: 7 },
 				Spec: { TaskTemplate: { ForceUpdate: 2 } },
@@ -295,6 +309,73 @@ describe("mechanizeDockerContainer", () => {
 				password: "reg-secret",
 				serveraddress: "localhost:5000",
 			});
+		});
+
+		const staleBuildRegistry = {
+			registryId: "reg-1",
+			registryType: "cloud",
+			registryUrl: "localhost:5000",
+		} as never;
+
+		it("does not offer a stale build registry to an image on another host", async () => {
+			await mechanizeDockerContainer(
+				createApplication({
+					dockerImage: "ghcr.io/x/y@sha256:abc",
+					registry: null,
+					buildRegistry: staleBuildRegistry,
+				}),
+			);
+
+			expect(findRegistryMock).not.toHaveBeenCalled();
+			expect(sentAuth()).toEqual({ serveraddress: "ghcr.io" });
+		});
+
+		it("uses the GitHub login for ghcr.io when the build registry is another host", async () => {
+			const creds = {
+				username: "gh-user",
+				password: "gh-token",
+				serveraddress: "ghcr.io",
+			};
+			ghcrAuthMock.mockResolvedValue(creds);
+
+			await mechanizeDockerContainer(
+				createApplication({
+					applicationId: "app-1",
+					dockerImage: "ghcr.io/x/y@sha256:abc",
+					registry: null,
+					buildRegistry: staleBuildRegistry,
+				}),
+			);
+
+			expect(findRegistryMock).not.toHaveBeenCalled();
+			expect(ghcrAuthMock).toHaveBeenCalledWith(
+				"app-1",
+				"ghcr.io/x/y@sha256:abc",
+			);
+			expect(sentAuth()).toEqual(creds);
+		});
+
+		it("matches a build registry URL written with a scheme and a trailing slash", async () => {
+			findRegistryMock.mockResolvedValue({
+				username: "pusher",
+				password: "reg-secret",
+				registryUrl: "https://localhost:5000/",
+			});
+
+			await mechanizeDockerContainer(
+				createApplication({
+					dockerImage: "localhost:5000/registry.devino.ca/app@sha256:abc",
+					registry: null,
+					buildRegistry: {
+						registryId: "reg-1",
+						registryType: "cloud",
+						registryUrl: "https://localhost:5000/",
+					} as never,
+				}),
+			);
+
+			expect(findRegistryMock).toHaveBeenCalledWith("reg-1");
+			expect(sentAuth()).toMatchObject({ username: "pusher" });
 		});
 
 		it("passes the same auth to createService when the service does not exist yet", async () => {
