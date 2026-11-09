@@ -47,6 +47,9 @@ echo "$*" >> "${log}"
 `,
 	);
 	writeFileSync(path.join(binDir, "ps"), "#!/bin/sh\n");
+	// dockerIdleExec lists processes with pgrep; the real one would see this test's own sh -c.
+	writeFileSync(path.join(binDir, "pgrep"), "#!/bin/sh\nexit 1\n");
+	chmodSync(path.join(binDir, "pgrep"), 0o755);
 	chmodSync(path.join(binDir, "docker"), 0o755);
 	chmodSync(path.join(binDir, "ps"), 0o755);
 	execFileSync("sh", ["-c", script], {
@@ -72,7 +75,11 @@ describe("docker cleanup keeps a stopped dokploy-traefik", () => {
 
 	it.each([
 		["cleanupContainers", cleanupContainers, "container prune --force"],
-		["cleanupSystem", cleanupSystem, "system prune --all --force"],
+		[
+			"cleanupSystem",
+			cleanupSystem,
+			"system prune --force --filter until=168h",
+		],
 	])("%s skips pruning while Traefik is stopped", async (_, fn, prune) => {
 		const [script] = await commandOf(() => fn());
 		expect(runWithFakeDocker(script!, { "dokploy-traefik": "false" })).toEqual(
@@ -94,7 +101,7 @@ describe("docker cleanup keeps a stopped dokploy-traefik", () => {
 		);
 		expect(calls).toEqual([
 			"image prune --all --force",
-			"builder prune --all --force",
+			"builder prune --force --filter until=168h",
 		]);
 	});
 });

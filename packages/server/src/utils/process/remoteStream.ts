@@ -109,6 +109,10 @@ export const pipeBetweenServers = async ({
 	});
 	from.stdout.on("error", () => {});
 	from.stdout.pipe(to.stdin);
+	// When the target closes its stdin first (it exited), pipe() unpipes and pauses the
+	// source stdout, which then never reaches its end and the source never "closes".
+	// Keep draining it so the source exit can settle.
+	to.stdin.once("unpipe", () => from.stdout.resume());
 
 	const targetExit = to.exit.then((code) => {
 		if (code !== 0) from.close();

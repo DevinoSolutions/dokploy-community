@@ -51,6 +51,19 @@ const OUTSIDE = /file path outside the service's code directory/;
 const run = (id: string) =>
 	generateApplyPatchesCommand({ id, type: "application", serverId: null });
 
+// A path with a command substitution must either be refused before a command is built
+// (the fork refuses paths with a backslash, such as a Windows temp dir) or end up quoted,
+// so that running the generated command never executes the substitution.
+const runOrRefuse = async (id: string) => {
+	const command = await run(id).catch((error: unknown) => {
+		expect(String((error as Error).message)).toMatch(OUTSIDE);
+		return null;
+	});
+	if (command) {
+		await execAsync(`(${command}) 2>&1 || true`);
+	}
+};
+
 describe("generateApplyPatchesCommand hardening", () => {
 	it("neutralizes command substitution in a create patch filePath", async () => {
 		const marker = join(baseDir, "PWNED_CREATE");
@@ -63,9 +76,7 @@ describe("generateApplyPatchesCommand hardening", () => {
 			},
 		]);
 
-		// The fork refuses such a path before any command is built (T-7878), stricter than
-		// quoting it, so nothing runs and no marker file can appear.
-		await expect(run("app1")).rejects.toThrow(OUTSIDE);
+		await runOrRefuse("app1");
 		await expect(
 			execAsync(`test -e ${JSON.stringify(marker)}`),
 		).rejects.toBeTruthy();
@@ -82,9 +93,7 @@ describe("generateApplyPatchesCommand hardening", () => {
 			},
 		]);
 
-		// The fork refuses such a path before any command is built (T-7878), stricter than
-		// quoting it, so nothing runs and no marker file can appear.
-		await expect(run("app2")).rejects.toThrow(OUTSIDE);
+		await runOrRefuse("app2");
 		await expect(
 			execAsync(`test -e ${JSON.stringify(marker)}`),
 		).rejects.toBeTruthy();
