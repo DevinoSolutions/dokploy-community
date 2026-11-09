@@ -10,7 +10,7 @@ Short answers to common questions about [Dokploy Community Edition](https://dokp
 
 ## What is Dokploy Community Edition?
 
-Dokploy Community Edition is a community fork of Dokploy, the self-hosted platform for deploying applications, databases and Docker Compose stacks. It includes everything in upstream Dokploy v0.30.8 plus features upstream does not have and fixes ported from open upstream PRs, each ported 1:1 with credit to its original author, plus fork-only security hardening.
+Dokploy Community Edition is a community fork of Dokploy, the self-hosted platform for deploying applications, databases and Docker Compose stacks. It includes everything in upstream Dokploy v0.31.0 plus features upstream does not have and fixes ported from open upstream PRs, each ported 1:1 with credit to its original author, plus fork-only security hardening.
 
 [What is different in this fork](https://dokploy-community.devino.ca/)
 
@@ -28,7 +28,7 @@ On a clean Linux server with root access, the same requirements as Dokploy, run 
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 
 # a specific version
-export DOKPLOY_VERSION=v0.30.8-community.51
+export DOKPLOY_VERSION=v0.31.0-community.1
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 
 # update an existing installation
@@ -41,17 +41,17 @@ Run one docker service update command against the dokploy service on your existi
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.51 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.1 \
   --with-registry-auth \
   dokploy
 ```
 
 ## Can I go back to official Dokploy after switching?
 
-Yes. Update the dokploy service back to the official dokploy/dokploy image at the version you want, for example v0.30.8. The extra tables and columns that this fork adds are simply ignored by official Dokploy.
+Yes. Update the dokploy service back to the official dokploy/dokploy image at the version you want, for example v0.31.0. The extra tables and columns that this fork adds are simply ignored by official Dokploy.
 
 ```bash
-docker service update --image dokploy/dokploy:v0.30.8 --with-registry-auth dokploy
+docker service update --image dokploy/dokploy:v0.31.0 --with-registry-auth dokploy
 ```
 
 ## Is the Dokploy Community Edition image multi-arch?
@@ -117,7 +117,7 @@ Yes. The container log viewer has a Send a command box that sends what you type 
 
 ## How does Dokploy Community Edition stay in sync with upstream Dokploy?
 
-The fork merges upstream release tags, never the moving upstream canary branch, so it always tracks a tested and published state. It diverges only for features that upstream lacks, and when upstream ships an equivalent the fork drops its own version and takes the upstream one. Releases are versioned as the upstream version plus a community release number, for example v0.30.8-community.51.
+The fork merges upstream release tags, never the moving upstream canary branch, so it always tracks a tested and published state. It diverges only for features that upstream lacks, and when upstream ships an equivalent the fork drops its own version and takes the upstream one. Releases are versioned as the upstream version plus a community release number, for example v0.31.0-community.1.
 
 [Versioning table](https://github.com/DevinoSolutions/dokploy-community#versioning)
 
@@ -137,7 +137,7 @@ It reports unhandled backend errors, meaning crashes and internal server errors,
       "name": "What is Dokploy Community Edition?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Dokploy Community Edition is a community fork of Dokploy, the self-hosted platform for deploying applications, databases and Docker Compose stacks. It includes everything in upstream Dokploy v0.30.8 plus features upstream does not have and fixes ported from open upstream PRs, each ported 1:1 with credit to its original author, plus fork-only security hardening."
+        "text": "Dokploy Community Edition is a community fork of Dokploy, the self-hosted platform for deploying applications, databases and Docker Compose stacks. It includes everything in upstream Dokploy v0.31.0 plus features upstream does not have and fixes ported from open upstream PRs, each ported 1:1 with credit to its original author, plus fork-only security hardening."
       }
     },
     {
@@ -169,7 +169,7 @@ It reports unhandled backend errors, meaning crashes and internal server errors,
       "name": "Can I go back to official Dokploy after switching?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. Update the dokploy service back to the official dokploy/dokploy image at the version you want, for example v0.30.8. The extra tables and columns that this fork adds are simply ignored by official Dokploy."
+        "text": "Yes. Update the dokploy service back to the official dokploy/dokploy image at the version you want, for example v0.31.0. The extra tables and columns that this fork adds are simply ignored by official Dokploy."
       }
     },
     {
@@ -249,7 +249,7 @@ It reports unhandled backend errors, meaning crashes and internal server errors,
       "name": "How does Dokploy Community Edition stay in sync with upstream Dokploy?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "The fork merges upstream release tags, never the moving upstream canary branch, so it always tracks a tested and published state. It diverges only for features that upstream lacks, and when upstream ships an equivalent the fork drops its own version and takes the upstream one. Releases are versioned as the upstream version plus a community release number, for example v0.30.8-community.51."
+        "text": "The fork merges upstream release tags, never the moving upstream canary branch, so it always tracks a tested and published state. It diverges only for features that upstream lacks, and when upstream ships an equivalent the fork drops its own version and takes the upstream one. Releases are versioned as the upstream version plus a community release number, for example v0.31.0-community.1."
       }
     },
     {
