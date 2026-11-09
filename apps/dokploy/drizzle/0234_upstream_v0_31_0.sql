@@ -1,26 +1,25 @@
 -- Upstream Dokploy v0.31.0 sync: schema deltas after the fork catch-up chain. Upstream's own
 -- 0196 / 0197 / 0198 are NOT applied; this migration carries their schema effect, regenerated after the
 -- fork chain. Every statement is guarded so a re-run, or a database that already has a column, is a no-op.
---   * compose.pullImages (upstream #5410) replaces the fork's compose.pullImagesOnDeploy. An existing column
---     is renamed in place so the stored value survives; with neither column the new one is added.
+--   * compose.pullImages (upstream #5410) replaces the fork's compose.pullImagesOnDeploy. The new column is
+--     ADDED and filled from the old one once; the old column stays in place (deprecated, mirrored on write by
+--     updateCompose) so a rollback to v0.30.8-community.51, which still selects pullImagesOnDeploy, keeps working.
 --   * Logs-and-metrics telemetry: enum TelemetryProviderType, table telemetryProvider, server and
 --     webServerSettings telemetryProviderIds, webServerSettings.vectorAgentOrganizationId and their FKs.
 --   * backup.customName (upstream 0198, custom backup file names).
 --   * webServerSettings.whitelabelingConfig default gains upstream's new whitelabel keys (default only).
 DO $$ BEGIN
-	IF EXISTS (
-		SELECT 1 FROM information_schema.columns
-		WHERE table_schema = 'public' AND table_name = 'compose' AND column_name = 'pullImagesOnDeploy'
-	) AND NOT EXISTS (
-		SELECT 1 FROM information_schema.columns
-		WHERE table_schema = 'public' AND table_name = 'compose' AND column_name = 'pullImages'
-	) THEN
-		ALTER TABLE "compose" RENAME COLUMN "pullImagesOnDeploy" TO "pullImages";
-	ELSIF NOT EXISTS (
+	IF NOT EXISTS (
 		SELECT 1 FROM information_schema.columns
 		WHERE table_schema = 'public' AND table_name = 'compose' AND column_name = 'pullImages'
 	) THEN
 		ALTER TABLE "compose" ADD COLUMN "pullImages" boolean DEFAULT false NOT NULL;
+		IF EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'compose' AND column_name = 'pullImagesOnDeploy'
+		) THEN
+			UPDATE "compose" SET "pullImages" = "pullImagesOnDeploy";
+		END IF;
 	END IF;
 EXCEPTION WHEN duplicate_column THEN null; END $$;--> statement-breakpoint
 DO $$ BEGIN

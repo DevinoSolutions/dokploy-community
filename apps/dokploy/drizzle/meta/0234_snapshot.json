@@ -3813,6 +3813,13 @@
           "notNull": true,
           "default": false
         },
+        "pullImagesOnDeploy": {
+          "name": "pullImagesOnDeploy",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "triggerType": {
           "name": "triggerType",
           "type": "triggerType",

@@ -155,6 +155,14 @@ export const compose = pgTable("compose", {
 	 */
 	snapvisorProjectName: text("snapvisorProjectName"),
 	pullImages: boolean("pullImages").notNull().default(false),
+	/**
+	 * Deprecated, replaced by `pullImages` (upstream v0.31.0). Kept in the schema and
+	 * mirrored on write by `updateCompose` so a rollback to v0.30.8-community.51, which
+	 * still selects this column, keeps working and the next drizzle generate does not
+	 * emit a DROP. Drop it in a later release once DOKPLOY_MIN_PINNED_VERSION has moved
+	 * past c51. Never read it for behavior and never expose it as API input.
+	 */
+	pullImagesOnDeploy: boolean("pullImagesOnDeploy").notNull().default(false),
 	triggerType: triggerType("triggerType").default("push"),
 	composeStatus: applicationStatus("composeStatus").notNull().default("idle"),
 	icon: text("icon"),
@@ -430,6 +438,8 @@ export const apiUpdateCompose = createSchema
 		appName: true,
 		snapvisorProjectName: true,
 		composeStatus: true,
+		// Deprecated mirror of `pullImages`, written by updateCompose only.
+		pullImagesOnDeploy: true,
 	});
 
 export const apiSaveEnvironmentVariablesCompose = createSchema
