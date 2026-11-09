@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.50**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.51**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.50 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.51 \
   --with-registry-auth \
   dokploy
 ```
@@ -121,11 +121,11 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.50
+## What's new in v0.30.8-community.51
 
-- The GitHub Actions pill now reads the same run list as the run modal, so it opens the run during a service's first build instead of staying inert until the first release. Application and compose service headers stack below the sm breakpoint so nothing is clipped at 390 px, and the run modal row reads "Built by".
-- Deployments of services on a remote server no longer fail with "No tasks from this deployment found" when the image pull takes a while: the wait now identifies the deployment's tasks by their spec version instead of a 5 s creation window, and fails fast on a rollback or a paused update.
-- No database migration and no API change; an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Swarm deploys send an explicit registry auth, so a public ghcr.io image is never refused by stale stored credentials, and a GitHub Actions release whose image the registry does not serve yet is retried instead of failed.
+- API keys are verified once per request and a tripped key limit answers a real 429 with `Retry-After`. Preview hostnames are fixed for templated PR numbers and for branch names that overflow the 63-character DNS label. Traefik file confinement now follows symlinks.
+- One additive database migration (0233); an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -140,7 +140,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.50
+export DOKPLOY_VERSION=v0.30.8-community.51
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -153,7 +153,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.50      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.51      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -196,7 +196,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.50` is the 50th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.51` is the 50th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 

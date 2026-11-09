@@ -2,13 +2,15 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
-### Unreleased
+### New in v0.30.8-community.51
 
-**Swarm no longer replays old registry credentials** (T-15783). A service update that has no registry credentials now sends an anonymous registry auth for the image host, so a public ghcr.io image is no longer refused with `denied: denied` by credentials stored on the service for another registry.
+Swarm deploys send an explicit registry auth and a GitHub Actions pull release is retried when the registry is not ready, API keys are verified once per request with a real 429, preview hostnames are fixed for templated numbers and long branch names, and Traefik file confinement follows symlinks.
 
-A GitHub Actions release whose image the registry does not serve yet is retried instead of failed.
+Upgrade notes: one additive database migration (0233, three columns on `gha_release`). An image-only rollback to v0.30.8-community.50 keeps working because the columns are unused there. Nothing to configure. This release includes everything in v0.30.8-community.50.
 
-Upgrade notes: one additive database migration (0233, three columns on `gha_release`). An image-only rollback to v0.30.8-community.50 keeps working: the columns are unused there. Nothing to configure.
+**Swarm no longer replays old registry credentials** (#616, T-15783).
+
+- A service update that has no registry credentials now sends an anonymous registry auth for the image host, so a public ghcr.io image is no longer refused with `denied: denied` by credentials stored on the service for another registry.
 
 **Native pull mode retries a registry that is not ready** (#615, T-15783).
 
@@ -17,6 +19,28 @@ Upgrade notes: one additive database migration (0233, three columns on `gha_rele
 - A newer release supersedes a waiting one, as it does any older accepted release. A retry skips the deploy gate, which the release already passed, unless the gate settings changed while it waited.
 - While retries are left, a failed attempt still ends its deployment row as `error` but does not mark the service broken (the deployment queue puts back the status the service had when the attempt started) and sends no failure notification; the attempt with no retry left fails and notifies as before.
 - The GitHub deployment is answered with a queued status ("Image not readable at the registry yet; retrying in 60 s (1/4)") instead of a failure, and the Provider tab shows a Retrying pill with the same sentence. `ghaConnection.one` reports the release as `retrying`.
+
+**API keys verified once per request, real 429** (#613, T-15019).
+
+- Every REST request verified its API key twice, so each request spent two rate-limit units, and the plugin's sliding window (anchored on the key's last request) never reset for a key polled faster than once per window. A tripped limit was also collapsed into "invalid key", so callers got a plain 401 and took a busy key for a lost login.
+- The request is now authenticated once and the tRPC context is built from that result. A tripped key limit answers `429` with a `Retry-After` header and a `RATE_LIMITED` JSON body, and logs one warning line with the key id prefix, never the key. Unknown, expired, disabled and organization-less keys still answer 401.
+
+**GitHub previews with templated hostnames** (#560, credit lmichelin).
+
+- The GitHub webhook handed `pullRequestNumber` to the preview code as a number, so any `previewWildcard` template variable made preview creation fail silently with `prNumber.toLowerCase is not a function`: no preview and no comment. The webhook now converts it to a string, as the GitLab and Gitea handlers already did.
+
+**Preview `${branchName}` label within the DNS limit** (#609, credit lmichelin).
+
+- A template that adds text around `${branchName}` could produce a first label longer than 63 characters, which never resolves and never gets a certificate. The template is now expanded label by label: the other variables are substituted first and the branch slug gets the room its label has left, shared evenly when it appears more than once in a label.
+- A shortened slug ends with the first 6 hex characters of the SHA-256 of the full slug, so two long branches with a shared prefix keep distinct hostnames and one branch always gets the same hostname. Labels that already fit are unchanged.
+
+**Traefik file confinement follows symlinks** (#426, T-2406).
+
+- A symlink inside the Traefik config directory that points outside it was still followed by the file read and write calls. The target is now resolved to its real path before the confinement check: locally from the nearest existing parent, on a remote server with a single SSH `realpath` call (`realpath -m` on GNU, plain `realpath` on BusyBox and BSD). Dangling symlinks and the base directory itself are rejected, and an unexpected answer or a host with no usable `realpath` fails closed.
+
+**CI** (#614, T-15522).
+
+- Workflow jobs that had no limit now have a `timeout-minutes` guard. No behavior change.
 
 ### New in v0.30.8-community.50
 
