@@ -82,14 +82,56 @@ const read = (filePath: string, serverId?: string) =>
 
 const rejected = { code: "BAD_REQUEST" };
 
-// The words a real shell makes of a command line, NUL separated so a word can
-// hold a newline.
+// The remote command: a probe picks `realpath -m` (GNU) or plain `realpath`
+// (BusyBox, BSD), both with the same two quoted arguments.
+const probe = "if realpath -m / >/dev/null 2>&1; then realpath -m ";
+const otherwise = "; else realpath ";
+const end = "; fi";
+
+// The quoted `<base> <target>` the command passes to realpath. Both branches
+// must carry exactly the same arguments.
+const remoteArgs = (command: string): string => {
+	expect(command.startsWith(probe)).toBe(true);
+	const rest = command.slice(probe.length);
+	const args = rest.slice(0, (rest.length - otherwise.length - end.length) / 2);
+	expect(rest).toBe(`${args}${otherwise}${args}${end}`);
+	return args;
+};
+
+// The words a real shell makes of the command's realpath arguments, NUL
+// separated so a word can hold a newline.
 const shellWords = (command: string): string[] => {
-	const printed = spawnSync("sh", ["-c", `printf '%s\\0' ${command}`], {
-		encoding: "utf8",
-	});
+	const printed = spawnSync(
+		"sh",
+		["-c", `printf '%s\\0' ${remoteArgs(command)}`],
+		{ encoding: "utf8" },
+	);
 	return printed.stdout.split("\0").slice(0, -1);
 };
+
+// Runs the command in a real sh on a fake host, whose `realpath` is the shell
+// function given. A non-zero exit becomes the ExecError the SSH helper throws.
+const runOnHost = (hostRealpath: string, command: string) => {
+	const ran = spawnSync("sh", ["-c", `${hostRealpath}\n${command}`], {
+		encoding: "utf8",
+	});
+	if (ran.status !== 0) {
+		throw Object.assign(new Error(ran.stderr), {
+			name: "ExecError",
+			exitCode: ran.status,
+		});
+	}
+	return { stdout: ran.stdout, stderr: ran.stderr };
+};
+
+// GNU realpath -m: normalises, accepts a missing path.
+const gnuRealpath = `realpath() { if [ "$1" = -m ]; then shift; else return 1; fi; for a in "$@"; do printf '%s\\n' "$a"; done; }`;
+// BusyBox realpath: no -m and no --, so it reads them as file names and exits 1,
+// but it still prints the paths it could resolve.
+const busyboxRealpath = `realpath() { rc=0; for a in "$@"; do case "$a" in -*) echo "realpath: $a: No such file or directory" >&2; rc=1;; *) printf '%s\\n' "$a";; esac; done; return $rc; }`;
+// A plain realpath that prints the given text, whatever it is asked.
+const plainRealpathPrinting = (text: string) =>
+	`realpath() { if [ "$1" = -m ]; then return 1; fi; printf '%b' '${text}'; }`;
 
 describe("traefik file endpoints are confined to the Traefik config directory", () => {
 	let root: string;
@@ -158,7 +200,6 @@ describe("traefik file endpoints are confined to the Traefik config directory", 
 			async (_serverId: string, command: string) => {
 				return {
 					stdout: `${shellWords(command)
-						.slice(3)
 						.map((arg) => path.posix.normalize(arg))
 						.join("\n")}\n`,
 					stderr: "",
@@ -336,19 +377,17 @@ describe("traefik file endpoints are confined to the Traefik config directory", 
 		const server = "server-a";
 		const target = `${remoteTraefikPath}/dynamic/app.yml`;
 
-		// What `realpath -m -- <base> <target>` prints on a host where the given
+		// What `realpath -m <base> <target>` prints on a host where the given
 		// directories are symlinks.
 		const hostWithSymlinks = (links: Record<string, string>) => {
 			mocks.execAsyncRemote.mockImplementation(
 				async (_serverId: string, command: string) => {
-					const real = shellWords(command)
-						.slice(3)
-						.map((arg) => {
-							const link = Object.keys(links).find(
-								(from) => arg === from || arg.startsWith(`${from}/`),
-							);
-							return link ? `${links[link]}${arg.slice(link.length)}` : arg;
-						});
+					const real = shellWords(command).map((arg) => {
+						const link = Object.keys(links).find(
+							(from) => arg === from || arg.startsWith(`${from}/`),
+						);
+						return link ? `${links[link]}${arg.slice(link.length)}` : arg;
+					});
 					return { stdout: `${real.join("\n")}\n`, stderr: "" };
 				},
 			);
@@ -420,8 +459,20 @@ describe("traefik file endpoints are confined to the Traefik config directory", 
 			expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
 			expect(mocks.execAsyncRemote).toHaveBeenCalledWith(
 				server,
-				`realpath -m -- ${remoteTraefikPath} ${target}`,
+				`${probe}${remoteTraefikPath} ${target}${otherwise}${remoteTraefikPath} ${target}${end}`,
 			);
+		});
+
+		it("builds a command without the -- end-of-options marker", async () => {
+			await write("dynamic/app.yml", server);
+			await read("dynamic/app.yml", server);
+
+			for (const [, command] of mocks.execAsyncRemote.mock.calls as [
+				string,
+				string,
+			][]) {
+				expect(command).not.toMatch(/(^|\s)--(\s|$)/);
+			}
 		});
 
 		it("quotes the path so it cannot reach the remote shell", async () => {
@@ -434,10 +485,9 @@ describe("traefik file endpoints are confined to the Traefik config directory", 
 			];
 			// Let a real shell split the arguments: they must come back as exactly the
 			// two paths, with no operator or substitution taking effect.
-			expect(command.startsWith("realpath -m -- ")).toBe(true);
 			const printed = spawnSync(
 				"sh",
-				["-c", `printf '[%s]' ${command.slice("realpath -m -- ".length)}`],
+				["-c", `printf '[%s]' ${remoteArgs(command)}`],
 				{ encoding: "utf8" },
 			);
 			expect(printed.status).toBe(0);
@@ -540,14 +590,11 @@ describe("traefik file endpoints are confined to the Traefik config directory", 
 			);
 		});
 
-		it("explains a host without GNU realpath and still fails closed", async () => {
-			const execError = Object.assign(
-				new Error("realpath: invalid option -- m"),
-				{
-					name: "ExecError",
-					exitCode: 1,
-				},
-			);
+		it("explains a host without a usable realpath and still fails closed", async () => {
+			const execError = Object.assign(new Error("realpath: not found"), {
+				name: "ExecError",
+				exitCode: 127,
+			});
 			mocks.execAsyncRemote.mockRejectedValue(execError);
 
 			for (const run of [
@@ -556,11 +603,100 @@ describe("traefik file endpoints are confined to the Traefik config directory", 
 			]) {
 				await expect(run()).rejects.toMatchObject({
 					code: "PRECONDITION_FAILED",
-					message: expect.stringContaining("GNU realpath -m is required"),
+					message: expect.stringContaining("no usable realpath"),
 				});
 			}
 			expect(mocks.writeTraefikConfigInPath).not.toHaveBeenCalled();
 			expect(mocks.readConfigInPath).not.toHaveBeenCalled();
+		});
+
+		describe("on a host shell with its own realpath", () => {
+			const runWith = (hostRealpath: string) =>
+				mocks.execAsyncRemote.mockImplementation(
+					async (_serverId: string, command: string) =>
+						runOnHost(hostRealpath, command),
+				);
+
+			it("uses GNU realpath -m when the host has it", async () => {
+				runWith(gnuRealpath);
+
+				await write("dynamic/app.yml", server);
+				await read("dynamic/app.yml", server);
+
+				expect(mocks.writeTraefikConfigInPath).toHaveBeenCalledWith(
+					target,
+					"http: {}",
+					server,
+				);
+				expect(mocks.readConfigInPath).toHaveBeenCalledWith(target, server);
+				expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(2);
+			});
+
+			it("falls back to plain realpath on BusyBox in the same round trip", async () => {
+				runWith(busyboxRealpath);
+
+				await write("dynamic/app.yml", server);
+				await read("dynamic/app.yml", server);
+
+				expect(mocks.writeTraefikConfigInPath).toHaveBeenCalledWith(
+					target,
+					"http: {}",
+					server,
+				);
+				expect(mocks.readConfigInPath).toHaveBeenCalledWith(target, server);
+				// One SSH command per check: no retry round trip.
+				expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(2);
+			});
+
+			it("fails closed when neither realpath form works", async () => {
+				runWith(
+					`realpath() { echo "realpath: No such file or directory" >&2; return 1; }`,
+				);
+
+				for (const run of [
+					() => write("dynamic/app.yml", server),
+					() => read("dynamic/app.yml", server),
+				]) {
+					await expect(run()).rejects.toMatchObject({
+						code: "PRECONDITION_FAILED",
+						message: expect.stringContaining("no usable realpath"),
+					});
+				}
+				expect(mocks.writeTraefikConfigInPath).not.toHaveBeenCalled();
+				expect(mocks.readConfigInPath).not.toHaveBeenCalled();
+			});
+
+			it("rejects a dangling or deeper missing path that plain realpath refuses", async () => {
+				// BusyBox exits 1 when the target's parent does not exist.
+				runWith(
+					`realpath() { for a in "$@"; do case "$a" in -*|*/missing/*) return 1;; esac; done; printf '%s\\n' "$@"; }`,
+				);
+
+				await expect(
+					write("missing/deeper/new.yml", server),
+				).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+				expect(mocks.writeTraefikConfigInPath).not.toHaveBeenCalled();
+			});
+
+			it.each([
+				["one line", `${remoteTraefikPath}\\n`],
+				["a relative result", `${remoteTraefikPath}\\ndynamic/app.yml\\n`],
+				[
+					"a result outside the directory",
+					`${remoteTraefikPath}\\n/root/.ssh/authorized_keys\\n`,
+				],
+			])("rejects plain realpath printing %s", async (_label, printed) => {
+				runWith(plainRealpathPrinting(printed));
+
+				await expect(write("dynamic/app.yml", server)).rejects.toMatchObject(
+					rejected,
+				);
+				await expect(read("dynamic/app.yml", server)).rejects.toMatchObject(
+					rejected,
+				);
+				expect(mocks.writeTraefikConfigInPath).not.toHaveBeenCalled();
+				expect(mocks.readConfigInPath).not.toHaveBeenCalled();
+			});
 		});
 
 		it("lets a connection failure through and still never reads or writes", async () => {

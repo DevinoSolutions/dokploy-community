@@ -71,12 +71,16 @@ describe("traefik file endpoints scope remote servers to the active organization
 		}));
 		mocks.readDirectory.mockResolvedValue([]);
 		mocks.readConfigInPath.mockResolvedValue("http: {}");
-		// A remote host without symlinks: `realpath -m -- <base> <target>`.
+		// A remote host without symlinks: the command is `if realpath -m / ...;
+		// then realpath -m <base> <target>; else realpath <base> <target>; fi`, and
+		// the host echoes the two paths back.
 		mocks.execAsyncRemote.mockImplementation(
-			async (_serverId: string, command: string) => ({
-				stdout: `${command.replace("realpath -m -- ", "").split(" ").join("\n")}\n`,
-				stderr: "",
-			}),
+			async (_serverId: string, command: string) => {
+				const match = /then realpath -m (\S+) (\S+); else realpath /.exec(
+					command,
+				);
+				return { stdout: `${match?.[1]}\n${match?.[2]}\n`, stderr: "" };
+			},
 		);
 	});
 

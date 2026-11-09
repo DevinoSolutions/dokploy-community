@@ -202,34 +202,45 @@ const realpathAllowingMissing = async (target: string): Promise<string> => {
 };
 
 /**
- * The same on a remote host, in one SSH round trip: `realpath -m` resolves the
- * symlinks in every existing component without requiring the file to exist.
- * It prints the base, then the target, one per line. The output is parsed
- * strictly: exactly two non-empty absolute lines and at most one trailing
- * newline. A path with a newline in it breaks that framing and is rejected
- * rather than guessed at. Every failure rejects the request; there is no
- * fallback that skips the check.
+ * The same on a remote host, in one SSH round trip. GNU `realpath -m` resolves
+ * the symlinks in every existing component without requiring the file to
+ * exist. BusyBox (Alpine) and BSD realpath have no `-m` (and no `--`), so a
+ * probe picks the plain `realpath` there, which resolves symlinks and
+ * tolerates a missing LAST component (the "file does not exist yet" write). A
+ * deeper missing tail or a dangling link makes the plain form exit non-zero,
+ * which rejects the request. Both paths are absolute, so they can never be
+ * read as options and `--` is not needed. The probe's output is discarded:
+ * BusyBox prints the paths it could resolve even when it fails.
+ * The command prints the base, then the target, one per line. The output is
+ * parsed strictly: exactly two non-empty absolute lines and at most one
+ * trailing newline. A path with a newline in it breaks that framing and is
+ * rejected rather than guessed at. Every failure rejects the request; there is
+ * no fallback that skips the check.
  */
 const remoteRealpaths = async (
 	serverId: string,
 	base: string,
 	target: string,
 ): Promise<[string, string]> => {
+	if (!base.startsWith("/") || !target.startsWith("/")) {
+		throw invalidTraefikPath();
+	}
+	const args = quote([base, target]);
 	let stdout: string;
 	try {
 		({ stdout } = await execAsyncRemote(
 			serverId,
-			`realpath -m -- ${quote([base, target])}`,
+			`if realpath -m / >/dev/null 2>&1; then realpath -m ${args}; else realpath ${args}; fi`,
 		));
 	} catch (error) {
-		// The command ran and failed, typically a host without GNU realpath (busybox).
+		// The command ran and failed: neither realpath form is usable on this host.
 		// Connection problems keep their own error.
 		const { name, exitCode } = error as { name?: string; exitCode?: unknown };
 		if (name === "ExecError" && typeof exitCode === "number") {
 			throw new TRPCError({
 				code: "PRECONDITION_FAILED",
 				message:
-					"Could not resolve the Traefik file path on this server (GNU realpath -m is required)",
+					"Could not resolve the Traefik file path: this server has no usable realpath command",
 			});
 		}
 		throw error;
