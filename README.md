@@ -2,9 +2,9 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.51**
+Based on **Dokploy v0.31.0** | Fork version **v0.31.0-community.1**
 
-Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
+Everything in upstream Dokploy **v0.31.0**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
 ## Guides
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.51 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.1 \
   --with-registry-auth \
   dokploy
 ```
@@ -29,7 +29,7 @@ docker service update \
 Going back to official is just as easy (our extra tables/columns are simply ignored):
 
 ```bash
-docker service update --image dokploy/dokploy:v0.30.8 --with-registry-auth dokploy
+docker service update --image dokploy/dokploy:v0.31.0 --with-registry-auth dokploy
 ```
 
 The image is public — no registry login required.
@@ -121,11 +121,10 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.51
+## What's new in v0.31.0-community.1
 
-- Swarm deploys send an explicit registry auth, so a public ghcr.io image is never refused by stale stored credentials, and a GitHub Actions release whose image the registry does not serve yet is retried instead of failed.
-- API keys are verified once per request and a tripped key limit answers a real 429 with `Retry-After`. Preview hostnames are fixed for templated PR numbers and for branch names that overflow the 63-character DNS label. Traefik file confinement now follows symlinks.
-- One additive database migration (0233); an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Upstream Dokploy v0.31.0 is merged: logs and metrics telemetry providers with a Vector agent, compose "Pull images" now upstream's `pullImages`, custom backup names, Fresh Volumes with a typed confirmation, upstream's service transfer, and the upstream fixes. The fork's backups layer, registry and ECR login, Traefik confinement, wss ownership, patch pipeline and the deployments table "Hosted on" / "Built by" columns with the GitHub Actions pill are all kept.
+- Two database migrations: 0234 is additive (adds `compose.pullImages` and copies it from `pullImagesOnDeploy`, which stays in place) and 0235 is a fork schema catch-up for hosts switching from upstream v0.31.0. An image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -140,7 +139,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.51
+export DOKPLOY_VERSION=v0.31.0-community.1
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -153,7 +152,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.51      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.1      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -196,7 +195,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.51` is the 50th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.31.0-community.1` is the 1st fork release on top of Dokploy v0.31.0.
 
 ## Contributing
 

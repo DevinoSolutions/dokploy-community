@@ -2,6 +2,32 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.31.0-community.1
+
+Upstream Dokploy v0.31.0 is merged into the fork: logs and metrics telemetry providers, backup custom names, Fresh Volumes and upstream's service transfer, with everything the fork adds on top kept.
+
+Upgrade notes: two database migrations (0234 and 0235, both safe to re-run). 0234 is additive: it adds `compose.pullImages` and copies it from `pullImagesOnDeploy`, and the old column stays in place, so an image-only rollback to v0.30.8-community.51 keeps working. 0235 is a fork schema catch-up for hosts that switch over from upstream Dokploy v0.31.0, and migration 0226 was made safe for that path. Nothing to configure. This release includes everything in v0.30.8-community.51.
+
+**Upstream Dokploy v0.31.0 merged** (#619).
+
+- Logs and metrics telemetry providers, with a Vector agent that can run on the Dokploy host.
+- The compose "Pull images" toggle is now upstream's `pullImages` setting. The fork's `pullImagesOnDeploy` column is kept and mirrored when a compose is saved.
+- Backups can be given a custom name.
+- Fresh Volumes, with a typed confirmation before anything is replaced.
+- Service transfer is now upstream's. The fork's own per-service transfer is replaced: its pre-flight scan and skip-overwrite choices are gone for now.
+- Preview deployments now keep the application's registry (upstream #5765).
+- Plus the other upstream v0.31.0 fixes.
+
+**Fork features kept on top of upstream.** The backups layer, registry and ECR login, Traefik confinement, wss ownership, the patch pipeline, and the deployments table "Hosted on" and "Built by" columns with the GitHub Actions pill.
+
+**Security.**
+
+- The panel-port toggle and the Vector agent on the Dokploy host now require root-organization access to the local host.
+
+**Fixed.**
+
+- A remote stream no longer hangs when the target command exits first.
+
 ### New in v0.30.8-community.51
 
 Swarm deploys send an explicit registry auth and a GitHub Actions pull release is retried when the registry is not ready, API keys are verified once per request with a real 429, preview hostnames are fixed for templated numbers and long branch names, and Traefik file confinement follows symlinks.
