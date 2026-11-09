@@ -1,3 +1,4 @@
+import { db } from "@dokploy/server/db";
 import { addDomainToCompose } from "@dokploy/server/utils/docker/domain";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { describe, expect, it, vi } from "vitest";
@@ -9,8 +10,14 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 	execAsyncRemote: vi.fn(),
 }));
 
+// The Dokploy labels are only written where a telemetry agent reads them
+// (v0.31.0-community.2); the test setup shares one mocked table between
+// `server` and `webServerSettings`.
+const findFirst = vi.mocked(db.query.server.findFirst);
+
 describe("raw remote compose conversion (#4794)", () => {
 	it("uses the saved raw source and preserves supported mount syntax", async () => {
+		findFirst.mockResolvedValue({ telemetryProviderIds: ["tp-1"] } as never);
 		vi.mocked(execAsyncRemote).mockResolvedValue({
 			stdout: "services:\n  test:\n    image: alpine:latest\n",
 			stderr: "",
@@ -76,6 +83,10 @@ volumes:
 	});
 
 	it("escapes `$` in the Dokploy label values so compose keeps them literal", async () => {
+		findFirst.mockResolvedValue({
+			vectorAgentOrganizationId: "org-1",
+			telemetryProviderIds: ["tp-1"],
+		} as never);
 		const compose = {
 			appName: "dollar-stack",
 			composeFile: `
