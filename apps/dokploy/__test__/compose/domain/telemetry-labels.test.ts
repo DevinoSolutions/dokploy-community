@@ -1,6 +1,6 @@
 import { db } from "@dokploy/server/db";
-import { addDomainToCompose } from "@dokploy/server/utils/docker/domain";
 import { buildDokployLabels } from "@dokploy/server/utils/docker/dokploy-labels";
+import { addDomainToCompose } from "@dokploy/server/utils/docker/domain";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { parse, stringify } from "yaml";
 
