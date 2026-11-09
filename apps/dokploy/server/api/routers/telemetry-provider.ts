@@ -13,6 +13,7 @@ import {
 } from "@dokploy/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import {
 	apiCreateTelemetryProvider,
 	apiFindOneTelemetryProvider,
@@ -141,6 +142,11 @@ export const telemetryProviderRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			// No serverId means the Vector agent on the Dokploy host itself.
+			await assertLocalHostAccess(
+				input.serverId ?? undefined,
+				ctx.session.activeOrganizationId,
+			);
 			const { serverName } = await applyVectorAgentSelection(
 				ctx.session,
 				input.serverId ?? undefined,
@@ -162,6 +168,11 @@ export const telemetryProviderRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			// No serverId means the Vector agent on the Dokploy host itself.
+			await assertLocalHostAccess(
+				input.serverId ?? undefined,
+				ctx.session.activeOrganizationId,
+			);
 			const { serverName } = await applyVectorAgentSelection(
 				ctx.session,
 				input.serverId ?? undefined,

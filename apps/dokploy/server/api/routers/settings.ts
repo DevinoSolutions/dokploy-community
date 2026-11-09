@@ -1669,6 +1669,8 @@ export const settingsRouter = createTRPCRouter({
 		if (IS_CLOUD) {
 			return null;
 		}
+		// Port 3000 belongs to the Dokploy host, so only the organization that owns the instance sees it.
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const settings = await getWebServerSettings();
 		return {
 			enabled: await isPanelPortPublished(),
@@ -1686,6 +1688,8 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				throw new TRPCError({ code: "UNAUTHORIZED" });
 			}
+			// Publishing or closing port 3000 changes the Dokploy host itself.
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			if (!input.enable) {
 				const settings = await getWebServerSettings();
 				if (!settings?.host) {
