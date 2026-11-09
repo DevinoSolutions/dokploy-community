@@ -51,7 +51,7 @@ import { generateServerSideHelper } from "@/utils/create-server-helpers";
 import { useWhitelabelingPublic } from "@/utils/hooks/use-whitelabeling";
 
 const LoginSchema = z.object({
-	email: z.string().email(),
+	email: z.string().trim().email(),
 	password: z.string().min(8),
 });
 
@@ -86,6 +86,9 @@ export default function Home({
 	const twoFactorCursor = Math.min(twoFactorCaret, twoFactorCode.length);
 	const [isBackupCodeModalOpen, setIsBackupCodeModalOpen] = useState(false);
 	const [backupCode, setBackupCode] = useState("");
+	const [showForgotPassword, setShowForgotPassword] = useState(false);
+
+	const hasCustomPasswordReset = !IS_CLOUD && !!whitelabeling?.supportEmail;
 	const loginForm = useForm<LoginForm>({
 		resolver: zodResolver(LoginSchema),
 		defaultValues: {
@@ -312,6 +315,18 @@ export default function Home({
 		</>
 	);
 
+	const forgotPasswordContent = (
+		<div className="flex flex-col gap-4">
+			<p className="text-sm text-muted-foreground whitespace-pre-line">
+				{whitelabeling?.passwordResetGuide ||
+					"To reset your password, please contact your administrator. They will help you regain access to your account."}
+			</p>
+			<Button className="w-full" asChild>
+				<a href={`mailto:${whitelabeling?.supportEmail}`}>Get Support</a>
+			</Button>
+		</div>
+	);
+
 	return (
 		<>
 			<div className="flex flex-col space-y-2 text-center">
@@ -322,6 +337,11 @@ export default function Home({
 							logoUrl={
 								whitelabeling?.loginLogoUrl ||
 								whitelabeling?.logoUrl ||
+								undefined
+							}
+							logoLightUrl={
+								whitelabeling?.loginLogoLightUrl ||
+								whitelabeling?.logoLightUrl ||
 								undefined
 							}
 						/>
@@ -339,22 +359,26 @@ export default function Home({
 			)}
 			<CardContent className="p-0">
 				{!isTwoFactor ? (
-					<>
-						{enforceSSO ? (
-							<SignInWithSSO
-								enforce
-								callbackURL={getPostLoginDestination(router.query)}
-							/>
-						) : showSignInWithSSO ? (
-							<SignInWithSSO
-								callbackURL={getPostLoginDestination(router.query)}
-							>
-								{loginContent}
-							</SignInWithSSO>
-						) : (
-							loginContent
-						)}
-					</>
+					showForgotPassword ? (
+						forgotPasswordContent
+					) : (
+						<>
+							{enforceSSO ? (
+								<SignInWithSSO
+									enforce
+									callbackURL={getPostLoginDestination(router.query)}
+								/>
+							) : showSignInWithSSO ? (
+								<SignInWithSSO
+									callbackURL={getPostLoginDestination(router.query)}
+								>
+									{loginContent}
+								</SignInWithSSO>
+							) : (
+								loginContent
+							)}
+						</>
+					)
 				) : (
 					<>
 						<form
@@ -515,7 +539,17 @@ export default function Home({
 							>
 								Lost your password?
 							</Link>
-						) : (
+						) : hasCustomPasswordReset && !isTwoFactor ? (
+							<button
+								type="button"
+								className="hover:underline text-muted-foreground"
+								onClick={() => setShowForgotPassword((prev) => !prev)}
+							>
+								{showForgotPassword
+									? "Go back to login"
+									: "Lost your password?"}
+							</button>
+						) : !hasCustomPasswordReset ? (
 							<Link
 								className="hover:underline text-muted-foreground"
 								href="https://docs.dokploy.com/docs/core/reset-password"
@@ -523,7 +557,7 @@ export default function Home({
 							>
 								Lost your password?
 							</Link>
-						)}
+						) : null}
 					</div>
 				</div>
 				<div className="p-2" />
@@ -540,6 +574,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 	// Prefetch the public branding so the login/onboarding logo and app name
 	// render correctly on the server (no flash of default branding).
 	await helpers.whitelabeling.getPublic.prefetch();
+	await helpers.sso.showSignInWithSSO.prefetch();
 
 	if (IS_CLOUD) {
 		try {

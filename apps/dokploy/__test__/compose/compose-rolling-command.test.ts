@@ -162,10 +162,10 @@ describe("rolling replace: the hook at the up line", () => {
 		expect(parses(command)).toBe("ok");
 	});
 
-	it("builds services with a build section and pulls the image-only ones on pullImagesOnDeploy", async () => {
+	it("builds services with a build section and pulls the image-only ones on pullImages", async () => {
 		const command = await build({
 			...rolling(["web", "worker"]),
-			pullImagesOnDeploy: true,
+			pullImages: true,
 		});
 		expect(command).toContain("DOKPLOY_ROLL_BUILD=web");
 		expect(command).toContain("DOKPLOY_ROLL_PULL=worker");

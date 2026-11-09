@@ -1,1212 +1,601 @@
-/**
- * Transfer Service — orchestrates scanning and syncing for service migration
- */
 import path from "node:path";
 import { paths } from "@dokploy/server/constants";
-import { findComposeById } from "@dokploy/server/services/compose";
-import { findMountsByApplicationId } from "@dokploy/server/services/mount";
+import { db } from "@dokploy/server/db";
 import {
-	findRefusedComposeVolumes,
-	findRefusedVolumeMounts,
-} from "@dokploy/server/services/volume-binding";
+	type apiTransferService,
+	deployments,
+	network,
+	type ServiceType,
+} from "@dokploy/server/db/schema";
+import { removeService } from "@dokploy/server/utils/docker/utils";
 import {
-	loadDockerCompose,
-	loadDockerComposeRemote,
-} from "@dokploy/server/utils/docker/domain";
-import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
+	removeDirectoryCode,
+	removeMonitoringDirectory,
+} from "@dokploy/server/utils/filesystem/directory";
+import {
+	execAsync,
+	execAsyncRemote,
+} from "@dokploy/server/utils/process/execAsync";
+import { pipeBetweenServers } from "@dokploy/server/utils/process/remoteStream";
 import {
 	readConfig,
 	readRemoteConfig,
+	removeTraefikConfig,
 	writeConfig,
 	writeConfigRemote,
 } from "@dokploy/server/utils/traefik/application";
-import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
-import { shellEscape } from "../utils/process/ssh";
+import { manageDomain } from "@dokploy/server/utils/traefik/domain";
+import { removeForwardAuthMiddleware } from "@dokploy/server/utils/traefik/forward-auth";
 import {
-	createDirectoryOnTarget,
-	createVolumeOnTarget,
-} from "../utils/transfer/preflight";
+	deleteAllMiddlewares,
+	removePathMiddlewares,
+} from "@dokploy/server/utils/traefik/middleware";
+import { createRedirectMiddleware } from "@dokploy/server/utils/traefik/redirect";
+import { createSecurityMiddleware } from "@dokploy/server/utils/traefik/security";
+import { TRPCError } from "@trpc/server";
+import { eq, inArray, sql } from "drizzle-orm";
+import { quote } from "shell-quote";
+import type { z } from "zod";
 import {
-	compareFileLists,
-	computeFileHash,
-	scanBindMount,
-	scanVolume,
-} from "../utils/transfer/scanner";
+	deployApplication,
+	findApplicationById,
+	updateApplication,
+} from "./application";
 import {
-	buildDecisionKey,
-	shouldSyncFile,
-	syncMount,
-	syncVolumeArchive,
-} from "../utils/transfer/sync";
-import type {
-	FileCompareResult,
-	MountTransferConfig,
-	ServiceType,
-} from "../utils/transfer/types";
+	deployCompose,
+	findComposeById,
+	removeCompose,
+	startCompose,
+	stopCompose,
+	updateCompose,
+} from "./compose";
+import { deployLibsql, findLibsqlById, updateLibsqlById } from "./libsql";
+import { deployMariadb, findMariadbById, updateMariadbById } from "./mariadb";
+import { deployMongo, findMongoById, updateMongoById } from "./mongo";
+import { createFileMount } from "./mount";
+import { deployMySql, findMySqlById, updateMySqlById } from "./mysql";
+import {
+	deployPostgres,
+	findPostgresById,
+	updatePostgresById,
+} from "./postgres";
+import { deployRedis, findRedisById, updateRedisById } from "./redis";
+import { findServerById } from "./server";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+export type TransferServiceInput = z.infer<typeof apiTransferService> & {
+	organizationId: string;
+};
 
-export interface TransferOptions {
-	serviceId: string;
-	serviceType: ServiceType;
-	appName: string;
-	sourceServerId: string | null; // null = local/main server
-	targetServerId: string | null; // null = local/main server
-}
+type Logger = (line: string) => void;
+type ServiceStatus = "idle" | "running" | "done" | "error";
 
-export interface VolumeScanResult {
-	volumeName: string;
-	mountPath: string;
-	sizeBytes: number;
-	files: FileCompareResult[];
-}
-
-export interface BindScanResult {
-	hostPath: string;
-	files: FileCompareResult[];
-}
-
-export interface TransferScanResult {
-	serviceDir?: {
-		path: string;
-		files: FileCompareResult[];
-	};
-	traefikConfig?: {
-		sourceExists: boolean;
-		targetExists: boolean;
-		hasConflict: boolean;
-		sourceContent?: string;
-		targetContent?: string;
-	};
-	volumes: VolumeScanResult[];
-	binds: BindScanResult[];
-	totalSizeBytes: number;
-	conflicts: FileCompareResult[];
-	hasConflicts: boolean;
-}
-
-export interface TransferProgress {
-	phase: string;
-	currentFile?: string;
-	processedFiles: number;
-	totalFiles: number;
-	transferredBytes: number;
-	totalBytes: number;
-	percentage: number;
-}
-
-export interface TransferScanProgress {
-	phase: string;
-	mount?: string;
-	currentFile?: string;
-	processedMounts: number;
-	totalMounts: number;
-	scannedFiles: number;
-	processedHashes: number;
-	totalHashes: number;
-}
-
-interface ResolvedMountTransferConfig extends MountTransferConfig {
-	mountPath?: string;
-	composeProjectName?: string;
-	composeVolumeKey?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Get the service directory path (only for application/compose)
- */
-function getServiceDirPath(
-	serviceType: ServiceType,
-	appName: string,
-): string | null {
-	const { APPLICATIONS_PATH, COMPOSE_PATH } = paths(true);
-	if (serviceType === "application") {
-		return `${APPLICATIONS_PATH}/${appName}`;
+const findService = async (serviceType: ServiceType, serviceId: string) => {
+	switch (serviceType) {
+		case "application":
+			return await findApplicationById(serviceId);
+		case "compose":
+			return await findComposeById(serviceId);
+		case "postgres":
+			return await findPostgresById(serviceId);
+		case "mysql":
+			return await findMySqlById(serviceId);
+		case "mariadb":
+			return await findMariadbById(serviceId);
+		case "mongo":
+			return await findMongoById(serviceId);
+		case "redis":
+			return await findRedisById(serviceId);
+		case "libsql":
+			return await findLibsqlById(serviceId);
 	}
-	if (serviceType === "compose") {
-		return `${COMPOSE_PATH}/${appName}`;
-	}
-	return null;
-}
+};
 
-function getServiceDirMountId(
+type TransferableService = Awaited<ReturnType<typeof findService>>;
+type ApplicationService = Awaited<ReturnType<typeof findApplicationById>>;
+type ComposeService = Awaited<ReturnType<typeof findComposeById>>;
+
+const isApplication = (
+	service: TransferableService,
+): service is ApplicationService => "applicationId" in service;
+
+const isCompose = (service: TransferableService): service is ComposeService =>
+	"composeId" in service;
+
+const updateServer = async (
 	serviceType: ServiceType,
 	serviceId: string,
-): string {
-	return `service-dir:${serviceType}:${serviceId}`;
-}
-
-/**
- * Check if a service type has Traefik config
- */
-function hasTraefikConfig(serviceType: ServiceType): boolean {
-	return serviceType === "application" || serviceType === "compose";
-}
-
-/**
- * Build MountTransferConfig from DB mounts
- */
-function buildMountConfigs(
-	dbMounts: Awaited<ReturnType<typeof findMountsByApplicationId>>,
-): ResolvedMountTransferConfig[] {
-	return dbMounts
-		.filter((m) => m.type === "volume" || m.type === "bind")
-		.map((m) => ({
-			mountId: m.mountId,
-			mountType: m.type as "volume" | "bind",
-			sourcePath: m.type === "volume" ? m.volumeName || "" : m.hostPath || "",
-			targetPath: m.type === "volume" ? m.volumeName || "" : m.hostPath || "",
-			createIfMissing: true,
-			updateMountConfig: false,
-			mountPath: m.mountPath,
-		}));
-}
-
-function getMountDedupeKey(mount: MountTransferConfig): string {
-	return `${mount.mountType}:${mount.sourcePath}`;
-}
-
-function hasUnresolvedVariable(value: string): boolean {
-	return value.includes("${") || value.startsWith("$");
-}
-
-function isLikelyBindSource(source: string): boolean {
-	return (
-		source.startsWith("/") ||
-		source.startsWith("./") ||
-		source.startsWith("../") ||
-		source === "." ||
-		source === ".." ||
-		source.startsWith("~/")
-	);
-}
-
-function isPathInside(pathToCheck: string, parentPath: string): boolean {
-	const normalizedPath = path.resolve(pathToCheck);
-	const normalizedParent = path.resolve(parentPath);
-	return (
-		normalizedPath === normalizedParent ||
-		normalizedPath.startsWith(`${normalizedParent}${path.sep}`)
-	);
-}
-
-function parseComposeVolumeString(volume: string): {
-	source?: string;
-	target?: string;
-} {
-	const parts = volume.split(":");
-	if (parts.length < 2) {
-		// Anonymous volume (`/var/lib/data`) has no host/source to transfer.
-		return { target: parts[0] };
+	data: { serverId: string | null; networkIds?: string[] | null },
+) => {
+	switch (serviceType) {
+		case "application":
+			return await updateApplication(serviceId, data);
+		case "compose":
+			return await updateCompose(serviceId, { serverId: data.serverId });
+		case "postgres":
+			return await updatePostgresById(serviceId, data);
+		case "mysql":
+			return await updateMySqlById(serviceId, data);
+		case "mariadb":
+			return await updateMariadbById(serviceId, data);
+		case "mongo":
+			return await updateMongoById(serviceId, data);
+		case "redis":
+			return await updateRedisById(serviceId, data);
+		case "libsql":
+			return await updateLibsqlById(serviceId, data);
 	}
-	const source = parts[0];
-	const target = parts[1];
-	return { source, target };
-}
+};
 
-interface ResolvedComposeVolume {
-	volumeName: string;
-	volumeKey: string;
-	external: boolean;
-}
-
-function resolveComposeVolume(
-	source: string,
-	appName: string,
-	composeSpec: ComposeSpecification,
-): ResolvedComposeVolume | null {
-	if (hasUnresolvedVariable(source) || isLikelyBindSource(source)) {
-		return null;
-	}
-
-	// Handle cases like "db-data/subdir:/target" by using the root volume key.
-	const [volumeKey] = source.split("/");
-	if (!volumeKey) return null;
-
-	const volumeDef = composeSpec.volumes?.[volumeKey];
-	if (!volumeDef || typeof volumeDef !== "object") {
-		return {
-			volumeName: `${appName}_${volumeKey}`,
-			volumeKey,
-			external: false,
-		};
-	}
-
-	if (volumeDef.external) {
-		if (
-			typeof volumeDef.external === "object" &&
-			typeof volumeDef.external.name === "string" &&
-			volumeDef.external.name.length > 0
-		) {
-			return {
-				volumeName: volumeDef.external.name,
-				volumeKey,
-				external: true,
-			};
-		}
-		return {
-			volumeName: volumeKey,
-			volumeKey,
-			external: true,
-		};
-	}
-
-	if (typeof volumeDef.name === "string" && volumeDef.name.length > 0) {
-		return {
-			volumeName: volumeDef.name,
-			volumeKey,
-			external: false,
-		};
-	}
-
-	return {
-		volumeName: `${appName}_${volumeKey}`,
-		volumeKey,
-		external: false,
-	};
-}
-
-function addResolvedMount(
-	list: ResolvedMountTransferConfig[],
-	seen: Set<string>,
-	mount: ResolvedMountTransferConfig,
-) {
-	const dedupeKey = getMountDedupeKey(mount);
-	if (seen.has(dedupeKey)) return;
-	seen.add(dedupeKey);
-	list.push(mount);
-}
-
-function getComposeManagedVolumeLabels(
-	mount: ResolvedMountTransferConfig,
-): Record<string, string> | undefined {
-	if (
-		mount.mountType !== "volume" ||
-		!mount.composeProjectName ||
-		!mount.composeVolumeKey
-	) {
-		return undefined;
-	}
-
-	return {
-		"com.docker.compose.project": mount.composeProjectName,
-		"com.docker.compose.volume": mount.composeVolumeKey,
-	};
-}
-
-function extractComposeSpecMounts(
-	composeSpec: ComposeSpecification,
-	appName: string,
-	serviceDirPath: string,
-	composeBaseDir: string,
-	seen: Set<string>,
-): ResolvedMountTransferConfig[] {
-	const mounts: ResolvedMountTransferConfig[] = [];
-	const services = composeSpec.services || {};
-
-	for (const service of Object.values(services)) {
-		const serviceVolumes = service?.volumes;
-		if (!serviceVolumes || !Array.isArray(serviceVolumes)) continue;
-
-		for (const rawVolume of serviceVolumes) {
-			if (typeof rawVolume === "string") {
-				const parsed = parseComposeVolumeString(rawVolume);
-				const source = parsed.source;
-				const target = parsed.target;
-				if (!source || !target) continue;
-
-				if (hasUnresolvedVariable(source)) continue;
-
-				if (isLikelyBindSource(source)) {
-					if (source.startsWith("~/")) continue;
-					const bindPath = path.isAbsolute(source)
-						? source
-						: path.resolve(composeBaseDir, source);
-					if (isPathInside(bindPath, serviceDirPath)) continue;
-					addResolvedMount(mounts, seen, {
-						mountId: `compose-spec:bind:${bindPath}`,
-						mountType: "bind",
-						sourcePath: bindPath,
-						targetPath: bindPath,
-						createIfMissing: true,
-						updateMountConfig: false,
-						mountPath: target,
-					});
-					continue;
-				}
-
-				const resolvedVolume = resolveComposeVolume(
-					source,
-					appName,
-					composeSpec,
-				);
-				if (!resolvedVolume) continue;
-				addResolvedMount(mounts, seen, {
-					mountId: `compose-spec:volume:${resolvedVolume.volumeName}`,
-					mountType: "volume",
-					sourcePath: resolvedVolume.volumeName,
-					targetPath: resolvedVolume.volumeName,
-					createIfMissing: true,
-					updateMountConfig: false,
-					mountPath: target,
-					composeProjectName: resolvedVolume.external ? undefined : appName,
-					composeVolumeKey: resolvedVolume.external
-						? undefined
-						: resolvedVolume.volumeKey,
-				});
-				continue;
-			}
-
-			if (!rawVolume || typeof rawVolume !== "object") continue;
-
-			const mountType =
-				typeof rawVolume.type === "string" ? rawVolume.type : "volume";
-			const source =
-				typeof rawVolume.source === "string" ? rawVolume.source : undefined;
-			const target =
-				typeof rawVolume.target === "string" ? rawVolume.target : undefined;
-
-			if (!source || !target || hasUnresolvedVariable(source)) continue;
-
-			if (mountType === "bind") {
-				if (source.startsWith("~/")) continue;
-				const bindPath = path.isAbsolute(source)
-					? source
-					: path.resolve(composeBaseDir, source);
-				if (isPathInside(bindPath, serviceDirPath)) continue;
-				addResolvedMount(mounts, seen, {
-					mountId: `compose-spec:bind:${bindPath}`,
-					mountType: "bind",
-					sourcePath: bindPath,
-					targetPath: bindPath,
-					createIfMissing: true,
-					updateMountConfig: false,
-					mountPath: target,
-				});
-				continue;
-			}
-
-			if (mountType !== "volume") continue;
-			const resolvedVolume = resolveComposeVolume(source, appName, composeSpec);
-			if (!resolvedVolume) continue;
-			addResolvedMount(mounts, seen, {
-				mountId: `compose-spec:volume:${resolvedVolume.volumeName}`,
-				mountType: "volume",
-				sourcePath: resolvedVolume.volumeName,
-				targetPath: resolvedVolume.volumeName,
-				createIfMissing: true,
-				updateMountConfig: false,
-				mountPath: target,
-				composeProjectName: resolvedVolume.external ? undefined : appName,
-				composeVolumeKey: resolvedVolume.external
-					? undefined
-					: resolvedVolume.volumeKey,
+const updateStatus = async (
+	serviceType: ServiceType,
+	serviceId: string,
+	status: ServiceStatus,
+) => {
+	switch (serviceType) {
+		case "application":
+			return await updateApplication(serviceId, { applicationStatus: status });
+		case "compose":
+			return await updateCompose(serviceId, { composeStatus: status });
+		case "postgres":
+			return await updatePostgresById(serviceId, {
+				applicationStatus: status,
 			});
-		}
+		case "mysql":
+			return await updateMySqlById(serviceId, { applicationStatus: status });
+		case "mariadb":
+			return await updateMariadbById(serviceId, { applicationStatus: status });
+		case "mongo":
+			return await updateMongoById(serviceId, { applicationStatus: status });
+		case "redis":
+			return await updateRedisById(serviceId, { applicationStatus: status });
+		case "libsql":
+			return await updateLibsqlById(serviceId, { applicationStatus: status });
 	}
+};
 
-	return mounts;
-}
+const q = (value: string) => quote([value]);
 
-// A transfer reads a volume on the source host and writes it on the target
-// host, both by name. A name that is reserved, malformed or claimed by another
-// organization on either host would copy that tenant's data out of, or over, its
-// volume, so the whole transfer is refused instead of silently skipping the
-// mount (which would leave the move half done). Compose-declared volumes and a
-// service's own outside-named mounts stay allowed (see findRefusedVolumeMounts).
-async function getMountConfigsForTransfer(
-	opts: TransferOptions,
-): Promise<ResolvedMountTransferConfig[]> {
-	const mountConfigs = await collectMountConfigsForTransfer(opts);
-	const [refused] = await findRefusedVolumeMounts(
-		mountConfigs.map((mount) => ({
-			type: mount.mountType,
-			volumeName: mount.mountType === "volume" ? mount.sourcePath : null,
-		})),
-		{ serviceType: opts.serviceType, serviceId: opts.serviceId },
-		{ serverIds: [opts.sourceServerId, opts.targetServerId] },
+const runOn = (serverId: string | null, command: string) =>
+	serverId ? execAsyncRemote(serverId, command) : execAsync(command);
+
+const errorMessage = (error: unknown) =>
+	error instanceof Error ? error.message : String(error);
+
+const directoryExists = async (serverId: string | null, directory: string) => {
+	const { stdout } = await runOn(
+		serverId,
+		`[ -d ${q(directory)} ] && echo yes || echo no`,
 	);
-	if (refused) {
-		throw new Error(`Transfer refused: ${refused.message}`);
-	}
-	// A compose also reaches the volumes its file names; a volume another
-	// service of the organization uses is refused as at deploy (T-6822).
-	if (opts.serviceType === "compose") {
-		const compose = await findComposeById(opts.serviceId);
-		const [refusedComposeVolume] = await findRefusedComposeVolumes(
-			compose,
-			mountConfigs
-				.filter((mount) => mount.mountType === "volume")
-				.map((mount) => ({ volumeName: mount.sourcePath })),
-			{ serverIds: [opts.sourceServerId, opts.targetServerId] },
-		);
-		if (refusedComposeVolume) {
-			throw new Error(`Transfer refused: ${refusedComposeVolume.message}`);
-		}
-	}
-	return mountConfigs;
-}
+	return stdout.trim() === "yes";
+};
 
-async function collectMountConfigsForTransfer(
-	opts: TransferOptions,
-): Promise<ResolvedMountTransferConfig[]> {
-	const dbMounts = await findMountsByApplicationId(
-		opts.serviceId,
-		opts.serviceType,
-	);
-	const mountConfigs = buildMountConfigs(dbMounts);
-	const seen = new Set(mountConfigs.map((mount) => getMountDedupeKey(mount)));
+const formatBytes = (bytes: number) => {
+	const mib = bytes / (1024 * 1024);
+	if (mib < 1) return `${(bytes / 1024).toFixed(1)} KiB`;
+	if (mib < 1024) return `${mib.toFixed(1)} MiB`;
+	return `${(mib / 1024).toFixed(2)} GiB`;
+};
 
-	if (opts.serviceType !== "compose") {
-		return mountConfigs;
-	}
+export const volumeExportCommand = (volume: string) =>
+	`docker run --rm -v ${q(volume)}:/data:ro alpine tar -czf - --numeric-owner -C /data .`;
 
-	try {
-		const compose = await findComposeById(opts.serviceId);
-		const composeSpec = compose.serverId
-			? await loadDockerComposeRemote(compose)
-			: await loadDockerCompose(compose);
-		if (!composeSpec) return mountConfigs;
+export const volumeImportCommand = (volume: string) =>
+	`docker volume create ${q(volume)} >/dev/null && docker run --rm -i -v ${q(volume)}:/data alpine tar -xzf - --numeric-owner -C /data`;
 
-		const { COMPOSE_PATH } = paths(!!compose.serverId);
-		const composeRelativePath =
-			compose.sourceType === "raw"
-				? "docker-compose.yml"
-				: compose.composePath || "docker-compose.yml";
-		const composeBaseDir = path.dirname(
-			path.join(COMPOSE_PATH, compose.appName, "code", composeRelativePath),
-		);
-		const serviceDirPath =
-			getServiceDirPath("compose", compose.appName) ||
-			path.join(COMPOSE_PATH, compose.appName);
+export const directoryExportCommand = (directory: string) =>
+	`COPYFILE_DISABLE=1 tar -czf - --numeric-owner -C ${q(directory)} .`;
 
-		const composeSpecMounts = extractComposeSpecMounts(
-			composeSpec,
-			compose.appName,
-			serviceDirPath,
-			composeBaseDir,
-			seen,
-		);
+export const directoryImportCommand = (directory: string) =>
+	`mkdir -p ${q(directory)} && tar -xzf - --numeric-owner -C ${q(directory)}`;
 
-		const mountsByDedupeKey = new Map(
-			mountConfigs.map((mount) => [getMountDedupeKey(mount), mount]),
-		);
+const PROGRESS_STEP = 64 * 1024 * 1024;
 
-		for (const composeSpecMount of composeSpecMounts) {
-			const dedupeKey = getMountDedupeKey(composeSpecMount);
-			const existingMount = mountsByDedupeKey.get(dedupeKey);
-			if (!existingMount) {
-				mountConfigs.push(composeSpecMount);
-				mountsByDedupeKey.set(dedupeKey, composeSpecMount);
-				continue;
+const copyStream = async (
+	label: string,
+	source: { serverId: string | null; command: string },
+	target: { serverId: string | null; command: string },
+	log: Logger,
+) => {
+	let reported = 0;
+	const bytes = await pipeBetweenServers({
+		source,
+		target,
+		onProgress: (transferred) => {
+			if (transferred - reported >= PROGRESS_STEP) {
+				reported = transferred;
+				log(`  ${label}: ${formatBytes(transferred)} transferred`);
 			}
+		},
+	});
+	log(`  ${label}: done (${formatBytes(bytes)})`);
+};
 
-			// Preserve mount metadata from compose file when DB mounts overlap.
-			if (
-				!existingMount.composeProjectName &&
-				composeSpecMount.composeProjectName
-			) {
-				existingMount.composeProjectName = composeSpecMount.composeProjectName;
-			}
-			if (
-				!existingMount.composeVolumeKey &&
-				composeSpecMount.composeVolumeKey
-			) {
-				existingMount.composeVolumeKey = composeSpecMount.composeVolumeKey;
-			}
+const listVolumes = async (service: TransferableService) => {
+	const names = new Set<string>();
+	for (const mount of service.mounts) {
+		if (mount.type === "volume" && mount.volumeName) {
+			names.add(mount.volumeName);
 		}
-
-		return mountConfigs;
-	} catch (error) {
-		console.warn(
-			`Failed to resolve Compose-defined mounts for transfer: ${
-				error instanceof Error ? error.message : "unknown error"
-			}`,
+	}
+	if (isCompose(service)) {
+		const project = q(service.appName);
+		const { stdout } = await runOn(
+			service.serverId ?? null,
+			`docker volume ls -q --filter label=com.docker.compose.project=${project}; docker volume ls -q --filter label=com.docker.stack.namespace=${project}`,
 		);
-		return mountConfigs;
-	}
-}
-
-/**
- * Calculate volume size in bytes
- */
-async function getVolumeSize(
-	serverId: string | null,
-	volumeName: string,
-): Promise<number | null> {
-	const command = `docker run --rm -v ${shellEscape(`${volumeName}:/volume_data:ro`)} alpine sh -c 'du -sb /volume_data 2>/dev/null | cut -f1'`;
-	try {
-		const { stdout } = serverId
-			? await execAsyncRemote(serverId, command)
-			: await execAsync(command);
-		const trimmed = stdout.trim();
-		if (!trimmed) {
-			return null;
+		for (const line of stdout.split("\n")) {
+			const name = line.trim();
+			if (name) names.add(name);
 		}
-		const parsed = Number.parseInt(trimmed, 10);
-		if (Number.isNaN(parsed)) {
-			return null;
+	}
+	return [...names];
+};
+
+const listBindMounts = (service: TransferableService) => [
+	...new Set(
+		service.mounts
+			.filter((mount) => mount.type === "bind" && mount.hostPath)
+			.map((mount) => mount.hostPath as string),
+	),
+];
+
+const stopOnSource = async (service: TransferableService, log: Logger) => {
+	if (isCompose(service)) {
+		try {
+			await stopCompose(service.composeId);
+		} catch (error) {
+			log(`  Could not stop compose: ${errorMessage(error)}`);
 		}
-		return parsed;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Sync Traefik config for a service
- */
-async function syncTraefikConfig(
-	sourceServerId: string | null,
-	targetServerId: string | null,
-	appName: string,
-	onProgress?: (log: string) => void,
-): Promise<void> {
-	onProgress?.(`Syncing Traefik config: ${appName}.yml`);
-
-	// Read source config
-	let config: string | null = null;
-	if (sourceServerId) {
-		config = await readRemoteConfig(sourceServerId, appName);
-	} else {
-		config = readConfig(appName);
-	}
-
-	if (!config) {
-		onProgress?.("No Traefik config found on source, skipping");
 		return;
 	}
+	await runOn(
+		service.serverId ?? null,
+		`docker service scale ${q(service.appName)}=0 >/dev/null 2>&1 || true`,
+	);
+};
 
-	// Write to target
-	if (targetServerId) {
-		await writeConfigRemote(targetServerId, appName, config);
-	} else {
-		writeConfig(appName, config);
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * Phase 1: Scan — detect files, sizes, and conflicts
- */
-export async function scanServiceForTransfer(
-	opts: TransferOptions,
-	onProgress?: (progress: TransferScanProgress) => void,
-): Promise<TransferScanResult> {
-	const result: TransferScanResult = {
-		volumes: [],
-		binds: [],
-		totalSizeBytes: 0,
-		conflicts: [],
-		hasConflicts: false,
-	};
-	const mountConfigs = await getMountConfigsForTransfer(opts);
-	const dirPath = getServiceDirPath(opts.serviceType, opts.appName);
-	const totalMounts = mountConfigs.length * 2 + (dirPath ? 2 : 0);
-	let processedMounts = 0;
-	let scannedFiles = 0;
-	let processedHashes = 0;
-	let totalHashes = 0;
-	const scanEmitInterval = 200;
-	const emitScanProgress = (
-		phase: string,
-		mount?: string,
-		currentFile?: string,
-		force = false,
-	) => {
-		if (!onProgress) return;
-		if (!force && !currentFile && !phase.includes("complete")) {
+const startOnSource = async (service: TransferableService, log: Logger) => {
+	if (isCompose(service)) {
+		if (service.composeType === "stack") {
+			log(
+				"  Stack was removed on the source server, run Deploy to bring it back",
+			);
 			return;
 		}
-		onProgress({
-			phase,
-			mount,
-			currentFile,
-			processedMounts,
-			totalMounts,
-			scannedFiles,
-			processedHashes,
-			totalHashes,
-		});
-	};
-	const makeFileScanner =
-		(phase: string, mount: string) => (file: { path: string }) => {
-			scannedFiles++;
-			if (onProgress && scannedFiles % scanEmitInterval === 0) {
-				emitScanProgress(phase, mount, file.path, true);
-			}
-		};
-	emitScanProgress("Preparing scan", undefined, undefined, true);
-
-	// 1. Scan service directory (application/compose only)
-	if (dirPath) {
-		emitScanProgress("Scanning source mount", dirPath, undefined, true);
-		const sourceFiles = await scanBindMount(
-			opts.sourceServerId,
-			dirPath,
-			makeFileScanner("Scanning source mount", dirPath),
-		);
-		processedMounts++;
-		emitScanProgress("Scanned source mount", dirPath, undefined, true);
-		emitScanProgress("Scanning target mount", dirPath, undefined, true);
-		const targetFiles = await scanBindMount(
-			opts.targetServerId,
-			dirPath,
-			makeFileScanner("Scanning target mount", dirPath),
-		);
-		processedMounts++;
-		emitScanProgress("Scanned target mount", dirPath, undefined, true);
-		const serviceDirMountId = getServiceDirMountId(
-			opts.serviceType,
-			opts.serviceId,
-		);
-		const compared = compareFileLists(sourceFiles, targetFiles).map((file) => ({
-			...file,
-			decisionKey: buildDecisionKey(serviceDirMountId, file.path),
-		}));
-
-		result.serviceDir = { path: dirPath, files: compared };
-		result.totalSizeBytes += sourceFiles.reduce((s, f) => s + f.size, 0);
-	}
-
-	// 2. Check Traefik config (application/compose only)
-	if (hasTraefikConfig(opts.serviceType)) {
-		let sourceConfig: string | null = null;
-		let targetConfig: string | null = null;
-
-		if (opts.sourceServerId) {
-			sourceConfig = await readRemoteConfig(opts.sourceServerId, opts.appName);
-		} else {
-			sourceConfig = readConfig(opts.appName);
+		try {
+			await startCompose(service.composeId);
+		} catch (error) {
+			log(`  Could not start compose: ${errorMessage(error)}`);
 		}
-
-		if (opts.targetServerId) {
-			targetConfig = await readRemoteConfig(opts.targetServerId, opts.appName);
-		} else {
-			targetConfig = readConfig(opts.appName);
-		}
-
-		result.traefikConfig = {
-			sourceExists: !!sourceConfig,
-			targetExists: !!targetConfig,
-			hasConflict:
-				!!sourceConfig && !!targetConfig && sourceConfig !== targetConfig,
-			sourceContent: sourceConfig || undefined,
-			targetContent: targetConfig || undefined,
-		};
+		return;
 	}
-
-	// 3. Scan all mounts (volumes + binds)
-	for (const mount of mountConfigs) {
-		const mountLabel = `${mount.mountType}:${mount.sourcePath}`;
-		if (mount.mountType === "volume") {
-			const sizeBytes = await getVolumeSize(
-				opts.sourceServerId,
-				mount.sourcePath,
-			);
-			emitScanProgress("Scanning source mount", mountLabel, undefined, true);
-			const sourceFiles = await scanVolume(
-				opts.sourceServerId,
-				mount.sourcePath,
-				makeFileScanner("Scanning source mount", mountLabel),
-			);
-			processedMounts++;
-			emitScanProgress("Scanned source mount", mountLabel, undefined, true);
-			emitScanProgress("Scanning target mount", mountLabel, undefined, true);
-			const targetFiles = await scanVolume(
-				opts.targetServerId,
-				mount.targetPath,
-				makeFileScanner("Scanning target mount", mountLabel),
-			);
-			processedMounts++;
-			emitScanProgress("Scanned target mount", mountLabel, undefined, true);
-			const compared = compareFileLists(sourceFiles, targetFiles).map(
-				(file) => ({
-					...file,
-					decisionKey: buildDecisionKey(mount.mountId, file.path),
-				}),
-			);
-
-			result.volumes.push({
-				volumeName: mount.sourcePath,
-				mountPath: mount.mountPath || "",
-				sizeBytes: sizeBytes ?? 0,
-				files: compared,
-			});
-			result.totalSizeBytes += sizeBytes ?? 0;
-		} else {
-			const sourceFiles = await scanBindMount(
-				opts.sourceServerId,
-				mount.sourcePath,
-				makeFileScanner("Scanning source mount", mountLabel),
-			);
-			processedMounts++;
-			emitScanProgress("Scanned source mount", mountLabel, undefined, true);
-			emitScanProgress("Scanning target mount", mountLabel, undefined, true);
-			const targetFiles = await scanBindMount(
-				opts.targetServerId,
-				mount.targetPath,
-				makeFileScanner("Scanning target mount", mountLabel),
-			);
-			processedMounts++;
-			emitScanProgress("Scanned target mount", mountLabel, undefined, true);
-			const compared = compareFileLists(sourceFiles, targetFiles).map(
-				(file) => ({
-					...file,
-					decisionKey: buildDecisionKey(mount.mountId, file.path),
-				}),
-			);
-
-			result.binds.push({
-				hostPath: mount.sourcePath,
-				files: compared,
-			});
-			result.totalSizeBytes += sourceFiles.reduce((s, f) => s + f.size, 0);
-		}
-	}
-
-	// 4. Collect all files requiring user attention
-	const allFiles: FileCompareResult[] = [];
-	if (result.serviceDir) allFiles.push(...result.serviceDir.files);
-	for (const v of result.volumes) allFiles.push(...v.files);
-	for (const b of result.binds) allFiles.push(...b.files);
-
-	result.conflicts = allFiles.filter(
-		(f) =>
-			f.status === "conflict" ||
-			f.status === "newer_target" ||
-			f.status === "newer_source",
+	const replicas = isApplication(service) ? service.replicas : 1;
+	await runOn(
+		service.serverId ?? null,
+		`docker service scale ${q(service.appName)}=${replicas} >/dev/null 2>&1 || true`,
 	);
-	totalHashes = result.conflicts.filter(
-		(conflict) =>
-			!conflict.isDirectory &&
-			(conflict.status === "newer_source" ||
-				conflict.status === "newer_target"),
-	).length;
-	if (totalHashes > 0) {
-		emitScanProgress("Hashing changed files", undefined, undefined, true);
+};
+
+const resolveNetworkIds = async (
+	networkIds: string[] | null | undefined,
+	targetServerId: string | null,
+) => {
+	if (!networkIds || networkIds.length === 0) {
+		return { kept: [] as string[], dropped: [] as string[] };
+	}
+	const rows = await db.query.network.findMany({
+		where: inArray(network.networkId, networkIds),
+		columns: { networkId: true, name: true, serverId: true },
+	});
+	return {
+		kept: rows
+			.filter((row) => (row.serverId ?? null) === targetServerId)
+			.map((row) => row.networkId),
+		dropped: rows
+			.filter((row) => (row.serverId ?? null) !== targetServerId)
+			.map((row) => row.name),
+	};
+};
+
+const moveTraefikConfig = async (
+	source: ApplicationService,
+	moved: ApplicationService,
+	log: Logger,
+) => {
+	const config = source.serverId
+		? await readRemoteConfig(source.serverId, source.appName)
+		: readConfig(source.appName);
+	if (config) {
+		if (moved.serverId) {
+			await writeConfigRemote(moved.serverId, moved.appName, config);
+		} else {
+			writeConfig(moved.appName, config);
+		}
+	}
+	for (const domain of moved.domains) {
+		await manageDomain(moved, domain);
+	}
+	for (const security of moved.security) {
+		await createSecurityMiddleware(moved, security);
+	}
+	for (const redirect of moved.redirects) {
+		await createRedirectMiddleware(moved, redirect);
+	}
+	log(`  Traefik configuration recreated (${moved.domains.length} domains)`);
+};
+
+const removeSourceTraefikConfig = async (source: ApplicationService) => {
+	for (const domain of source.domains) {
+		await removePathMiddlewares(source, domain.uniqueConfigKey);
+		await removeForwardAuthMiddleware(source, domain.uniqueConfigKey);
+	}
+	await deleteAllMiddlewares(source);
+	await removeTraefikConfig(source.appName, source.serverId);
+};
+
+const moveDeploymentLogs = async (
+	service: ApplicationService | ComposeService,
+	targetServerId: string | null,
+	log: Logger,
+) => {
+	const sourceServerId = service.serverId ?? null;
+	const from = path.join(paths(!!sourceServerId).LOGS_PATH, service.appName);
+	const to = path.join(paths(!!targetServerId).LOGS_PATH, service.appName);
+	if (!(await directoryExists(sourceServerId, from))) return;
+
+	log("Copying deployment logs");
+	await copyStream(
+		"deployment logs",
+		{ serverId: sourceServerId, command: directoryExportCommand(from) },
+		{ serverId: targetServerId, command: directoryImportCommand(to) },
+		log,
+	);
+	if (from !== to) {
+		await db
+			.update(deployments)
+			.set({ logPath: sql`replace(${deployments.logPath}, ${from}, ${to})` })
+			.where(
+				isCompose(service)
+					? eq(deployments.composeId, service.composeId)
+					: eq(deployments.applicationId, service.applicationId),
+			);
+	}
+	await runOn(sourceServerId, `rm -rf ${q(from)}`);
+};
+
+const cleanupSource = async (
+	service: TransferableService,
+	volumes: string[],
+	removeSourceData: boolean,
+	log: Logger,
+) => {
+	const serverId = service.serverId ?? null;
+	const steps: Array<() => Promise<unknown>> = [];
+
+	if (isApplication(service)) {
+		steps.push(
+			() => removeSourceTraefikConfig(service),
+			() => removeService(service.appName, serverId),
+			() => removeDirectoryCode(service.appName, serverId),
+			() => removeMonitoringDirectory(service.appName, serverId),
+		);
+	} else if (isCompose(service)) {
+		steps.push(() => removeCompose(service, removeSourceData));
+	} else {
+		steps.push(
+			() => removeService(service.appName, serverId),
+			() => removeDirectoryCode(service.appName, serverId),
+		);
+	}
+	if (removeSourceData && volumes.length > 0) {
+		steps.push(() =>
+			runOn(
+				serverId,
+				`docker volume rm ${volumes.map(q).join(" ")} >/dev/null 2>&1 || true`,
+			),
+		);
 	}
 
-	// Hash verification is only needed for mtime-based deltas.
-	// For same-mtime "conflict" entries, size already differs so hashing is redundant.
-	for (let i = 0; i < result.conflicts.length; i++) {
-		const conflict = result.conflicts[i];
-		if (!conflict) continue;
+	for (const step of steps) {
+		try {
+			await step();
+		} catch (error) {
+			log(`  Warning: ${errorMessage(error)}`);
+		}
+	}
+	if (!removeSourceData && volumes.length > 0) {
+		log(`  Volumes kept on the source server: ${volumes.join(", ")}`);
+	}
+};
+
+const deployOnTarget = async (
+	serviceType: ServiceType,
+	serviceId: string,
+	targetName: string,
+	log: Logger,
+) => {
+	log(`Deploying on ${targetName}`);
+	const deployment = {
+		titleLog: "Deploy after transfer",
+		descriptionLog: `Transferred to ${targetName}`,
+	};
+	switch (serviceType) {
+		case "application":
+			log("Follow the Deployments tab for the build log");
+			await updateStatus(serviceType, serviceId, "running");
+			return await deployApplication({
+				applicationId: serviceId,
+				...deployment,
+			});
+		case "compose":
+			log("Follow the Deployments tab for the build log");
+			await updateStatus(serviceType, serviceId, "running");
+			return await deployCompose({ composeId: serviceId, ...deployment });
+		case "postgres":
+			return await deployPostgres(serviceId, log);
+		case "mysql":
+			return await deployMySql(serviceId, log);
+		case "mariadb":
+			return await deployMariadb(serviceId, log);
+		case "mongo":
+			return await deployMongo(serviceId, log);
+		case "redis":
+			return await deployRedis(serviceId, log);
+		case "libsql":
+			return await deployLibsql(serviceId, log);
+	}
+};
+
+export const transferService = async (
+	input: TransferServiceInput,
+	log: Logger,
+) => {
+	const { serviceType, serviceId, targetServerId, removeSourceData } = input;
+	const service = await findService(serviceType, serviceId);
+
+	if (service.environment.project.organizationId !== input.organizationId) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "You are not authorized to transfer this service",
+		});
+	}
+	const sourceServerId = service.serverId ?? null;
+	if (sourceServerId === targetServerId) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "The service is already on the selected server",
+		});
+	}
+	const targetServer = targetServerId
+		? await findServerById(targetServerId)
+		: null;
+	if (targetServer) {
+		if (targetServer.organizationId !== input.organizationId) {
+			throw new TRPCError({
+				code: "UNAUTHORIZED",
+				message: "You are not authorized to use the target server",
+			});
+		}
 		if (
-			conflict.status !== "newer_source" &&
-			conflict.status !== "newer_target"
+			targetServer.serverStatus !== "active" ||
+			targetServer.serverType !== "deploy"
 		) {
-			continue;
-		}
-		if (conflict.isDirectory) continue;
-		processedHashes++;
-		if (processedHashes % 20 === 0 || processedHashes === totalHashes) {
-			emitScanProgress("Hashing changed files", undefined, conflict.path, true);
-		}
-
-		// Determine which mount this belongs to
-		let hashApplied = false;
-		for (const v of result.volumes) {
-			const idx = v.files.indexOf(conflict);
-			if (idx >= 0) {
-				const sourceHash = await computeFileHash(
-					opts.sourceServerId,
-					v.volumeName,
-					conflict.path,
-					true,
-				);
-				const targetHash = await computeFileHash(
-					opts.targetServerId,
-					v.volumeName,
-					conflict.path,
-					true,
-				);
-				conflict.hash = sourceHash || undefined;
-				conflict.targetInfo = conflict.targetInfo
-					? { ...conflict.targetInfo, hash: targetHash || undefined }
-					: undefined;
-				if (sourceHash && targetHash && sourceHash === targetHash) {
-					conflict.status = "match";
-				}
-				hashApplied = true;
-				break;
-			}
-		}
-
-		if (hashApplied) continue;
-
-		for (const b of result.binds) {
-			const idx = b.files.indexOf(conflict);
-			if (idx >= 0) {
-				const sourceHash = await computeFileHash(
-					opts.sourceServerId,
-					b.hostPath,
-					conflict.path,
-					false,
-				);
-				const targetHash = await computeFileHash(
-					opts.targetServerId,
-					b.hostPath,
-					conflict.path,
-					false,
-				);
-				conflict.hash = sourceHash || undefined;
-				conflict.targetInfo = conflict.targetInfo
-					? { ...conflict.targetInfo, hash: targetHash || undefined }
-					: undefined;
-				if (sourceHash && targetHash && sourceHash === targetHash) {
-					conflict.status = "match";
-				}
-				hashApplied = true;
-				break;
-			}
-		}
-
-		if (hashApplied || !result.serviceDir) continue;
-
-		const idx = result.serviceDir.files.indexOf(conflict);
-		if (idx >= 0) {
-			const sourceHash = await computeFileHash(
-				opts.sourceServerId,
-				result.serviceDir.path,
-				conflict.path,
-				false,
-			);
-			const targetHash = await computeFileHash(
-				opts.targetServerId,
-				result.serviceDir.path,
-				conflict.path,
-				false,
-			);
-			conflict.hash = sourceHash || undefined;
-			conflict.targetInfo = conflict.targetInfo
-				? { ...conflict.targetInfo, hash: targetHash || undefined }
-				: undefined;
-			if (sourceHash && targetHash && sourceHash === targetHash) {
-				conflict.status = "match";
-			}
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "The target server is not available for deployments",
+			});
 		}
 	}
 
-	// Re-evaluate after hash verification: equal-content mtime deltas become matches.
-	result.conflicts = allFiles.filter(
-		(f) =>
-			f.status === "conflict" ||
-			f.status === "newer_target" ||
-			f.status === "newer_source",
-	);
+	const sourceName = service.server?.name ?? "Dokploy Server";
+	const targetName = targetServer?.name ?? "Dokploy Server";
+	const originalNetworkIds =
+		"networkIds" in service ? service.networkIds : undefined;
+	let switched = false;
 
-	result.hasConflicts = result.conflicts.length > 0;
-	emitScanProgress("Scan complete", undefined, undefined, true);
+	log(`Transferring ${service.appName} from ${sourceName} to ${targetName}`);
+	try {
+		log(`Stopping service on ${sourceName}`);
+		await stopOnSource(service, log);
+		await updateStatus(serviceType, serviceId, "running");
 
-	return result;
-}
-
-/**
- * Phase 2: Execute — sync files/volumes with progress, then return
- */
-export async function executeTransfer(
-	opts: TransferOptions,
-	decisions: Record<string, "skip" | "overwrite">,
-	onProgress: (progress: TransferProgress) => void,
-): Promise<{ success: boolean; errors: string[] }> {
-	type DiffPlannedSync = {
-		mode: "diff";
-		mount: ResolvedMountTransferConfig;
-		compared: FileCompareResult[];
-		filesToSyncCount: number;
-		totalBytes: number;
-		phaseLabel: string;
-	};
-
-	type ArchivePlannedSync = {
-		mode: "archive";
-		mount: ResolvedMountTransferConfig;
-		filesToSyncCount: number;
-		totalBytes: number;
-		phaseLabel: string;
-	};
-
-	type PlannedSync = DiffPlannedSync | ArchivePlannedSync;
-
-	const errors: string[] = [];
-	let totalBytes = 0;
-	let transferredBytes = 0;
-	let totalFiles = 0;
-	let processedFiles = 0;
-
-	// Helper to emit progress
-	const emit = (phase: string, currentFile?: string) => {
-		onProgress({
-			phase,
-			currentFile,
-			processedFiles,
-			totalFiles,
-			transferredBytes,
-			totalBytes,
-			percentage:
-				totalBytes > 0 ? Math.round((transferredBytes / totalBytes) * 100) : 0,
-		});
-	};
-
-	// Ensure we have a valid target
-	const targetServerId = opts.targetServerId;
-
-	const createDiffPlan = async (
-		mount: ResolvedMountTransferConfig,
-		phaseLabel: string,
-		decisionScope?: string,
-	): Promise<DiffPlannedSync> => {
-		const sourceFiles =
-			mount.mountType === "volume"
-				? await scanVolume(opts.sourceServerId, mount.sourcePath)
-				: await scanBindMount(opts.sourceServerId, mount.sourcePath);
-		const targetFiles =
-			mount.mountType === "volume"
-				? await scanVolume(targetServerId, mount.targetPath)
-				: await scanBindMount(targetServerId, mount.targetPath);
-		const compared = compareFileLists(sourceFiles, targetFiles).map((file) => ({
-			...file,
-			decisionKey: buildDecisionKey(decisionScope || mount.mountId, file.path),
-		}));
-		const filesToSync = compared.filter((file) =>
-			shouldSyncFile(file, "manual", decisions, decisionScope || mount.mountId),
+		const volumes = await listVolumes(service);
+		const bindMounts = listBindMounts(service);
+		log(
+			`Found ${volumes.length} volume(s) and ${bindMounts.length} bind mount(s)`,
 		);
-		return {
-			mode: "diff",
-			mount,
-			compared,
-			filesToSyncCount: filesToSync.length,
-			totalBytes: filesToSync.reduce((sum, file) => sum + file.size, 0),
-			phaseLabel,
-		};
-	};
+		for (const volume of volumes) {
+			log(`Copying volume ${volume}`);
+			await copyStream(
+				volume,
+				{ serverId: sourceServerId, command: volumeExportCommand(volume) },
+				{ serverId: targetServerId, command: volumeImportCommand(volume) },
+				log,
+			);
+		}
+		for (const hostPath of bindMounts) {
+			if (!(await directoryExists(sourceServerId, hostPath))) {
+				log(`Skipping bind mount ${hostPath}: not found on ${sourceName}`);
+				continue;
+			}
+			log(`Copying bind mount ${hostPath}`);
+			await copyStream(
+				hostPath,
+				{
+					serverId: sourceServerId,
+					command: directoryExportCommand(hostPath),
+				},
+				{
+					serverId: targetServerId,
+					command: directoryImportCommand(hostPath),
+				},
+				log,
+			);
+		}
+
+		const networks = await resolveNetworkIds(
+			originalNetworkIds,
+			targetServerId,
+		);
+		if (networks.dropped.length > 0) {
+			log(
+				`Detaching networks not available on ${targetName}: ${networks.dropped.join(", ")}`,
+			);
+		}
+		await updateServer(serviceType, serviceId, {
+			serverId: targetServerId,
+			networkIds: originalNetworkIds === undefined ? undefined : networks.kept,
+		});
+		switched = true;
+		const moved = await findService(serviceType, serviceId);
+
+		const fileMounts = moved.mounts.filter((mount) => mount.type === "file");
+		if (fileMounts.length > 0) {
+			log(`Recreating ${fileMounts.length} file mount(s) on ${targetName}`);
+			for (const mount of fileMounts) {
+				await createFileMount(mount.mountId);
+			}
+		}
+		if (isApplication(service) && isApplication(moved)) {
+			log(`Recreating Traefik configuration on ${targetName}`);
+			await moveTraefikConfig(service, moved, log);
+		}
+		if (isApplication(service) || isCompose(service)) {
+			await moveDeploymentLogs(service, targetServerId, log);
+		}
+
+		log(`Cleaning up ${sourceName}`);
+		await cleanupSource(service, volumes, removeSourceData, log);
+		await updateStatus(serviceType, serviceId, "idle");
+	} catch (error) {
+		if (switched) {
+			await updateServer(serviceType, serviceId, {
+				serverId: sourceServerId,
+				networkIds: originalNetworkIds,
+			});
+		}
+		log(`Data already copied to ${targetName} was left in place`);
+		log(`Restoring service on ${sourceName}`);
+		await startOnSource(service, log);
+		await updateStatus(serviceType, serviceId, "error");
+		throw error;
+	}
 
 	try {
-		emit("Preparing transfer plan");
-
-		// 1. Build sync plans and totals before copying files.
-		let serviceDirPlan: DiffPlannedSync | null = null;
-		const dirPath = getServiceDirPath(opts.serviceType, opts.appName);
-		const mountConfigs = await getMountConfigsForTransfer(opts);
-		const planningTotal = (dirPath ? 1 : 0) + mountConfigs.length;
-		let planningStep = 0;
-		const decisionEntries = Object.entries(decisions);
-		const hasSkipDecisionForScope = (scope: string) =>
-			decisionEntries.some(
-				([key, decision]) => key.startsWith(`${scope}:`) && decision === "skip",
-			);
-
-		const emitPlanning = (detail: string) => {
-			planningStep++;
-			emit(
-				`Preparing transfer plan (${planningStep}/${planningTotal})`,
-				detail,
-			);
-		};
-
-		if (dirPath) {
-			const serviceDirMount: ResolvedMountTransferConfig = {
-				mountId: getServiceDirMountId(opts.serviceType, opts.serviceId),
-				mountType: "bind",
-				sourcePath: dirPath,
-				targetPath: dirPath,
-				createIfMissing: true,
-				updateMountConfig: false,
-			};
-			const phaseLabel = `Syncing service directory: ${dirPath}`;
-			emitPlanning(`Analyzing bind: ${dirPath}`);
-			serviceDirPlan = await createDiffPlan(
-				serviceDirMount,
-				phaseLabel,
-				serviceDirMount.mountId,
-			);
-			totalFiles += serviceDirPlan.filesToSyncCount;
-			totalBytes += serviceDirPlan.totalBytes;
-		}
-
-		// 2. Build plans for mounts (volumes & binds)
-		const mountPlans: PlannedSync[] = [];
-		for (const mount of mountConfigs) {
-			if (
-				mount.mountType === "volume" &&
-				!hasSkipDecisionForScope(mount.mountId)
-			) {
-				emitPlanning(`Analyzing volume: ${mount.sourcePath} (archive mode)`);
-				const sizeBytes = await getVolumeSize(
-					opts.sourceServerId,
-					mount.sourcePath,
-				);
-				const shouldSyncArchive = sizeBytes === null || sizeBytes > 0;
-				const archivePlan: ArchivePlannedSync = {
-					mode: "archive",
-					mount,
-					filesToSyncCount: shouldSyncArchive ? 1 : 0,
-					totalBytes: sizeBytes ?? 0,
-					phaseLabel: `Syncing ${mount.mountType}: ${mount.sourcePath}`,
-				};
-				mountPlans.push(archivePlan);
-				totalFiles += archivePlan.filesToSyncCount;
-				totalBytes += archivePlan.totalBytes;
-				continue;
-			}
-
-			emitPlanning(`Analyzing ${mount.mountType}: ${mount.sourcePath}`);
-			const diffPlan = await createDiffPlan(
-				mount,
-				`Syncing ${mount.mountType}: ${mount.sourcePath}`,
-			);
-			mountPlans.push(diffPlan);
-			totalFiles += diffPlan.filesToSyncCount;
-			totalBytes += diffPlan.totalBytes;
-		}
-
-		// Pre-flight: create volumes/directories on target before any sync
-		if (targetServerId) {
-			for (const { mount } of mountPlans) {
-				if (mount.mountType === "volume") {
-					await createVolumeOnTarget(targetServerId, mount.targetPath, {
-						labels: getComposeManagedVolumeLabels(mount),
-					});
-				} else {
-					await createDirectoryOnTarget(targetServerId, mount.targetPath);
-				}
-			}
-		}
-
-		// 3. Sync service directory (application/compose)
-		if (serviceDirPlan && dirPath) {
-			emit(serviceDirPlan.phaseLabel);
-			await createDirectoryOnTarget(targetServerId, dirPath);
-
-			const abortController = new AbortController();
-			let mountProcessedFiles = 0;
-			let mountTransferredBytes = 0;
-			const serviceDirResult = await syncMount(
-				serviceDirPlan.mount,
-				serviceDirPlan.compared,
-				opts.sourceServerId,
-				targetServerId,
-				"manual",
-				decisions,
-				abortController.signal,
-				(status) => {
-					if (status.processedFiles !== undefined) {
-						const delta = status.processedFiles - mountProcessedFiles;
-						mountProcessedFiles = status.processedFiles;
-						if (delta > 0) {
-							processedFiles += delta;
-						}
-					}
-					if (status.transferredBytes !== undefined) {
-						const delta = status.transferredBytes - mountTransferredBytes;
-						mountTransferredBytes = status.transferredBytes;
-						if (delta > 0) {
-							transferredBytes += delta;
-						}
-					}
-					emit(serviceDirPlan.phaseLabel, status.currentFile || undefined);
-				},
-			);
-
-			if (!serviceDirResult.success) {
-				errors.push(...serviceDirResult.errors);
-			}
-		}
-
-		// 4. Sync Traefik config (application/compose)
-		if (hasTraefikConfig(opts.serviceType)) {
-			emit("Syncing Traefik configuration");
-			await syncTraefikConfig(
-				opts.sourceServerId,
-				targetServerId,
-				opts.appName,
-				(log) => emit("Syncing Traefik configuration", log),
-			);
-		}
-
-		// Sync each mount
-		for (const plan of mountPlans) {
-			const { mount, phaseLabel } = plan;
-			emit(phaseLabel);
-
-			if (plan.mode === "archive") {
-				if (plan.filesToSyncCount === 0) {
-					continue;
-				}
-				try {
-					emit(phaseLabel, "[archive stream]");
-					await syncVolumeArchive(
-						opts.sourceServerId,
-						targetServerId,
-						mount.sourcePath,
-						mount.targetPath,
-					);
-					processedFiles += plan.filesToSyncCount;
-					transferredBytes += plan.totalBytes;
-					emit(phaseLabel);
-				} catch (error) {
-					errors.push(
-						`Failed to sync volume ${mount.sourcePath}: ${
-							error instanceof Error ? error.message : "Unknown error"
-						}`,
-					);
-				}
-				continue;
-			}
-
-			const abortController = new AbortController();
-			let mountProcessedFiles = 0;
-			let mountTransferredBytes = 0;
-
-			const mountResult = await syncMount(
-				mount,
-				plan.compared,
-				opts.sourceServerId,
-				targetServerId,
-				"manual",
-				decisions,
-				abortController.signal,
-				(status) => {
-					if (status.processedFiles !== undefined) {
-						const delta = status.processedFiles - mountProcessedFiles;
-						mountProcessedFiles = status.processedFiles;
-						if (delta > 0) {
-							processedFiles += delta;
-						}
-					}
-					if (status.transferredBytes !== undefined) {
-						const delta = status.transferredBytes - mountTransferredBytes;
-						mountTransferredBytes = status.transferredBytes;
-						if (delta > 0) {
-							transferredBytes += delta;
-						}
-					}
-					emit(phaseLabel, status.currentFile || undefined);
-				},
-			);
-
-			if (!mountResult.success) {
-				errors.push(...mountResult.errors);
-			}
-		}
-
-		emit("Transfer complete");
+		await deployOnTarget(serviceType, serviceId, targetName, log);
 	} catch (error) {
-		const msg =
-			error instanceof Error ? error.message : "Unknown transfer error";
-		errors.push(msg);
-		emit("Transfer failed");
+		await updateStatus(serviceType, serviceId, "error");
+		log(
+			`Data was transferred but the deployment on ${targetName} failed, run Deploy to retry`,
+		);
+		throw error;
 	}
 
-	return { success: errors.length === 0, errors };
-}
+	return {
+		serviceType,
+		serviceId,
+		appName: service.appName,
+		targetServerId,
+		targetName,
+	};
+};

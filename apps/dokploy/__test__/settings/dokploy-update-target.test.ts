@@ -389,6 +389,8 @@ describe("Dokploy rollback point", () => {
 const LAST_MIGRATION_OF_FLOOR = 206;
 // Migrations above the floor that were checked and are known to be safe for
 // the floor's release (a catch-up that drops nothing it reads, say).
+// None today: 0234 (upstream v0.31.0 sync) adds compose.pullImages next to the old
+// pullImagesOnDeploy instead of renaming it, so the floor's release still runs.
 const ALLOWED_DESTRUCTIVE_MIGRATIONS: string[] = [];
 const DESTRUCTIVE =
 	/\b(DROP\s+COLUMN|DROP\s+TABLE|RENAME|SET\s+NOT\s+NULL|SET\s+DATA\s+TYPE|DROP\s+DEFAULT)\b/i;

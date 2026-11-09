@@ -28,7 +28,7 @@ const baseCompose = {
 	createEnvFile: true,
 	isolatedDeployment: false,
 	isolatedNetworkMtu: null,
-	pullImagesOnDeploy: false,
+	pullImages: false,
 	randomize: false,
 	suffix: "",
 	serverId: null,
@@ -241,7 +241,7 @@ describe("getBuildComposeCommand — rollback decision logic", () => {
 	});
 
 	it("restores without --pull always so a bad tag is not re-pulled", async () => {
-		const command = await build({ pullImagesOnDeploy: true });
+		const command = await build({ pullImages: true });
 		const restoreLine = command
 			.split("\n")
 			.find((line) => line.includes("docker compose") && line.includes("&& echo"));

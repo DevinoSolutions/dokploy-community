@@ -57,6 +57,10 @@ vi.mock("@dokploy/server/utils/backups/utils", () => ({
 	buildRcloneRcatCommand: vi.fn(() => "rclone rcat"),
 	getBackupCommand: vi.fn(() => "echo backup"),
 	getBackupTimestamp: vi.fn(() => "2024"),
+	getBackupFileName: vi.fn(
+		(customName: string | null, extension: string, prefix?: string) =>
+			`${[prefix, customName, "2024"].filter(Boolean).join("-")}.${extension}`,
+	),
 	getRclonePathAndFlags: vi.fn(async () => ({
 		flags: [],
 		path: "remote:bucket/",

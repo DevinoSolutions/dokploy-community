@@ -12,7 +12,7 @@ import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
 	buildRcloneRcatCommand,
 	getBackupCommand,
-	getBackupTimestamp,
+	getBackupFileName,
 	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
@@ -26,7 +26,7 @@ export const runMySqlBackup = async (mysql: MySql, backup: BackupSchedule) => {
 		backup.destinationId,
 		project.organizationId,
 	);
-	const backupFileName = `${getBackupTimestamp()}.sql.gz`;
+	const backupFileName = getBackupFileName(backup.customName, "sql.gz");
 	const bucketDestination = `${normalizeS3Path(prefix)}${backupFileName}`;
 	const deployment = await createDeploymentBackup({
 		backupId: backup.backupId,

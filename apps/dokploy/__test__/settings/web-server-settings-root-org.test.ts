@@ -43,6 +43,8 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 		findUserById: mocks.findUserById,
 		updateServerTraefik: vi.fn(),
 		updateLetsEncryptEmail: vi.fn(),
+		// Changing the panel domain checks that port 3000 is still published.
+		isPanelPortPublished: vi.fn(async () => true),
 	};
 });
 

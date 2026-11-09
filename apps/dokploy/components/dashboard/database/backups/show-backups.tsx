@@ -1,6 +1,5 @@
 import {
 	ClipboardList,
-	Database,
 	DatabaseBackup,
 	PenBoxIcon,
 	Play,
@@ -115,12 +114,9 @@ export const ShowBackups = ({
 
 	return (
 		<Card className="bg-background">
-			<CardHeader className="flex flex-row justify-between gap-4  flex-wrap">
-				<div className="flex flex-col gap-0.5">
-					<CardTitle className="text-xl flex flex-row gap-2">
-						<Database className="size-6 text-muted-foreground" />
-						Backups
-					</CardTitle>
+			<CardHeader className="flex flex-row items-center flex-wrap gap-4 justify-between">
+				<div className="flex flex-col gap-1">
+					<CardTitle className="text-xl">Backups</CardTitle>
 					<CardDescription>
 						Add backups to your database to save the data to a different
 						provider.
@@ -292,6 +288,17 @@ export const ShowBackups = ({
 																	{backup.prefix}
 																</p>
 															</div>
+
+															{backup.customName && (
+																<div className="min-w-[150px]">
+																	<span className="text-sm font-medium text-muted-foreground">
+																		Custom Name
+																	</span>
+																	<p className="font-medium text-sm mt-0.5">
+																		{backup.customName}
+																	</p>
+																</div>
+															)}
 
 															<div className="min-w-[100px]">
 																<span className="text-sm font-medium text-muted-foreground">

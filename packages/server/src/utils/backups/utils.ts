@@ -1,9 +1,9 @@
-import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import {
 	ADDITIONAL_FLAG_REGEX,
 	GENERIC_RCLONE_PROVIDER,
 } from "@dokploy/server/db/validations/destination";
 import { logger } from "@dokploy/server/lib/logger";
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 
 export { GENERIC_RCLONE_PROVIDER };
 
@@ -116,9 +116,18 @@ export const removeScheduleBackup = (backupId: string) => {
 export const getBackupTimestamp = () =>
 	new Date().toISOString().replace(/[:.]/g, "-");
 
+export const getBackupFileName = (
+	customName: string | null | undefined,
+	extension: string,
+	fixedPrefix?: string,
+) =>
+	`${[fixedPrefix, customName, getBackupTimestamp()].filter(Boolean).join("-")}.${extension}`;
+
 export const normalizeS3Path = (prefix: string) => {
 	// Trim whitespace and remove leading/trailing slashes
-	const normalizedPrefix = trimTrailingSlashes(prefix.trim().replace(/^\/+/, ""));
+	const normalizedPrefix = trimTrailingSlashes(
+		prefix.trim().replace(/^\/+/, ""),
+	);
 	// Return empty string if prefix is empty, otherwise append trailing slash
 	return normalizedPrefix ? `${normalizedPrefix}/` : "";
 };

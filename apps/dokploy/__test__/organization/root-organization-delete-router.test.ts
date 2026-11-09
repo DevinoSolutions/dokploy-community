@@ -41,6 +41,7 @@ vi.mock("@dokploy/server/index", () => ({
 	assertOrganizationDeletable: mocks.assertOrganizationDeletable,
 	hasValidLicense: vi.fn(),
 	removeOrganizationNotifications: vi.fn(),
+	removeVectorAgents: vi.fn(),
 	sendInvitationEmail: vi.fn(),
 }));
 

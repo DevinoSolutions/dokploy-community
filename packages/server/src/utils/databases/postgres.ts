@@ -2,6 +2,7 @@ import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
 import { resolveServiceNetworks } from "../../services/network";
 import { assertVolumeMountsBound } from "../../services/volume-binding";
+import { buildDokployLabels } from "../docker/dokploy-labels";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -93,7 +94,18 @@ export const buildPostgres = async (rawPostgres: PostgresNested) => {
 						Args: args,
 					}),
 				...(Ulimits && { Ulimits }),
-				Labels,
+				Labels: {
+					...Labels,
+					...buildDokployLabels({
+						organizationId: postgres.environment.project.organizationId,
+						projectId: postgres.environment.projectId,
+						projectName: postgres.environment.project.name,
+						environmentId: postgres.environmentId,
+						environmentName: postgres.environment.name,
+						applicationId: postgres.postgresId,
+						applicationName: postgres.name,
+					}),
+				},
 			},
 			Networks: resolvedNetworks,
 			RestartPolicy,

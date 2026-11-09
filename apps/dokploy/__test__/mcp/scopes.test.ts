@@ -87,7 +87,7 @@ describe("resolveToolScope", () => {
 		expect(q("server", "withSSHKey")).toBe("dokploy:admin");
 		expect(q("certificates", "one")).toBe("dokploy:admin");
 		expect(q("user", "all")).toBe("dokploy:admin");
-		expect(q("ai", "get")).toBe("dokploy:admin");
+		expect(q("ai", "one")).toBe("dokploy:admin");
 		// Raw file reads return arbitrary paths verbatim.
 		expect(q("docker", "readContainerFile")).toBe("dokploy:admin");
 		expect(q("dockerVolume", "readVolumeFile")).toBe("dokploy:admin");

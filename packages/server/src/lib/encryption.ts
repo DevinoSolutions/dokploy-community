@@ -36,20 +36,16 @@ const dedupeKeys = (keys: Buffer[]) => {
 // Installs that adopt a dedicated ENCRYPTION_KEY still hold values encrypted
 // with the auth-secret-derived key; keep it as a decrypt fallback so they
 // lazily re-encrypt on the next write instead of becoming unreadable.
-//
-// The same applies to installs migrating off the deprecated hardcoded auth
-// secret, which the startup banner asks every affected user to do: their
-// values are encrypted with the legacy-derived key. HARDCODED_LEGACY_SECRET
-// is a published constant, so keeping it as a decrypt-only fallback discloses
-// nothing that was not already derivable from the source, while stopping the
-// migration from orphaning existing values. Encryption always uses
-// primaryKey, so values written after the migration are protected by the
-// real secret.
 const decryptionKeys = dedupeKeys([
 	primaryKey,
 	...(encryptionSecret ? [deriveKey(betterAuthSecret)] : []),
-	deriveKey(HARDCODED_LEGACY_SECRET),
 ]);
+
+// Values written before leaving the hardcoded secret; decrypt-only, and that secret is public anyway.
+const legacyKey = deriveKey(HARDCODED_LEGACY_SECRET);
+const legacyFallbackKeys = decryptionKeys.some((key) => key.equals(legacyKey))
+	? []
+	: [legacyKey];
 
 // Derived keys only — never the raw secrets. A leaked key can decrypt
 // stored values, but the raw BETTER_AUTH_SECRET could also forge sessions.
@@ -112,7 +108,11 @@ export const decryptValue = (value: string): string => {
 	const iv = payload.subarray(0, IV_LENGTH);
 	const authTag = payload.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
 	const encrypted = payload.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
-	const keys = [...decryptionKeys, ...loadRestoredKeys()];
+	const keys = [
+		...decryptionKeys,
+		...legacyFallbackKeys,
+		...loadRestoredKeys(),
+	];
 	for (const key of keys) {
 		try {
 			const decipher = createDecipheriv("aes-256-gcm", key, iv);

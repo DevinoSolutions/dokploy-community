@@ -200,7 +200,6 @@ export const CREDENTIAL_QUERIES: ReadonlySet<string> = new Set([
 	"notification.getEmailProviders",
 	// aiSettings row, unprojected → apiKey
 	"ai.one",
-	"ai.get",
 	"ai.getAll",
 	// oidcConfig/samlConfig blobs → clientSecret, SAML private key
 	"sso.one",

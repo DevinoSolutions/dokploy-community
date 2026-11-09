@@ -38,8 +38,10 @@ export const ScimDialog = ({ children }: Props) => {
 	const [open, setOpen] = useState(false);
 	const [issuedToken, setIssuedToken] = useState<IssuedToken | null>(null);
 
-	const { data: connections = [], isPending } =
-		api.scim.listProviders.useQuery(undefined, { enabled: open });
+	const { data: connections = [], isPending } = api.scim.listProviders.useQuery(
+		undefined,
+		{ enabled: open },
+	);
 	const { mutateAsync: generateToken, isPending: isGenerating } =
 		api.scim.generateToken.useMutation();
 	const { mutateAsync: rotateToken, isPending: isRotating } =
@@ -119,8 +121,8 @@ export const ScimDialog = ({ children }: Props) => {
 					<DialogDescription>
 						Automatically provision, update, and deactivate users from your
 						identity provider (Okta, Entra ID, etc.). Provisioned users join
-						this organization with its default role. They still sign in with
-						SSO or another login method.
+						this organization with its default role. They still sign in with SSO
+						or another login method.
 					</DialogDescription>
 				</DialogHeader>
 				<div className="space-y-4 py-2">
@@ -155,7 +157,8 @@ export const ScimDialog = ({ children }: Props) => {
 								{issuedToken.expiresAt.toLocaleDateString()}.
 							</p>
 							<div className="mt-2 flex items-center gap-2">
-								<p className="flex-1 break-all rounded-md bg-background px-2 py-1.5 font-mono text-xs">
+								{/* ph-no-capture keeps the token out of session replay. */}
+								<p className="ph-no-capture flex-1 break-all rounded-md bg-background px-2 py-1.5 font-mono text-xs">
 									{issuedToken.token}
 								</p>
 								<Button

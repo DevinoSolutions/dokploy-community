@@ -243,7 +243,7 @@ describe("compose rollback on a unit with a build server", () => {
 
 	it("also pins the restore when the compose pulls images on deploy", async () => {
 		const script = await getBuildComposeCommand(
-			{ ...base, pullImagesOnDeploy: true } as typeof base,
+			{ ...base, pullImages: true } as typeof base,
 			{ deploymentId: "dep1", remoteBuild },
 		);
 		const restore = restorePart(script);

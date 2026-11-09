@@ -29,6 +29,7 @@ import {
 } from "@dokploy/server/utils/process/execAsync";
 import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
 import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
+import { trackDeploymentResult } from "@dokploy/server/utils/tracking/posthog";
 import { resolveVolumeBackupHost } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
@@ -1163,6 +1164,12 @@ export const updateDeploymentStatus = async (
 		})
 		.where(eq(deployments.deploymentId, deploymentId))
 		.returning();
+
+	if (deploymentStatus === "done" || deploymentStatus === "error") {
+		trackDeploymentResult(deploymentId, deploymentStatus).catch((error) =>
+			console.error("Failed to track deployment result", error),
+		);
+	}
 
 	return application;
 };

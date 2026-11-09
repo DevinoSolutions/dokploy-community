@@ -9,16 +9,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   format:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup biomeJs
-        uses: biomejs/setup-biome@v2  
+        uses: biomejs/setup-biome@v2
 
       - name: Run Biome formatter
         run:  biome format --write

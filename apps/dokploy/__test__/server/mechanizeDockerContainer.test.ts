@@ -12,24 +12,32 @@ type MockCreateServiceOptions = {
 	[key: string]: unknown;
 };
 
-const { inspectMock, getServiceMock, createServiceMock, getRemoteDockerMock } =
-	vi.hoisted(() => {
-		const inspect = vi.fn<() => Promise<never>>();
-		const getService = vi.fn(() => ({ inspect }));
-		const createService = vi.fn<
-			(auth: unknown, opts: MockCreateServiceOptions) => Promise<void>
-		>(async () => undefined);
-		const getRemoteDocker = vi.fn(async () => ({
-			getService,
-			createService,
-		}));
-		return {
-			inspectMock: inspect,
-			getServiceMock: getService,
-			createServiceMock: createService,
-			getRemoteDockerMock: getRemoteDocker,
-		};
-	});
+const {
+	inspectMock,
+	getServiceMock,
+	createServiceMock,
+	listTasksMock,
+	getRemoteDockerMock,
+} = vi.hoisted(() => {
+	const inspect = vi.fn<() => Promise<never>>();
+	const getService = vi.fn(() => ({ inspect }));
+	const createService = vi.fn<
+		(auth: unknown, opts: MockCreateServiceOptions) => Promise<void>
+	>(async () => undefined);
+	const listTasks = vi.fn(async (): Promise<unknown[]> => []);
+	const getRemoteDocker = vi.fn(async () => ({
+		getService,
+		createService,
+		listTasks,
+	}));
+	return {
+		inspectMock: inspect,
+		getServiceMock: getService,
+		createServiceMock: createService,
+		listTasksMock: listTasks,
+		getRemoteDockerMock: getRemoteDocker,
+	};
+});
 
 const { findRegistryMock, ghcrAuthMock } = vi.hoisted(() => ({
 	findRegistryMock: vi.fn(),
@@ -47,12 +55,21 @@ vi.mock(
 );
 
 vi.mock("@dokploy/server/services/registry", async (importOriginal) => ({
-	...(await importOriginal<typeof import("@dokploy/server/services/registry")>()),
+	...(await importOriginal<
+		typeof import("@dokploy/server/services/registry")
+	>()),
 	findRegistryByIdWithCredentials: findRegistryMock,
 }));
 
 vi.mock("@dokploy/server/utils/servers/remote-docker", () => ({
 	getRemoteDocker: getRemoteDockerMock,
+}));
+
+vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("@dokploy/server/utils/process/execAsync")
+	>()),
+	sleep: vi.fn(async () => undefined),
 }));
 
 const createApplication = (
@@ -90,10 +107,33 @@ describe("mechanizeDockerContainer", () => {
 		getServiceMock.mockClear();
 		createServiceMock.mockClear();
 		getRemoteDockerMock.mockClear();
+		listTasksMock.mockReset();
+		// Swarm reports the old and the new task as running.
+		listTasksMock.mockResolvedValue([
+			{ Spec: { ForceUpdate: 0 }, Status: { State: "running" } },
+			{ Spec: { ForceUpdate: 3 }, Status: { State: "running" } },
+		]);
 		getRemoteDockerMock.mockResolvedValue({
 			getService: getServiceMock,
 			createService: createServiceMock,
+			listTasks: listTasksMock,
 		});
+	});
+
+	it("fails when Swarm can't schedule the new task", async () => {
+		listTasksMock.mockResolvedValue([
+			{ Status: { State: "running" } },
+			{
+				Status: {
+					State: "pending",
+					Err: "no suitable node (insufficient resources on 1 node)",
+				},
+			},
+		]);
+
+		await expect(mechanizeDockerContainer(createApplication())).rejects.toThrow(
+			/insufficient resources/,
+		);
 	});
 
 	it("passes stopGracePeriodSwarm as a number and keeps zero values", async () => {

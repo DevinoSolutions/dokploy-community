@@ -2,6 +2,8 @@ import fs from "node:fs";
 
 /** Size of each backwards read. */
 const CHUNK_SIZE = 64 * 1024;
+// How far before `notBefore` an entry can be logged out of order.
+const OUT_OF_ORDER_TOLERANCE_MS = 60_000;
 /** Entries returned when the caller does not specify a limit. */
 export const DEFAULT_ENTRY_LIMIT = 500;
 /**
@@ -93,8 +95,14 @@ export async function* iterateLogEntriesBackwards(
 				if (Number.isNaN(loggedAt)) {
 					return null;
 				}
-				if (loggedAt < notBefore.getTime()) {
+				// Entries can be written slightly out of order, so the walk goes on for
+				// a minute past the start before it stops, and skips what is too old.
+				const startSecond = Math.floor(notBefore.getTime() / 1000) * 1000;
+				if (loggedAt < startSecond - OUT_OF_ORDER_TOLERANCE_MS) {
 					reachedCutoff = true;
+					return null;
+				}
+				if (loggedAt < startSecond) {
 					return null;
 				}
 			}

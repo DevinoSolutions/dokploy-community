@@ -2,6 +2,7 @@ import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
 import { resolveServiceNetworks } from "../../services/network";
 import { assertVolumeMountsBound } from "../../services/volume-binding";
+import { buildDokployLabels } from "../docker/dokploy-labels";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -101,7 +102,18 @@ export const buildMysql = async (rawMysql: MysqlNested) => {
 						Args: args,
 					}),
 				...(Ulimits && { Ulimits }),
-				Labels,
+				Labels: {
+					...Labels,
+					...buildDokployLabels({
+						organizationId: mysql.environment.project.organizationId,
+						projectId: mysql.environment.projectId,
+						projectName: mysql.environment.project.name,
+						environmentId: mysql.environmentId,
+						environmentName: mysql.environment.name,
+						applicationId: mysql.mysqlId,
+						applicationName: mysql.name,
+					}),
+				},
 			},
 			Networks: resolvedNetworks,
 			RestartPolicy,

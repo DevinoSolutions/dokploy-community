@@ -741,7 +741,7 @@ describe("the default command of Dokploy", () => {
 		createEnvFile: true,
 		command: "",
 		buildServerId: null,
-		pullImagesOnDeploy: false,
+		pullImages: false,
 	};
 	const asCustom = (compose: typeof base, overrides = {}) => {
 		const command = createCommand(compose as never);

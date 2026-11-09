@@ -100,7 +100,6 @@ import {
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
 import {
 	recordRegistryAccessFailure,
 	recordVaultFailureReason,
@@ -108,6 +107,7 @@ import {
 } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
 import { asDeployable } from "./gha-connect/provider";
+import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
 import {
 	loginGhcrForCompose,
 	removeGhcrConfigDir,
@@ -854,6 +854,11 @@ export const updateCompose = async (
 		.update(compose)
 		.set({
 			...rest,
+			// Keep the deprecated pullImagesOnDeploy in step so a rollback to
+			// v0.30.8-community.51 sees toggles changed after the upgrade.
+			...(rest.pullImages === undefined
+				? {}
+				: { pullImagesOnDeploy: rest.pullImages }),
 		})
 		.where(eq(compose.composeId, composeId))
 		.returning();

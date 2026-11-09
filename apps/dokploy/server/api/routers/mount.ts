@@ -12,6 +12,7 @@ import {
 	findPostgresById,
 	findRedisById,
 	getServiceContainer,
+	readFileMountContent,
 	updateMount,
 } from "@dokploy/server";
 import type { ServiceType } from "@dokploy/server/db/schema/mount";
@@ -156,6 +157,26 @@ export const mountRouter = createTRPCRouter({
 			}
 			return mount;
 		}),
+	readFileContent: protectedProcedure
+		.input(apiFindOneMount)
+		.query(async ({ input, ctx }) => {
+			const mount = await findMountById(input.mountId);
+			const serviceId =
+				mount.applicationId ||
+				mount.postgresId ||
+				mount.mariadbId ||
+				mount.mongoId ||
+				mount.mysqlId ||
+				mount.redisId ||
+				mount.libsqlId ||
+				mount.composeId;
+			if (serviceId) {
+				await checkServicePermissionAndAccess(ctx, serviceId, {
+					volume: ["read"],
+				});
+			}
+			return await readFileMountContent(input.mountId);
+		}),
 	update: protectedProcedure
 		.input(apiUpdateMount)
 		.mutation(async ({ input, ctx }) => {
@@ -201,13 +222,24 @@ export const mountRouter = createTRPCRouter({
 						mount.type === "volume" && volumeName === mount.volumeName,
 				});
 			}
+			const { expectedContent, ...mountData } = input;
+			if (mount.type === "file" && expectedContent !== undefined) {
+				const currentContent = await readFileMountContent(input.mountId);
+				if (currentContent !== expectedContent) {
+					throw new TRPCError({
+						code: "CONFLICT",
+						message:
+							"The file changed on disk after you opened it. Reopen the editor to load the latest version.",
+					});
+				}
+			}
 			await audit(ctx, {
 				action: "update",
 				resourceType: "mount",
 				resourceId: input.mountId,
 				resourceName: input.mountPath,
 			});
-			return await updateMount(input.mountId, input);
+			return await updateMount(input.mountId, mountData);
 		}),
 	allNamedByApplicationId: protectedProcedure
 		.input(z.object({ applicationId: z.string().min(1) }))

@@ -579,11 +579,11 @@ const getRollingDeployPlan = async ({
 		// A build server pulled the images before this script runs.
 		buildServices: remoteBuild ? [] : plan.rolled.filter(hasBuild),
 		pullServices:
-			remoteBuild || !compose.pullImagesOnDeploy
+			remoteBuild || !compose.pullImages
 				? []
 				: plan.rolled.filter((service) => !hasBuild(service)),
 		remoteBuild,
-		pullAlways: Boolean(compose.pullImagesOnDeploy),
+		pullAlways: Boolean(compose.pullImages),
 		healthTimeoutSeconds: plan.healthTimeoutSeconds,
 		drainSeconds: settings.drainSeconds,
 		dockerConfigDir,
@@ -1023,7 +1023,7 @@ export const createCommand = (
 		// When enabled, force-pull the latest images before (re)deploying so a
 		// redeploy picks up updated tags instead of reusing the local cache.
 		// (`stack deploy` already resolves+pulls, so this only applies here.)
-		const pullFlag = compose.pullImagesOnDeploy ? " --pull always" : "";
+		const pullFlag = compose.pullImages ? " --pull always" : "";
 		// With a build server the images already exist in the registry, so the
 		// serving host must never build: `--no-build` turns a missing image into a
 		// pull (or an error) instead of a local build.

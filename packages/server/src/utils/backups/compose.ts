@@ -12,7 +12,7 @@ import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
 	buildRcloneRcatCommand,
 	getBackupCommand,
-	getBackupTimestamp,
+	getBackupFileName,
 	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
@@ -29,7 +29,10 @@ export const runComposeBackup = async (
 		backup.destinationId,
 		project.organizationId,
 	);
-	const backupFileName = `${getBackupTimestamp()}.${databaseType === "mongo" ? "bson" : "sql"}.gz`;
+	const backupFileName = getBackupFileName(
+		backup.customName,
+		databaseType === "mongo" ? "bson.gz" : "sql.gz",
+	);
 	const bucketDestination = `${normalizeS3Path(prefix)}${backupFileName}`;
 	const deployment = await createDeploymentBackup({
 		backupId: backup.backupId,

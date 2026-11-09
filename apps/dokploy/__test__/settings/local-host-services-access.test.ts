@@ -40,6 +40,15 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 	};
 });
 
+// The ai.suggest procedure asks for the "ai" permission; the owner holds it.
+vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("@dokploy/server/services/permission")
+		>();
+	return { ...actual, checkPermission: vi.fn(async () => {}) };
+});
+
 vi.mock("@dokploy/server/services/ai", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("@dokploy/server/services/ai")>();
