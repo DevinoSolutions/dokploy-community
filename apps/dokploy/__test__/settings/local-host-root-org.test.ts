@@ -17,6 +17,11 @@ const mocks = vi.hoisted(() => ({
 	cleanupImages: vi.fn(),
 	cleanupSystem: vi.fn(),
 	cleanupVolumes: vi.fn(),
+	// The remote Traefik file path check: the real paths of the base and the target.
+	execAsyncRemote: vi.fn(async () => ({
+		stdout: "/etc/dokploy/traefik\n/etc/dokploy/traefik/traefik.yml\n",
+		stderr: "",
+	})),
 	getDockerResourceType: vi.fn(),
 	parseRawConfig: vi.fn(),
 	readConfig: vi.fn(),

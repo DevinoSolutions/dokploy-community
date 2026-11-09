@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import {
 	assertRunningTraefikImageKept,
@@ -15,6 +16,7 @@ import {
 	cleanupSystem,
 	cleanupVolumes,
 	DEFAULT_UPDATE_DATA,
+	execAsyncRemote,
 	findApplicationById,
 	findComposeById,
 	findServerById,
@@ -100,6 +102,7 @@ import {
 import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
 import { TRPCError } from "@trpc/server";
 import { eq, sql } from "drizzle-orm";
+import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
@@ -152,6 +155,110 @@ import {
 	withPermission,
 } from "../trpc";
 
+const invalidTraefikPath = (reason?: string) =>
+	new TRPCError({
+		code: "BAD_REQUEST",
+		message: reason
+			? `Invalid path: ${reason}`
+			: "Invalid path: file must be inside the Traefik configuration directory",
+	});
+
+const isInsideDirectory = (
+	pathApi: typeof path.posix,
+	directory: string,
+	target: string,
+) => {
+	const prefix = directory.endsWith(pathApi.sep)
+		? directory
+		: `${directory}${pathApi.sep}`;
+	return target.startsWith(prefix);
+};
+
+/**
+ * `fs.realpath` for a path that may not exist yet (a write that creates the
+ * file): the nearest existing parent is resolved and the missing tail is
+ * joined back. A dangling symlink is rejected, because writing to it would
+ * create its target wherever it points.
+ */
+const realpathAllowingMissing = async (target: string): Promise<string> => {
+	try {
+		return await fs.promises.realpath(target);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			throw invalidTraefikPath("the file path could not be resolved");
+		}
+	}
+	if (await fs.promises.lstat(target).catch(() => null)) {
+		throw invalidTraefikPath();
+	}
+	const parent = path.dirname(target);
+	if (parent === target) {
+		throw invalidTraefikPath("the file path could not be resolved");
+	}
+	return path.join(
+		await realpathAllowingMissing(parent),
+		path.basename(target),
+	);
+};
+
+/**
+ * The same on a remote host, in one SSH round trip. GNU `realpath -m` resolves
+ * the symlinks in every existing component without requiring the file to
+ * exist. BusyBox (Alpine) and BSD realpath have no `-m` (and no `--`), so a
+ * probe picks the plain `realpath` there, which resolves symlinks and
+ * tolerates a missing LAST component (the "file does not exist yet" write). A
+ * deeper missing tail or a dangling link makes the plain form exit non-zero,
+ * which rejects the request. Both paths are absolute, so they can never be
+ * read as options and `--` is not needed. The probe's output is discarded:
+ * BusyBox prints the paths it could resolve even when it fails.
+ * The command prints the base, then the target, one per line. The output is
+ * parsed strictly: exactly two non-empty absolute lines and at most one
+ * trailing newline. A path with a newline in it breaks that framing and is
+ * rejected rather than guessed at. Every failure rejects the request; there is
+ * no fallback that skips the check.
+ */
+const remoteRealpaths = async (
+	serverId: string,
+	base: string,
+	target: string,
+): Promise<[string, string]> => {
+	if (!base.startsWith("/") || !target.startsWith("/")) {
+		throw invalidTraefikPath();
+	}
+	const args = quote([base, target]);
+	let stdout: string;
+	try {
+		({ stdout } = await execAsyncRemote(
+			serverId,
+			`if realpath -m / >/dev/null 2>&1; then realpath -m ${args}; else realpath ${args}; fi`,
+		));
+	} catch (error) {
+		// The command ran and failed: neither realpath form is usable on this host.
+		// Connection problems keep their own error.
+		const { name, exitCode } = error as { name?: string; exitCode?: unknown };
+		if (name === "ExecError" && typeof exitCode === "number") {
+			throw new TRPCError({
+				code: "PRECONDITION_FAILED",
+				message:
+					"Could not resolve the Traefik file path: this server has no usable realpath command",
+			});
+		}
+		throw error;
+	}
+	const lines = (stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout).split(
+		"\n",
+	);
+	const [realBase, realTarget] = lines;
+	if (
+		lines.length !== 2 ||
+		!realBase?.startsWith("/") ||
+		!realTarget?.startsWith("/")
+	) {
+		throw invalidTraefikPath("the file path could not be resolved");
+	}
+	return [realBase, realTarget];
+};
+
 /**
  * Confines a caller-supplied Traefik file path to the Traefik configuration
  * directory (MAIN_TRAEFIK_PATH). The read/write Traefik file endpoints only
@@ -160,25 +267,37 @@ import {
  * permission read or overwrite arbitrary files on the host (for example
  * `/etc/dokploy/.env` or `~/.ssh/authorized_keys`) via an absolute path or
  * `../` traversal. Reject anything that escapes the directory.
+ *
+ * The lexical check alone would still follow a symlink that already sits
+ * inside the directory and points out of it, so the target is also resolved to
+ * its real path and compared with the real path of the directory (the
+ * directory itself may be a symlink). The real path is what gets returned, so
+ * the file operation sees the path that was checked. The directory itself is
+ * not a file and is rejected.
  */
-const resolveTraefikFilePath = (
+const resolveTraefikFilePath = async (
 	filePath: string,
 	serverId?: string | null,
-): string => {
+): Promise<string> => {
 	const { MAIN_TRAEFIK_PATH } = paths(!!serverId);
 	// Remote servers are Linux hosts, so their paths use posix semantics no
 	// matter which platform this process runs on.
 	const pathApi = serverId ? path.posix : path;
 	const base = pathApi.resolve(MAIN_TRAEFIK_PATH);
 	const resolved = pathApi.resolve(base, filePath);
-	if (resolved !== base && !resolved.startsWith(`${base}${pathApi.sep}`)) {
-		throw new TRPCError({
-			code: "BAD_REQUEST",
-			message:
-				"Invalid path: file must be inside the Traefik configuration directory",
-		});
+	if (!isInsideDirectory(pathApi, base, resolved)) {
+		throw invalidTraefikPath();
 	}
-	return resolved;
+	const [realBase, realTarget] = serverId
+		? await remoteRealpaths(serverId, base, resolved)
+		: [
+				await realpathAllowingMissing(base),
+				await realpathAllowingMissing(resolved),
+			];
+	if (!isInsideDirectory(pathApi, realBase, realTarget)) {
+		throw invalidTraefikPath();
+	}
+	return realTarget;
 };
 
 // The page that saves env, ports or the dashboard toggle names its run, so it
@@ -1325,7 +1444,10 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
-			const safePath = resolveTraefikFilePath(input.path, input?.serverId);
+			const safePath = await resolveTraefikFilePath(
+				input.path,
+				input?.serverId,
+			);
 			await writeTraefikConfigInPath(
 				safePath,
 				input.traefikConfig,
@@ -1352,7 +1474,7 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 
-			const safePath = resolveTraefikFilePath(input.path, input.serverId);
+			const safePath = await resolveTraefikFilePath(input.path, input.serverId);
 			return readConfigInPath(safePath, input.serverId);
 		}),
 	getIp: protectedProcedure.query(async ({ ctx }) => {
