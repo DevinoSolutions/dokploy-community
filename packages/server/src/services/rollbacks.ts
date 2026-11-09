@@ -1,4 +1,4 @@
-import type { CreateServiceOptions } from "dockerode";
+import type { AuthConfig, CreateServiceOptions } from "dockerode";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import { db } from "../db";
@@ -9,6 +9,7 @@ import {
 } from "../db/schema";
 import { getECRAuthToken } from "../utils/aws/ecr";
 import { getRegistryTag } from "../utils/cluster/upload";
+import { anonymousRegistryAuth } from "../utils/docker/registry-auth-clear";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -241,10 +242,10 @@ const rollbackApplication = async (
 
 	const rollbackRegistry = resolvedContext.rollbackRegistry ?? undefined;
 
-	// Ensure Docker daemon is authenticated with the rollback registry
-	// before updating the swarm service. The authconfig in CreateServiceOptions
-	// alone is not sufficient — Docker Swarm also relies on the daemon's
-	// cached credentials (~/.docker/config.json) to distribute auth to nodes.
+	// Log the daemon in to the rollback registry before updating the swarm
+	// service, so this host can pull the image. The credentials swarm hands to
+	// the tasks come from the authconfig sent with the update (stored on the
+	// service as its pull options), not from the host docker config.
 	let ecrAuthPassword: string | undefined;
 	if (resolvedContext.rollbackRegistry) {
 		ecrAuthPassword = await dockerLoginForRegistry(
@@ -311,16 +312,22 @@ const rollbackApplication = async (
 
 	const isEcrRollback =
 		resolvedContext.rollbackRegistry?.registryType === "awsEcr";
+	// Without a rollback registry send an anonymous auth for the image's own
+	// host, so swarm does not keep the credentials stored on the service from an
+	// earlier registry (T-15783).
+	const authconfig: AuthConfig = resolvedContext.rollbackRegistry
+		? {
+				password: isEcrRollback
+					? ecrAuthPassword || ""
+					: resolvedContext.rollbackRegistry.password || "",
+				username: isEcrRollback
+					? "AWS"
+					: resolvedContext.rollbackRegistry.username || "",
+				serveraddress: resolvedContext.rollbackRegistry.registryUrl || "",
+			}
+		: anonymousRegistryAuth(rollbackImage);
 	const settings: CreateServiceOptions = {
-		authconfig: {
-			password: isEcrRollback
-				? ecrAuthPassword || ""
-				: resolvedContext.rollbackRegistry?.password || "",
-			username: isEcrRollback
-				? "AWS"
-				: resolvedContext.rollbackRegistry?.username || "",
-			serveraddress: resolvedContext.rollbackRegistry?.registryUrl || "",
-		},
+		authconfig,
 		Name: appName,
 		TaskTemplate: {
 			ContainerSpec: {
@@ -371,6 +378,8 @@ const rollbackApplication = async (
 		});
 	} catch (error) {
 		console.error(error);
-		await docker.createService(settings);
+		// Pass the auth explicitly: dockerode's one-argument createService(opts)
+		// takes `opts` itself as the auth object, not `opts.authconfig`.
+		await docker.createService(authconfig, settings);
 	}
 };

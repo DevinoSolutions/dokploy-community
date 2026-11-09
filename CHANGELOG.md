@@ -2,6 +2,10 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+**Swarm no longer replays old registry credentials** (T-15783). A service update that has no registry credentials now sends an anonymous registry auth for the image host, so a public ghcr.io image is no longer refused with `denied: denied` by credentials stored on the service for another registry.
+
 ### New in v0.30.8-community.50
 
 A GitHub Actions pill that opens during the first build, service headers that fit a phone, and a swarm deploy wait that no longer misses slow image pulls.
