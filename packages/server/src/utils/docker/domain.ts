@@ -2,7 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
-import { network, patch } from "@dokploy/server/db/schema";
+import {
+	network,
+	patch,
+	server,
+	webServerSettings,
+} from "@dokploy/server/db/schema";
 import type { Compose } from "@dokploy/server/services/compose";
 import type { Domain } from "@dokploy/server/services/domain";
 import {
@@ -10,7 +15,7 @@ import {
 	type DeployReferenceEntity,
 } from "@dokploy/server/services/service-reference-scope";
 import { TRPCError } from "@trpc/server";
-import { eq, inArray } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
 import { applyRollingDrainHealthchecks } from "../builders/compose-rolling";
@@ -435,6 +440,45 @@ type ComposeWithMetadata = Compose & {
 	};
 };
 
+/**
+ * Whether a Vector agent that ships this compose's logs and metrics runs on
+ * the host it deploys to. The agent reads the `dokploy.*` labels to attribute
+ * what it collects; with no agent on the host nothing reads them.
+ *
+ * - Remote server: the agent is configured when the server has providers
+ *   selected (the agent there ships every container on the server).
+ * - Dokploy host: the agent is owned by one organization and its
+ *   `*_local_only` filter keeps only containers labelled with that
+ *   organization, so only that organization's composes need the labels.
+ *
+ * One indexed lookup per deploy; a partially loaded compose (no project)
+ * resolves to false without touching the database.
+ */
+export const composeUsesTelemetryLabels = async (
+	compose: ComposeWithMetadata,
+): Promise<boolean> => {
+	const organizationId = compose.environment?.project?.organizationId;
+	if (!organizationId) return false;
+
+	if (compose.serverId) {
+		const row = await db.query.server.findFirst({
+			where: eq(server.serverId, compose.serverId),
+			columns: { telemetryProviderIds: true },
+		});
+		return (row?.telemetryProviderIds.length ?? 0) > 0;
+	}
+
+	// The singleton row, read as getWebServerSettings does but without creating it.
+	const settings = await db.query.webServerSettings.findFirst({
+		columns: { telemetryProviderIds: true, vectorAgentOrganizationId: true },
+		orderBy: [asc(webServerSettings.createdAt)],
+	});
+	return (
+		settings?.vectorAgentOrganizationId === organizationId &&
+		settings.telemetryProviderIds.length > 0
+	);
+};
+
 const applyDokployLabelsToCompose = (
 	result: ComposeSpecification,
 	compose: ComposeWithMetadata,
@@ -644,7 +688,16 @@ export const addDomainToCompose = async (
 		}
 	}
 
-	applyDokployLabelsToCompose(result, compose);
+	// Decision record (v0.31.0-community.2): the metadata labels are written
+	// only when the compose's host runs a telemetry agent that reads them.
+	// Any label change alters docker compose's config hash, so adding them
+	// unconditionally (v0.31.0-community.1) recreated every container of every
+	// compose, databases included, on its first deploy after the upgrade.
+	// Enabling logs and metrics for an organization therefore relabels its
+	// composes once: each one recreates its containers on its next deploy.
+	if (await composeUsesTelemetryLabels(compose)) {
+		applyDokployLabelsToCompose(result, compose);
+	}
 
 	const injectedNetworkNames = await applyServiceNetworks(result, compose);
 
