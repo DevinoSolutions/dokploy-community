@@ -29,6 +29,7 @@ describe("fork schema catch-up runner", () => {
 		expect(catchups.map((c) => c.tag)).toEqual([
 			"0195_fork_schema_catchup",
 			"0202_fork_schema_catchup_v2",
+			"0235_fork_schema_catchup_v3",
 		]);
 		for (let i = 1; i < catchups.length; i++) {
 			expect(catchups[i]?.when).toBeGreaterThan(catchups[i - 1]?.when ?? 0);
@@ -61,20 +62,29 @@ describe("fork schema catch-up runner", () => {
 	});
 
 	it("selects only catch-ups whose hash drizzle never recorded", () => {
-		const [first, second] = catchups as [CatchupMigration, CatchupMigration];
-		expect(selectPendingCatchups(catchups, [first.hash, second.hash])).toEqual(
-			[],
-		);
-		// The v0.30.6 switcher: drizzle applied 0202 (newest `when`) but skipped
+		const [first, second, third] = catchups as [
+			CatchupMigration,
+			CatchupMigration,
+			CatchupMigration,
+		];
+		expect(
+			selectPendingCatchups(catchups, [first.hash, second.hash, third.hash]),
+		).toEqual([]);
+		// The v0.30.6 switcher: drizzle applied 0202 (newest `when` then) but skipped
 		// 0195, whose `when` sits below upstream's high-water mark.
 		expect(
 			selectPendingCatchups(catchups, [second.hash, "unrelated"]).map(
 				(c) => c.tag,
 			),
-		).toEqual([first.tag]);
+		).toEqual([first.tag, third.tag]);
+		// The v0.31.0 switcher: drizzle applied 0235 (newest `when`) but skipped the two older ones.
+		expect(
+			selectPendingCatchups(catchups, [third.hash]).map((c) => c.tag),
+		).toEqual([first.tag, second.tag]);
 		expect(selectPendingCatchups(catchups, []).map((c) => c.tag)).toEqual([
 			first.tag,
 			second.tag,
+			third.tag,
 		]);
 	});
 
@@ -92,5 +102,51 @@ describe("fork schema catch-up runner", () => {
 		]) {
 			expect(sql).toContain(marker);
 		}
+	});
+
+	it("0235 re-issues every fork-original migration older than upstream v0.31.0's newest", () => {
+		const sql = fs.readFileSync(
+			path.join(drizzleDir, "0235_fork_schema_catchup_v3.sql"),
+			"utf8",
+		);
+		for (const marker of [
+			"ADD VALUE IF NOT EXISTS 'infomaniak'", // 0201
+			'CREATE TABLE IF NOT EXISTS "uptimely_integration"', // 0203
+			'CREATE TABLE IF NOT EXISTS "sendly"', // 0204
+			'CREATE TABLE IF NOT EXISTS "dodomain_integration"', // 0205
+			'CREATE TABLE IF NOT EXISTS "snapvisor_integration"', // 0206
+			'CREATE TABLE IF NOT EXISTS "deployment_queue_job"', // 0207
+			'"compose" ADD COLUMN IF NOT EXISTS "buildServerId"', // 0208
+			'"application" ADD COLUMN IF NOT EXISTS "previewDockerImage"', // 0209
+			'CREATE TABLE IF NOT EXISTS "oauth_client"', // 0210
+			'CREATE TABLE IF NOT EXISTS "uptimely_channel"', // 0212
+			'"compose" ADD COLUMN IF NOT EXISTS "snapvisorProjectName"', // 0213
+			'"dodomain_connect_session" ADD COLUMN IF NOT EXISTS "token"', // 0214
+			'CREATE TABLE IF NOT EXISTS "snapvisor_build_check"', // 0215
+			'"compose" ADD COLUMN IF NOT EXISTS "deployGuardrails"', // 0216
+			'"compose" ADD COLUMN IF NOT EXISTS "rollingReplace"', // 0217
+			'CREATE TABLE IF NOT EXISTS "deployment_cancel_audit"', // 0218
+			'"oauthClientId"', // 0219
+			'"server" ADD COLUMN IF NOT EXISTS "dockerCleanupCron"', // 0220
+			'"deploymentWatchdogExclusions"', // 0221
+		]) {
+			expect(sql).toContain(marker);
+		}
+	});
+
+	it("0235 never rewrites data or undoes a later default", () => {
+		const sql = fs.readFileSync(
+			path.join(drizzleDir, "0235_fork_schema_catchup_v3.sql"),
+			"utf8",
+		);
+		const code = sql
+			.split("\n")
+			.filter((line) => !line.trimStart().startsWith("--"))
+			.join("\n");
+		// 0211 copies 1.6 grants and is deliberately not repeated; 0234 owns the whitelabel default.
+		// A statement that starts with a data verb is a rewrite; "ON UPDATE no action" in a foreign key is not.
+		expect(code).not.toMatch(/^\s*(INSERT\s+INTO|UPDATE\s|DELETE\s+FROM)/im);
+		expect(code).not.toMatch(/\b(DROP|RENAME)\b/i);
+		expect(code).not.toContain("whitelabelingConfig");
 	});
 });

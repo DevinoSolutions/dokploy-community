@@ -581,7 +581,7 @@ Two layers cover this:
 
 1. **Catch-up migrations.** `*_fork_schema_catchup*` migrations re-issue fork
    schema idempotently (`0195_fork_schema_catchup`,
-   `0202_fork_schema_catchup_v2`). **Every sync must add a new one** that
+   `0202_fork_schema_catchup_v2`, `0235_fork_schema_catchup_v3`). **Every sync must add a new one** that
    re-issues each fork-original migration whose `when` is older than upstream's
    newest migration in the tag being synced (compare both journals in the
    pre-scout). Guard every statement per the idempotency test; data backfills

@@ -1639,6 +1639,13 @@
       "when": 1793910000000,
       "tag": "0234_upstream_v0_31_0",
       "breakpoints": true
+    },
+    {
+      "idx": 235,
+      "version": "7",
+      "when": 1793920000000,
+      "tag": "0235_fork_schema_catchup_v3",
+      "breakpoints": true
     }
   ]
 }
