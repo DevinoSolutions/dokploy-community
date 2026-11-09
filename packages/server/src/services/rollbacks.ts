@@ -242,10 +242,10 @@ const rollbackApplication = async (
 
 	const rollbackRegistry = resolvedContext.rollbackRegistry ?? undefined;
 
-	// Ensure Docker daemon is authenticated with the rollback registry
-	// before updating the swarm service. The authconfig in CreateServiceOptions
-	// alone is not sufficient — Docker Swarm also relies on the daemon's
-	// cached credentials (~/.docker/config.json) to distribute auth to nodes.
+	// Log the daemon in to the rollback registry before updating the swarm
+	// service, so this host can pull the image. The credentials swarm hands to
+	// the tasks come from the authconfig sent with the update (stored on the
+	// service as its pull options), not from the host docker config.
 	let ecrAuthPassword: string | undefined;
 	if (resolvedContext.rollbackRegistry) {
 		ecrAuthPassword = await dockerLoginForRegistry(

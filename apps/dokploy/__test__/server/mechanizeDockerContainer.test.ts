@@ -31,6 +31,15 @@ const { inspectMock, getServiceMock, createServiceMock, getRemoteDockerMock } =
 		};
 	});
 
+const { findRegistryMock } = vi.hoisted(() => ({
+	findRegistryMock: vi.fn(),
+}));
+
+vi.mock("@dokploy/server/services/registry", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@dokploy/server/services/registry")>()),
+	findRegistryByIdWithCredentials: findRegistryMock,
+}));
+
 vi.mock("@dokploy/server/utils/servers/remote-docker", () => ({
 	getRemoteDocker: getRemoteDockerMock,
 }));
@@ -235,21 +244,6 @@ describe("mechanizeDockerContainer", () => {
 			expect(sentAuth()).not.toHaveProperty("password");
 		});
 
-		it("encodes to a non-empty X-Registry-Auth header holding only the server address", async () => {
-			await mechanizeDockerContainer(
-				createApplication({ dockerImage: "ghcr.io/devinosolutions/app:1" }),
-			);
-
-			// docker-modem sends base64(JSON(authconfig)) when authconfig is truthy.
-			const auth = sentAuth();
-			expect(auth).toBeTruthy();
-			const header = Buffer.from(JSON.stringify(auth)).toString("base64");
-			expect(header).not.toBe("");
-			expect(JSON.parse(Buffer.from(header, "base64").toString())).toEqual({
-				serveraddress: "ghcr.io",
-			});
-		});
-
 		it("defaults the host to docker.io for an image without a registry host", async () => {
 			await mechanizeDockerContainer(
 				createApplication({ dockerImage: "nginx:1.27" }),
@@ -272,6 +266,34 @@ describe("mechanizeDockerContainer", () => {
 				username: "deploy",
 				password: "s3cret",
 				serveraddress: "registry.example.com:8443",
+			});
+		});
+
+		it("uses the build registry credentials for a docker image with no registry", async () => {
+			// A pinned digest deploy passes { registry: null, buildRegistry }.
+			findRegistryMock.mockResolvedValue({
+				username: "pusher",
+				password: "reg-secret",
+				registryUrl: "localhost:5000",
+			});
+
+			await mechanizeDockerContainer(
+				createApplication({
+					dockerImage: "localhost:5000/registry.devino.ca/app@sha256:abc",
+					registry: null,
+					buildRegistry: {
+						registryId: "reg-1",
+						registryType: "cloud",
+						registryUrl: "localhost:5000",
+					} as never,
+				}),
+			);
+
+			expect(findRegistryMock).toHaveBeenCalledWith("reg-1");
+			expect(sentAuth()).toEqual({
+				username: "pusher",
+				password: "reg-secret",
+				serveraddress: "localhost:5000",
 			});
 		});
 

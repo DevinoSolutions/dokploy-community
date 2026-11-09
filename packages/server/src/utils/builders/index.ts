@@ -317,6 +317,38 @@ const getImageName = async (application: ApplicationNested) => {
 	return imageName;
 };
 
+type RegistryForAuth = NonNullable<
+	ApplicationNested["registry"] | ApplicationNested["buildRegistry"]
+>;
+
+const authFromRegistry = async (reg: RegistryForAuth) => {
+	if (reg.registryType === "awsEcr") {
+		const token = await getECRAuthToken({
+			awsAccessKeyId: reg.awsAccessKeyId || "",
+			awsSecretAccessKey: reg.awsSecretAccessKey || "",
+			awsRegion: reg.awsRegion || "",
+		});
+		return {
+			password: token.password,
+			username: "AWS",
+			serveraddress: reg.registryUrl || "",
+		};
+	}
+	const r = await findRegistryByIdWithCredentials(reg.registryId);
+	return {
+		password: r.password,
+		username: r.username,
+		serveraddress: r.registryUrl,
+	};
+};
+
+/**
+ * Credentials the swarm service pulls its image with. Order for a Docker image
+ * source: registry, then username/password, then the build registry (a pinned
+ * digest deploy passes `registry: null, buildRegistry: <pull registry>`), then
+ * the GitHub login for ghcr.io, else undefined. `mechanizeDockerContainer`
+ * turns undefined into an anonymous auth (T-15783).
+ */
 export const getAuthConfig = async (application: ApplicationNested) => {
 	const {
 		registry,
@@ -328,67 +360,15 @@ export const getAuthConfig = async (application: ApplicationNested) => {
 	} = application;
 
 	if (sourceType === "docker") {
-		if (registry) {
-			if (registry.registryType === "awsEcr") {
-				const token = await getECRAuthToken({
-					awsAccessKeyId: registry.awsAccessKeyId || "",
-					awsSecretAccessKey: registry.awsSecretAccessKey || "",
-					awsRegion: registry.awsRegion || "",
-				});
-				return {
-					password: token.password,
-					username: "AWS",
-					serveraddress: registry.registryUrl || "",
-				};
-			}
-			const r = await findRegistryByIdWithCredentials(registry.registryId);
-			return {
-				password: r.password,
-				username: r.username,
-				serveraddress: r.registryUrl,
-			};
-		}
+		if (registry) return await authFromRegistry(registry);
 		if (username && password) {
 			return { password, username, serveraddress: registryUrl || "" };
 		}
+		if (buildRegistry) return await authFromRegistry(buildRegistry);
 	} else if (registry) {
-		if (registry.registryType === "awsEcr") {
-			const token = await getECRAuthToken({
-				awsAccessKeyId: registry.awsAccessKeyId || "",
-				awsSecretAccessKey: registry.awsSecretAccessKey || "",
-				awsRegion: registry.awsRegion || "",
-			});
-			return {
-				password: token.password,
-				username: "AWS",
-				serveraddress: registry.registryUrl || "",
-			};
-		}
-		const r = await findRegistryByIdWithCredentials(registry.registryId);
-		return {
-			password: r.password,
-			username: r.username,
-			serveraddress: r.registryUrl,
-		};
+		return await authFromRegistry(registry);
 	} else if (buildRegistry) {
-		if (buildRegistry.registryType === "awsEcr") {
-			const token = await getECRAuthToken({
-				awsAccessKeyId: buildRegistry.awsAccessKeyId || "",
-				awsSecretAccessKey: buildRegistry.awsSecretAccessKey || "",
-				awsRegion: buildRegistry.awsRegion || "",
-			});
-			return {
-				password: token.password,
-				username: "AWS",
-				serveraddress: buildRegistry.registryUrl || "",
-			};
-		}
-		const r = await findRegistryByIdWithCredentials(buildRegistry.registryId);
-		return {
-			password: r.password,
-			username: r.username,
-			serveraddress: r.registryUrl,
-		};
+		return await authFromRegistry(buildRegistry);
 	}
 
 	// A service that follows GitHub Deployments (T-12166) pulls a private

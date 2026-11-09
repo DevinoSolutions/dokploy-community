@@ -16,6 +16,7 @@ describe("registryHostOfImage", () => {
 		["nginx", "docker.io"],
 		["docker.io/library/nginx", "docker.io"],
 		["library/nginx", "docker.io"],
+		["Foo/bar:tag", "docker.io"],
 		["registry.example.com:8443/team/app", "registry.example.com:8443"],
 		["10.43.144.195:5000/img:1", "10.43.144.195:5000"],
 	])("%s -> %s", (image, host) => {
@@ -28,10 +29,5 @@ describe("anonymousRegistryAuth", () => {
 		const auth = anonymousRegistryAuth("ghcr.io/a/b@sha256:" + "b".repeat(64));
 		expect(auth).toEqual({ serveraddress: "ghcr.io" });
 		expect(Object.keys(auth)).toEqual(["serveraddress"]);
-		// docker-modem sends base64(JSON(authconfig)) for a truthy authconfig.
-		const header = Buffer.from(JSON.stringify(auth)).toString("base64");
-		expect(JSON.parse(Buffer.from(header, "base64").toString())).toEqual({
-			serveraddress: "ghcr.io",
-		});
 	});
 });
