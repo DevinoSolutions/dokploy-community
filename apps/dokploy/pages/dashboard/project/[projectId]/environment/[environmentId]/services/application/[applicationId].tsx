@@ -145,20 +145,22 @@ const Service = (
 											<StatusTooltip status={data?.applicationStatus} />
 										</div>
 									</div>
-									{data?.name}
+									<span className="min-w-0 truncate" title={data?.name}>
+										{data?.name}
+									</span>
 								</CardTitle>
 								{data?.description && (
 									<CardDescription>{data?.description}</CardDescription>
 								)}
 
-								<span className="text-sm text-muted-foreground">
+								<span className="text-sm text-muted-foreground min-w-0 truncate">
 									{data?.appName}
 								</span>
 							</div>
 							<div className="flex flex-col h-fit w-full min-w-0 gap-2 sm:w-fit">
 								<div className="flex flex-row h-fit w-fit max-w-full min-w-0 gap-2 flex-wrap">
 									<Badge
-										className="cursor-pointer"
+										className="min-w-0 max-w-full cursor-pointer overflow-hidden"
 										onClick={() => {
 											const ip = data?.server?.ipAddress || serverIp;
 											if (ip) {
@@ -174,7 +176,9 @@ const Service = (
 													: "destructive"
 										}
 									>
-										{data?.server?.name || "Dokploy Server"}
+										<span className="truncate">
+											{data?.server?.name || "Dokploy Server"}
+										</span>
 									</Badge>
 									<BuildOriginBadge
 										buildOrigin={data?.buildOrigin}
@@ -211,6 +215,13 @@ const Service = (
 								<div className="flex flex-row gap-2 sm:justify-end">
 									{permissions?.service.create && (
 										<UpdateApplication applicationId={applicationId} />
+									)}
+									{permissions?.service.create && (
+										<TransferService
+											id={applicationId}
+											type="application"
+											serverId={data?.serverId}
+										/>
 									)}
 									{permissions?.service.delete && (
 										<DeleteService id={applicationId} type="application" />
@@ -467,11 +478,6 @@ const Service = (
 												<ShowSecurity applicationId={applicationId} />
 												<ShowPorts applicationId={applicationId} />
 												<ShowTraefikConfig applicationId={applicationId} />
-												<TransferService
-													id={applicationId}
-													type="application"
-													currentServerId={data?.serverId}
-												/>
 											</div>
 										</TabsContent>
 									)}

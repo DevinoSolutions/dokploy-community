@@ -389,7 +389,11 @@ describe("Dokploy rollback point", () => {
 const LAST_MIGRATION_OF_FLOOR = 206;
 // Migrations above the floor that were checked and are known to be safe for
 // the floor's release (a catch-up that drops nothing it reads, say).
-const ALLOWED_DESTRUCTIVE_MIGRATIONS: string[] = [];
+// 0234 (upstream v0.31.0 sync) renames compose.pullImagesOnDeploy to pullImages. A release
+// built before it, the floor's included, fails every compose query on the renamed column, so the
+// in-product rollback to the release before the sync is NOT safe. Listed so the sync can land:
+// the release that ships it has to move DOKPLOY_MIN_PINNED_VERSION up to itself and drop this entry.
+const ALLOWED_DESTRUCTIVE_MIGRATIONS: string[] = ["0234_upstream_v0_31_0.sql"];
 const DESTRUCTIVE =
 	/\b(DROP\s+COLUMN|DROP\s+TABLE|RENAME|SET\s+NOT\s+NULL|SET\s+DATA\s+TYPE|DROP\s+DEFAULT)\b/i;
 

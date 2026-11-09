@@ -18,8 +18,8 @@ import { AnalyzeLogs } from "./analyze-logs";
 import { LineCountFilter } from "./line-count-filter";
 import { SinceLogsFilter, type TimeFilter } from "./since-logs-filter";
 import { StatusLogsFilter } from "./status-logs-filter";
-import { TerminalLine } from "./terminal-line";
 import { getLogType, type LogLine, parseLogs } from "./utils";
+import { VirtualLogList } from "./virtual-log-list";
 
 interface Props {
 	containerId: string;
@@ -77,7 +77,6 @@ export const DockerLogsId: React.FC<Props> = ({
 
 	const [rawLogs, setRawLogs] = React.useState("");
 	const [filteredLogs, setFilteredLogs] = React.useState<LogLine[]>([]);
-	const [autoScroll, setAutoScroll] = React.useState(true);
 	const [lines, setLines] = React.useState<number>(100);
 	const [search, setSearch] = React.useState<string>("");
 	const [showTimestamp, setShowTimestamp] = React.useState(true);
@@ -86,24 +85,9 @@ export const DockerLogsId: React.FC<Props> = ({
 	const [isPaused, setIsPaused] = React.useState(false);
 	const [messageBuffer, setMessageBuffer] = React.useState<string[]>([]);
 	const isPausedRef = useRef(false);
-	const scrollRef = useRef<HTMLDivElement>(null);
 	const [isLoading, setIsLoading] = React.useState(false);
 	const [copied, setCopied] = React.useState(false);
 	const [ws, setWs] = React.useState<WebSocket | null>(null);
-
-	const scrollToBottom = () => {
-		if (autoScroll && scrollRef.current) {
-			scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-		}
-	};
-
-	const handleScroll = () => {
-		if (!scrollRef.current) return;
-
-		const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-		const isAtBottom = Math.abs(scrollHeight - scrollTop - clientHeight) < 10;
-		setAutoScroll(isAtBottom);
-	};
 
 	const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
 		setSearch(e.target.value || "");
@@ -320,14 +304,6 @@ export const DockerLogsId: React.FC<Props> = ({
 		setFilteredLogs(filtered);
 	}, [rawLogs, search, lines, since, typeFilter]);
 
-	useEffect(() => {
-		scrollToBottom();
-
-		if (autoScroll && scrollRef.current) {
-			scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-		}
-	}, [filteredLogs, autoScroll]);
-
 	return (
 		<div className="flex flex-col gap-4">
 			<div className="rounded-lg">
@@ -423,21 +399,13 @@ export const DockerLogsId: React.FC<Props> = ({
 						</AlertBlock>
 					)}
 					<div>
-						<div
-							ref={scrollRef}
-							onScroll={handleScroll}
-							className="ph-no-capture h-[50vh] sm:h-[720px] overflow-y-auto space-y-0 border p-4 bg-[#fafafa] dark:bg-[#050506] rounded-t custom-logs-scrollbar"
+						<VirtualLogList
+							logs={filteredLogs}
+							searchTerm={search}
+							noTimestamp={!showTimestamp}
+							className="ph-no-capture h-[50vh] sm:h-[720px] bg-[#fafafa] dark:bg-[#050506] rounded-b-none"
 						>
-							{filteredLogs.length > 0 ? (
-								filteredLogs.map((filteredLog: LogLine, index: number) => (
-									<TerminalLine
-										key={`${filteredLog.rawTimestamp ?? ""}-${index}`}
-										log={filteredLog}
-										searchTerm={search}
-										noTimestamp={!showTimestamp}
-									/>
-								))
-							) : isLoading ? (
+							{isLoading ? (
 								<div className="flex justify-center items-center h-full text-muted-foreground">
 									<Loader2 className="h-6 w-6 animate-spin" />
 								</div>
@@ -451,7 +419,7 @@ export const DockerLogsId: React.FC<Props> = ({
 									make sure the service is deployed and running.
 								</div>
 							)}
-						</div>
+						</VirtualLogList>
 						<form
 							onSubmit={(e: React.FormEvent<HTMLFormElement>) => {
 								e.preventDefault();

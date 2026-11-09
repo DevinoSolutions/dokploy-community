@@ -25,14 +25,19 @@ import {
 	getDokployImageTag,
 	getLastUpdateAttempt,
 	getLogCleanupStatus,
+	getPostHogKey,
 	getReleaseNotes,
 	getTraefikOverview,
 	getUpdateData,
 	getUpdateMigrationDelta,
 	getWebServerSettings,
 	IS_CLOUD,
+	isPanelPortPublished,
+	isRequestFromPanelHost,
 	isResponseCompressionEnabled,
 	isTraefikDashboardPortEnabled,
+	PANEL_PORT_RECOVERY_COMMAND,
+	POSTHOG_HOST,
 	parseRawConfig,
 	paths,
 	prepareEnvironmentVariables,
@@ -56,6 +61,7 @@ import {
 	spawnAsync,
 	startLogCleanup,
 	stopLogCleanup,
+	togglePanelPort,
 	transitionDokployUpdateAttempt,
 	UPDATE_PROCESS_ID,
 	updateLetsEncryptEmail,
@@ -750,6 +756,17 @@ export const settingsRouter = createTRPCRouter({
 				return true;
 			}
 			await assertCanManageInstance(ctx);
+			const currentSettings = await getWebServerSettings();
+			const hostChanged =
+				input.host.trim().toLowerCase() !==
+				(currentSettings?.host ?? "").trim().toLowerCase();
+			if (hostChanged && !(await isPanelPortPublished())) {
+				throw new TRPCError({
+					code: "PRECONDITION_FAILED",
+					message:
+						"Port 3000 is disabled, enable it before changing or removing the panel domain",
+				});
+			}
 			const settings = await updateWebServerSettings({
 				host: input.host,
 				letsEncryptEmail: input.letsEncryptEmail,
@@ -1648,6 +1665,51 @@ export const settingsRouter = createTRPCRouter({
 			});
 			return true;
 		}),
+	getPanelPortStatus: adminProcedure.query(async ({ ctx }) => {
+		if (IS_CLOUD) {
+			return null;
+		}
+		const settings = await getWebServerSettings();
+		return {
+			enabled: await isPanelPortPublished(),
+			panelHost: settings?.host ?? null,
+			accessedViaPanelHost: isRequestFromPanelHost(
+				ctx.req.headers.host,
+				settings?.host,
+			),
+			recoveryCommand: PANEL_PORT_RECOVERY_COMMAND,
+		};
+	}),
+	togglePanelPort: adminProcedure
+		.input(z.object({ enable: z.boolean() }))
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
+			}
+			if (!input.enable) {
+				const settings = await getWebServerSettings();
+				if (!settings?.host) {
+					throw new TRPCError({
+						code: "PRECONDITION_FAILED",
+						message:
+							"Configure a domain for the Dokploy panel before disabling port 3000",
+					});
+				}
+				if (!isRequestFromPanelHost(ctx.req.headers.host, settings.host)) {
+					throw new TRPCError({
+						code: "PRECONDITION_FAILED",
+						message: `Access the panel through ${settings.host} to disable port 3000`,
+					});
+				}
+			}
+			await togglePanelPort(input.enable);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: input.enable ? "enable-panel-port" : "disable-panel-port",
+			});
+			return true;
+		}),
 	haveTraefikDashboardPortEnabled: adminProcedure
 		.input(apiServerSchema)
 		.query(async ({ input, ctx }) => {
@@ -1778,6 +1840,10 @@ export const settingsRouter = createTRPCRouter({
 		}),
 	isCloud: publicProcedure.query(async () => {
 		return IS_CLOUD;
+	}),
+	getPostHogConfig: publicProcedure.query(() => {
+		const key = getPostHogKey();
+		return key ? { key, host: POSTHOG_HOST } : null;
 	}),
 	isUserSubscribed: protectedProcedure.query(async ({ ctx }) => {
 		const haveServers = await db.query.server.findMany({

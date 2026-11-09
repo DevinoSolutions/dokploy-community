@@ -11,6 +11,7 @@ import type { EnabledSocialProviders } from "@/components/auth/social-login";
 import { ShowApiKeys } from "@/components/dashboard/settings/api/show-api-keys";
 import { LinkingAccount } from "@/components/dashboard/settings/linking-account/linking-account";
 import { McpServer } from "@/components/dashboard/settings/mcp/mcp-server";
+import { DeleteAccount } from "@/components/dashboard/settings/profile/delete-account";
 import { ProfileForm } from "@/components/dashboard/settings/profile/profile-form";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { appRouter } from "@/server/api/root";
@@ -31,6 +32,7 @@ const Page = ({
 				{hasSocialProvider && <LinkingAccount providers={socialProviders} />}
 				{permissions?.api.read && <ShowApiKeys />}
 				<McpServer />
+				<DeleteAccount />
 			</div>
 		</div>
 	);

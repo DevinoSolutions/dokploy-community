@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
 	boolean,
 	integer,
@@ -50,6 +50,10 @@ export const server = pgTable("server", {
 	dockerCleanupCron: text("dockerCleanupCron")
 		.notNull()
 		.default(DEFAULT_DOCKER_CLEANUP_CRON),
+	telemetryProviderIds: text("telemetryProviderIds")
+		.array()
+		.notNull()
+		.default(sql`ARRAY[]::text[]`),
 	buildsConcurrency: integer("buildsConcurrency").notNull().default(1),
 	createdAt: text("createdAt").notNull(),
 	organizationId: text("organizationId")

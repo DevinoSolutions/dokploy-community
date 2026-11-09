@@ -911,7 +911,7 @@ export interface RollingScriptOptions {
 	replicas?: Record<string, number>;
 	/** Rolled services with a `build:` section (built before anything is touched). */
 	buildServices?: string[];
-	/** Rolled image-only services to pull first (`pullImagesOnDeploy`). */
+	/** Rolled image-only services to pull first (`pullImages`). */
 	pullServices?: string[];
 	/** Services of a build-server deploy are pulled earlier and never built here. */
 	remoteBuild: boolean;

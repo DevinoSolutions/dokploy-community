@@ -89,7 +89,6 @@ export const compose = pgTable("compose", {
 	owner: text("owner"),
 	branch: text("branch"),
 	autoDeploy: boolean("autoDeploy").$defaultFn(() => true),
-	pullImagesOnDeploy: boolean("pullImagesOnDeploy").notNull().default(false),
 	// Gitlab
 	gitlabProjectId: integer("gitlabProjectId"),
 	gitlabRepository: text("gitlabRepository"),
@@ -155,6 +154,7 @@ export const compose = pgTable("compose", {
 	 * visual testing is off. See services/snapvisor.ts.
 	 */
 	snapvisorProjectName: text("snapvisorProjectName"),
+	pullImages: boolean("pullImages").notNull().default(false),
 	triggerType: triggerType("triggerType").default("push"),
 	composeStatus: applicationStatus("composeStatus").notNull().default("idle"),
 	icon: text("icon"),
@@ -450,9 +450,3 @@ export const apiRandomizeCompose = createSchema
 		suffix: z.string().optional(),
 		composeId: z.string().min(1),
 	});
-
-// Schema for transferring compose to another server
-export const apiTransferCompose = z.object({
-	composeId: z.string().min(1),
-	targetServerId: z.string().trim().nullable(),
-});

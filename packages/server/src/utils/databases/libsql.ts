@@ -2,6 +2,7 @@ import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions, PortConfig } from "dockerode";
 import { resolveServiceNetworks } from "../../services/network";
 import { assertVolumeMountsBound } from "../../services/volume-binding";
+import { buildDokployLabels } from "../docker/dokploy-labels";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -104,7 +105,18 @@ export const buildLibsql = async (rawLibsql: LibsqlNested) => {
 							Args: ["-c", finalCommand],
 						}
 					: {}),
-				Labels,
+				Labels: {
+					...Labels,
+					...buildDokployLabels({
+						organizationId: libsql.environment.project.organizationId,
+						projectId: libsql.environment.projectId,
+						projectName: libsql.environment.project.name,
+						environmentId: libsql.environmentId,
+						environmentName: libsql.environment.name,
+						applicationId: libsql.libsqlId,
+						applicationName: libsql.name,
+					}),
+				},
 			},
 			Networks: resolvedNetworks,
 			RestartPolicy,

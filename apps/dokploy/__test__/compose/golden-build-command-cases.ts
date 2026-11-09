@@ -41,7 +41,7 @@ export const GOLDEN_CASES: Record<string, GoldenCase> = {
 	compose: { overrides: {}, options: {} },
 	composeNoEnvFile: { overrides: { createEnvFile: false }, options: {} },
 	composePullAlways: {
-		overrides: { pullImagesOnDeploy: true },
+		overrides: { pullImages: true },
 		options: {},
 	},
 	composeFreshVolumes: { overrides: {}, options: { freshVolumes: true } },

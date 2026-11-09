@@ -79,7 +79,6 @@ import {
 	runRemoteBuildScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
 import {
 	recordRegistryAccessFailure,
 	recordVaultFailureReason,
@@ -92,6 +91,7 @@ import {
 } from "./deployment-heartbeat";
 import { type Domain, getDomainHost } from "./domain";
 import { asDeployable, checkRedeployable } from "./gha-connect/provider";
+import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
 import { getIssueComment } from "./github";
 import { claimLiveGithubBuild } from "./live-build-claim";
 import { generateApplyPatchesCommand } from "./patch";
@@ -1069,12 +1069,10 @@ export const deployPreviewApplication = async ({
 			application.buildRegistry = null;
 		}
 		application.rollbackRegistry = null;
-		// A Docker-image preview keeps the registry: it carries the credentials
-		// the image is pulled with, and nothing is pushed back to it.
+		// The preview keeps the application's registry: a Docker-image preview pulls
+		// from it with its credentials, and a built one is pushed there so every
+		// node of a swarm can pull it (upstream #5765, previews use the configured registry).
 		const isDockerPreview = application.sourceType === "docker";
-		if (!isDockerPreview) {
-			application.registry = null;
-		}
 
 		const buildServerId =
 			buildPolicy.buildServerId ||
@@ -1334,12 +1332,10 @@ export const rebuildPreviewApplication = async ({
 			application.buildRegistry = null;
 		}
 		application.rollbackRegistry = null;
-		// A Docker-image preview keeps the registry: it carries the credentials
-		// the image is pulled with, and nothing is pushed back to it.
+		// The preview keeps the application's registry: a Docker-image preview pulls
+		// from it with its credentials, and a built one is pushed there so every
+		// node of a swarm can pull it (upstream #5765, previews use the configured registry).
 		const isDockerPreview = application.sourceType === "docker";
-		if (!isDockerPreview) {
-			application.registry = null;
-		}
 
 		const buildServerId =
 			buildPolicy.buildServerId ||

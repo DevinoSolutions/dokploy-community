@@ -16,6 +16,9 @@ import {
 import { assertServerHasSshKey } from "./MissingSshKeyError";
 import { registerRemoteBuild } from "./remote-build-registry";
 
+// ~2 min without replies before a silent host is treated as dead.
+export const sshKeepalive = { keepaliveInterval: 15_000, keepaliveCountMax: 8 };
+
 export class WriteFileRemoteError extends Error {
 	constructor(
 		message: string,
@@ -336,11 +339,6 @@ export const execFileAsync = async (
 ): Promise<{ stdout: string; stderr: string }> => {
 	const child = execFile(command, args);
 
-	if (options.input && child.stdin) {
-		child.stdin.write(options.input);
-		child.stdin.end();
-	}
-
 	return new Promise((resolve, reject) => {
 		let stdout = "";
 		let stderr = "";
@@ -364,6 +362,11 @@ export const execFileAsync = async (
 		});
 
 		child.on("error", reject);
+
+		if (options.input !== undefined && child.stdin) {
+			child.stdin.on("error", reject);
+			child.stdin.end(options.input);
+		}
 	});
 };
 

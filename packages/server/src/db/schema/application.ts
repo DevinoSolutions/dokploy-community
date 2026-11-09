@@ -705,9 +705,3 @@ export const apiUpdateApplication = createSchema
 		appName: true,
 		snapvisorProjectName: true,
 	});
-
-// Schema for transferring application to another server
-export const apiTransferApplication = z.object({
-	applicationId: z.string().min(1),
-	targetServerId: z.string().trim().nullable(),
-});

@@ -32,6 +32,7 @@ import { cloneGitlabRepository } from "../providers/gitlab";
 import { getCreateComposeFileCommand } from "../providers/raw";
 import { randomizeDeployableSpecificationFile } from "./collision";
 import { randomizeSpecificationFile } from "./compose";
+import { buildDokployLabels } from "./dokploy-labels";
 import { singleQuote } from "./env-file";
 import {
 	getInstallStagedFileCommand,
@@ -273,7 +274,7 @@ export const getInstallStagedComposeCommand = (
  * reports why there is none and stops the script.
  */
 export const renderComposeWithDomains = async (
-	compose: Compose,
+	compose: ComposeWithMetadata,
 	domains: Domain[],
 	options: {
 		/**
@@ -325,7 +326,7 @@ exit 1;
  * expanded compose passed ~96 KB.
  */
 export const writeDomainsToCompose = async (
-	compose: Compose,
+	compose: ComposeWithMetadata,
 	domains: Domain[],
 	options: StageOptions & {
 		/** Other files staged for the same script, removed if it stops early. */
@@ -425,13 +426,80 @@ const removeDomainLabels = (
 	return labels;
 };
 
+type ComposeWithMetadata = Compose & {
+	environment?: {
+		environmentId: string;
+		name: string;
+		projectId: string;
+		project?: { name: string; organizationId: string };
+	};
+};
+
+const applyDokployLabelsToCompose = (
+	result: ComposeSpecification,
+	compose: ComposeWithMetadata,
+) => {
+	const { environment } = compose;
+	if (!environment?.project) return;
+
+	for (const [serviceName, service] of Object.entries(result.services ?? {})) {
+		if (!service) continue;
+		const metadataLabels = buildDokployLabels({
+			organizationId: environment.project.organizationId,
+			projectId: environment.projectId,
+			projectName: environment.project.name,
+			environmentId: environment.environmentId,
+			environmentName: environment.name,
+			applicationId: compose.composeId,
+			applicationName: compose.name,
+			serviceName,
+		});
+		// docker compose interpolates `$` in the file, so user-typed names need `$$` to stay literal.
+		const dokployLabels = Object.fromEntries(
+			Object.entries(metadataLabels)
+				// A partially loaded row (no project or environment name) adds no label rather than throwing.
+				.filter(
+					(entry): entry is [string, string] => typeof entry[1] === "string",
+				)
+				.map(([key, value]) => [key, value.replaceAll("$", () => "$$")]),
+		);
+
+		service.labels = mergeDokployLabels(service.labels, dokployLabels);
+		if (compose.composeType === "docker-compose") {
+			continue;
+		}
+		if (!service.deploy) {
+			service.deploy = {};
+		}
+		service.deploy.labels = mergeDokployLabels(
+			service.deploy.labels,
+			dokployLabels,
+		);
+	}
+};
+
+const mergeDokployLabels = (
+	current: DefinitionsService["labels"],
+	dokployLabels: Record<string, string>,
+): DefinitionsService["labels"] => {
+	if (current && !Array.isArray(current)) {
+		return { ...current, ...dokployLabels };
+	}
+	const entries = Object.entries(dokployLabels);
+	const keys = new Set(entries.map(([key]) => key));
+	const kept = (current ?? []).filter(
+		(label) => !keys.has(label.slice(0, label.indexOf("="))),
+	);
+	return [...kept, ...entries.map(([key, value]) => `${key}=${value}`)];
+};
+
 /**
  * `options.patches` are the patch rows the deploy already read: the compose
  * file patch comes from them, not from a second read of the table (T-8260).
  * Unset, the rows are read here.
  */
 export const addDomainToCompose = async (
-	compose: Compose,
+	compose: ComposeWithMetadata,
 	domains: Domain[],
 	options: { patches?: PatchRow[] } = {},
 ) => {
@@ -486,8 +554,16 @@ export const addDomainToCompose = async (
 		}
 	}
 
-	for (const domain of domains.filter((d) => d.enabled)) {
+	for (const domain of domains) {
 		const { serviceName, https } = domain;
+		if (!domain.enabled) {
+			// Disabling only drops routing; the service may still talk to others over dokploy-network.
+			const service = serviceName ? result.services?.[serviceName] : undefined;
+			if (service && !service.network_mode && !compose.isolatedDeployment) {
+				service.networks = addDokployNetworkToService(service.networks);
+			}
+			continue;
+		}
 		if (!serviceName) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
@@ -567,6 +643,8 @@ export const addDomainToCompose = async (
 			);
 		}
 	}
+
+	applyDokployLabelsToCompose(result, compose);
 
 	const injectedNetworkNames = await applyServiceNetworks(result, compose);
 

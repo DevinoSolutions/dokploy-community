@@ -1,3 +1,4 @@
+import { TRPCError } from "@trpc/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -22,6 +23,11 @@ vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
 	return {
 		...actual,
 		checkPermission: vi.fn(async () => {}),
+		// withAnyPermission reads the resolved matrix: the owner holds every action.
+		resolvePermissions: vi.fn(
+			async () =>
+				new Proxy({}, { get: () => new Proxy({}, { get: () => true }) }),
+		),
 		checkServiceAccess: vi.fn(async () => {}),
 		addNewService: vi.fn(async () => {}),
 	};
@@ -62,7 +68,16 @@ vi.mock("@dokploy/server/services/ai", async (importOriginal) => {
 		await importOriginal<typeof import("@dokploy/server/services/ai")>();
 	return {
 		...actual,
-		getAiSettingById: vi.fn(async () => aiRow),
+		// The lookup is scoped to the organization inside the service (upstream 0.31).
+		getAiSettingById: vi.fn(async (_aiId: string, organizationId: string) => {
+			if (!aiRow || aiRow.organizationId !== organizationId) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "AI settings not found",
+				});
+			}
+			return aiRow;
+		}),
 		deleteAiSettings: vi.fn(async () => ({ aiId: "ai-1" })),
 		saveAiSettings: vi.fn(async () => ({ aiId: "ai-1" })),
 		suggestVariants: vi.fn(async () => ({ suggestions: [] })),

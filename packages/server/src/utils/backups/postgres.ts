@@ -12,7 +12,7 @@ import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
 	buildRcloneRcatCommand,
 	getBackupCommand,
-	getBackupTimestamp,
+	getBackupFileName,
 	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
@@ -35,7 +35,7 @@ export const runPostgresBackup = async (
 		description: "Initializing Backup",
 	});
 	const { prefix } = backup;
-	const backupFileName = `${getBackupTimestamp()}.sql.gz`;
+	const backupFileName = getBackupFileName(backup.customName, "sql.gz");
 	const bucketDestination = `${normalizeS3Path(prefix)}${backupFileName}`;
 	try {
 		const {

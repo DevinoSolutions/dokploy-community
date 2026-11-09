@@ -92,6 +92,7 @@ export const backupVolume = async (
 		envVars,
 	);
 
+	// GNU tar exits 1 when a file changes while being read, which is expected on a live volume
 	const backupCommand = `
 	set -e
 	echo ${quote([`Volume name: ${volumeName}`])}
@@ -104,7 +105,7 @@ export const backupVolume = async (
   -v ${quote([`${volumeBackupPath}:/backup`])} \
   -e BACKUP_FILE_NAME=${quote([backupFileName])} \
   ubuntu \
-  bash -c 'cd /volume_data && tar cvf "/backup/$BACKUP_FILE_NAME" .'
+  bash -c 'cd /volume_data && tar cvf "/backup/$BACKUP_FILE_NAME" . || [ $? -eq 1 ]'
   echo "Volume backup done ✅"
   `;
 

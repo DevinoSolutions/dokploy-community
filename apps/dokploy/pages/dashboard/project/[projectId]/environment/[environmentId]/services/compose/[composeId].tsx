@@ -34,7 +34,7 @@ import { ShowVolumeBackups } from "@/components/dashboard/application/volume-bac
 import { AddCommandCompose } from "@/components/dashboard/compose/advanced/add-command";
 import { IsolatedDeploymentTab } from "@/components/dashboard/compose/advanced/add-isolation";
 import { DeployGuardrailsCompose } from "@/components/dashboard/compose/advanced/deploy-guardrails";
-import { PullImagesCompose } from "@/components/dashboard/compose/advanced/pull-images";
+import { FreshVolumes } from "@/components/dashboard/compose/advanced/fresh-volumes";
 import { RollingReplaceCompose } from "@/components/dashboard/compose/advanced/rolling-replace";
 import { ShowComposeBuildServer } from "@/components/dashboard/compose/advanced/show-build-server";
 import { ShowComposeContainers } from "@/components/dashboard/compose/containers/show-compose-containers";
@@ -251,7 +251,7 @@ const Service = (
 									</div>
 									<div className="flex flex-row h-fit w-fit max-w-full min-w-0 gap-2 items-center flex-wrap sm:justify-end">
 										<Badge
-											className="cursor-pointer"
+											className="min-w-0 max-w-full cursor-pointer overflow-hidden"
 											onClick={() => {
 												const ip = data?.server?.ipAddress || serverIp;
 												if (ip) {
@@ -267,7 +267,9 @@ const Service = (
 														: "destructive"
 											}
 										>
-											{data?.server?.name || "Dokploy Server"}
+											<span className="truncate">
+												{data?.server?.name || "Dokploy Server"}
+											</span>
 										</Badge>
 										<BuildOriginBadge
 											buildOrigin={data?.buildOrigin}
@@ -301,6 +303,14 @@ const Service = (
 										)}
 										{permissions?.service.create && (
 											<UpdateCompose composeId={composeId} />
+										)}
+
+										{permissions?.service.create && (
+											<TransferService
+												id={composeId}
+												type="compose"
+												serverId={data?.serverId}
+											/>
 										)}
 										{permissions?.service.delete && (
 											<DeleteService id={composeId} type="compose" />
@@ -594,12 +604,6 @@ const Service = (
 												<ShowImport composeId={composeId} />
 												<AssignComposeNetworks composeId={composeId} />
 												<IsolatedDeploymentTab composeId={composeId} />
-												<TransferService
-													id={composeId}
-													type="compose"
-													currentServerId={data?.serverId}
-												/>
-												<PullImagesCompose composeId={composeId} />
 												{data?.buildOrigin !== "github-actions" && (
 													<ShowComposeBuildServer composeId={composeId} />
 												)}
@@ -608,6 +612,7 @@ const Service = (
 												<GithubDeploymentsWatch id={composeId} type="compose" />
 												<WatchdogExclusion id={composeId} type="compose" />
 												<ComposePolicyAuditExclusion composeId={composeId} />
+												<FreshVolumes composeId={composeId} />
 											</div>
 										</TabsContent>
 									)}

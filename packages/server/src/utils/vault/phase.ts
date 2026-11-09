@@ -13,8 +13,13 @@ type PhaseSecret = {
 
 const baseUrl = (config: PhaseConfig) => trimTrailingSlashes(config.apiUrl);
 
+// Phase's "Copy to clipboard" for REST tokens includes the "ServiceAccount"
+// prefix, so strip any auth scheme the user may have pasted along with it.
+const normalizeToken = (token: string) =>
+	token.trim().replace(/^(Bearer\s+)?(ServiceAccount\s+)?/i, "");
+
 const authHeaders = (config: PhaseConfig) => ({
-	Authorization: `Bearer ServiceAccount ${config.token}`,
+	Authorization: `Bearer ServiceAccount ${normalizeToken(config.token)}`,
 	Accept: "application/json",
 });
 

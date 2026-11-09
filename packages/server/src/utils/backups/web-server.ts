@@ -24,7 +24,7 @@ import { execAsync } from "../process/execAsync";
 import { redactRcloneCredentials } from "./redact";
 import {
 	buildRcloneCommand,
-	getBackupTimestamp,
+	getBackupFileName,
 	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
@@ -79,10 +79,13 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 				"Backup refused: its destination belongs to an organization that does not own this Dokploy instance. Nothing was uploaded.",
 			);
 		}
-		const timestamp = getBackupTimestamp();
 		const { BASE_PATH } = paths();
 		const tempDir = await mkdtemp(join(tmpdir(), "dokploy-backup-"));
-		const backupFileName = `webserver-backup-${timestamp}.zip`;
+		const backupFileName = getBackupFileName(
+			backup.customName,
+			"zip",
+			"webserver-backup",
+		);
 		const {
 			flags: rcloneFlags,
 			path: s3Path,
@@ -125,8 +128,9 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 			writeStream.write(`Cleaning up temp file: ${cleanupCommand}\n`);
 			await execAsync(cleanupCommand);
 
+			// Only .git: code/ can hold compose ./ bind mounts and drop uploads.
 			await execAsync(
-				`rsync -a --ignore-errors --no-specials --no-devices --exclude='volume-backups/' --exclude='${ENCRYPTION_KEY_BACKUP_FILE}' ${BASE_PATH}/ ${tempDir}/filesystem/`,
+				`rsync -a --ignore-errors --no-specials --no-devices --exclude='volume-backups/' --exclude='${ENCRYPTION_KEY_BACKUP_FILE}' --exclude='applications/*/code/.git/' --exclude='compose/*/code/.git/' ${BASE_PATH}/ ${tempDir}/filesystem/`,
 			);
 
 			writeStream.write("Copied filesystem to temp directory\n");

@@ -100,7 +100,6 @@ import {
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
 import {
 	recordRegistryAccessFailure,
 	recordVaultFailureReason,
@@ -108,6 +107,7 @@ import {
 } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
 import { asDeployable } from "./gha-connect/provider";
+import { RegistryRetryPendingError } from "./gha-connect/registry-retry";
 import {
 	loginGhcrForCompose,
 	removeGhcrConfigDir,

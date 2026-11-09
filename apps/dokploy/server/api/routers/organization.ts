@@ -4,6 +4,7 @@ import {
 	hasValidLicense,
 	IS_CLOUD,
 	removeOrganizationNotifications,
+	removeVectorAgents,
 	sendInvitationEmail,
 } from "@dokploy/server/index";
 import { normalizeWildcardBaseDomain } from "@dokploy/server/utils/wildcard-domain-base";
@@ -342,6 +343,8 @@ export const organizationRouter = createTRPCRouter({
 						"You must maintain at least one organization where you are the owner",
 				});
 			}
+
+			await removeVectorAgents(input.organizationId);
 
 			// The notification rows would cascade away with the organization, and
 			// the provider rows (API keys, webhooks) they point at would stay.

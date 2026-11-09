@@ -47,6 +47,7 @@ export const backups = pgTable("backup", {
 	enabled: boolean("enabled"),
 	database: text("database").notNull(),
 	prefix: text("prefix").notNull(),
+	customName: text("customName"),
 	serviceName: text("serviceName"),
 	destinationId: text("destinationId")
 		.notNull()
@@ -154,11 +155,22 @@ export const backupsRelations = relations(backups, ({ one, many }) => ({
 	deployments: many(deployments),
 }));
 
+const customNameSchema = z
+	.string()
+	.trim()
+	.max(100, "Custom name must be 100 characters or less")
+	.regex(
+		/^([a-zA-Z0-9][a-zA-Z0-9._-]*)?$/,
+		"Must start with a letter or number; only letters, numbers, dots, hyphens and underscores are allowed",
+	)
+	.optional();
+
 const createSchema = createInsertSchema(backups, {
 	backupId: z.string(),
 	destinationId: z.string(),
 	enabled: z.boolean().optional(),
 	prefix: backupPathSchema.min(1),
+	customName: customNameSchema,
 	serviceName: backupPathSchema.nullish(),
 	database: z.string(),
 	schedule: z.string(),
@@ -204,6 +216,7 @@ export const apiCreateBackup = createSchema
 		schedule: true,
 		enabled: true,
 		prefix: true,
+		customName: true,
 		destinationId: true,
 		keepLatestCount: true,
 		database: true,
@@ -248,6 +261,7 @@ export const apiUpdateBackup = createSchema
 	.required()
 	.extend({
 		includeEncryptionKey: z.boolean().optional(),
+		customName: customNameSchema,
 	})
 	.superRefine(requireDatabaseForNonMongo);
 

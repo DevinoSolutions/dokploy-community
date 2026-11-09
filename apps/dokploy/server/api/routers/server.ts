@@ -1,4 +1,5 @@
 import {
+	captureEvent,
 	createServer,
 	defaultCommand,
 	deleteServer,
@@ -9,12 +10,14 @@ import {
 	getAccessibleServerIds,
 	getAllContainerStats,
 	getContainerProcesses,
+	getPostHogSessionId,
 	getPublicIpWithFallback,
 	getServicesByServerId,
 	haveActiveServices,
 	IS_CLOUD,
 	redactServerSshKey,
 	removeDeploymentsByServerId,
+	removeServerVectorAgent,
 	ServerSetupError,
 	serverAudit,
 	serverSetup,
@@ -155,6 +158,13 @@ export const serverRouter = createTRPCRouter({
 					resourceType: "server",
 					resourceId: project.serverId,
 					resourceName: project.name,
+				});
+				void captureEvent({
+					distinctId: user.id,
+					event: "server_created",
+					organizationId: ctx.session.activeOrganizationId,
+					sessionId: getPostHogSessionId(ctx.req.headers),
+					properties: { server_type: project.serverType },
 				});
 				return project;
 			} catch (error) {
@@ -616,11 +626,16 @@ export const serverRouter = createTRPCRouter({
 						message: "Server has active services, please delete them first",
 					});
 				}
+				const vectorAgentRemovalWarning =
+					await removeServerVectorAgent(currentServer);
 				await audit(ctx, {
 					action: "delete",
 					resourceType: "server",
 					resourceId: currentServer.serverId,
 					resourceName: currentServer.name,
+					...(vectorAgentRemovalWarning
+						? { metadata: { vectorAgentRemovalWarning } }
+						: {}),
 				});
 				await removeDeploymentsByServerId(currentServer);
 				await deleteServer(input.serverId);
@@ -631,7 +646,10 @@ export const serverRouter = createTRPCRouter({
 					await updateServersBasedOnQuantity(admin.id, admin.serversQuantity);
 				}
 
-				return redactServerSshKey(currentServer);
+				return {
+					...redactServerSshKey(currentServer),
+					vectorAgentRemovalWarning,
+				};
 			} catch (error) {
 				throw error;
 			}

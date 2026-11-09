@@ -101,4 +101,6 @@ export type AuditResourceType =
 	| "dnsProvider"
 	| "dodomain"
 	| "uptimely"
-	| "snapvisor";
+	| "snapvisor"
+	| "telemetryProvider"
+	| "ai";

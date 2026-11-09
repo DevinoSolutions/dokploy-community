@@ -15,8 +15,8 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { TerminalLine } from "../../docker/logs/terminal-line";
 import { type LogLine, parseLogs } from "../../docker/logs/utils";
+import { VirtualLogList } from "../../docker/logs/virtual-log-list";
 
 interface Props {
 	logPath: string | null;
@@ -43,23 +43,7 @@ export const ShowDeployment = ({
 	const [showExtraLogs, setShowExtraLogs] = useState(false);
 	const [filteredLogs, setFilteredLogs] = useState<LogLine[]>([]);
 	const wsRef = useRef<WebSocket | null>(null);
-	const [autoScroll, setAutoScroll] = useState(true);
-	const scrollRef = useRef<HTMLDivElement>(null);
 	const [copied, setCopied] = useState(false);
-
-	const scrollToBottom = () => {
-		if (autoScroll && scrollRef.current) {
-			scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-		}
-	};
-
-	const handleScroll = () => {
-		if (!scrollRef.current) return;
-
-		const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-		const isAtBottom = Math.abs(scrollHeight - scrollTop - clientHeight) < 10;
-		setAutoScroll(isAtBottom);
-	};
 
 	useEffect(() => {
 		if (!open || !logPath || unavailableMessage) return;
@@ -119,14 +103,6 @@ export const ShowDeployment = ({
 
 		setFilteredLogs(filteredLogsResult);
 	}, [data, showExtraLogs, isGithubActions]);
-
-	useEffect(() => {
-		scrollToBottom();
-
-		if (autoScroll && scrollRef.current) {
-			scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-		}
-	}, [filteredLogs, autoScroll]);
 
 	const handleCopy = () => {
 		const logContent = filteredLogs
@@ -219,42 +195,21 @@ export const ShowDeployment = ({
 						)}
 					</>
 				)}
-				<div
-					ref={scrollRef}
-					onScroll={handleScroll}
-					className="ph-no-capture h-[720px] overflow-y-auto space-y-0 border p-4 bg-background rounded custom-logs-scrollbar"
-				>
-					{" "}
-					{unavailableMessage ? (
+				{unavailableMessage ? (
+					<div className="ph-no-capture flex h-[720px] items-center justify-center border p-4 bg-background rounded text-muted-foreground">
+						{unavailableMessage}
+					</div>
+				) : (
+					<VirtualLogList
+						logs={filteredLogs.length > 0 ? filteredLogs : optionalErrors}
+						noTimestamp
+						className="ph-no-capture h-[720px] bg-background"
+					>
 						<div className="flex justify-center items-center h-full text-muted-foreground">
-							{unavailableMessage}
+							<Loader2 className="h-6 w-6 animate-spin" />
 						</div>
-					) : filteredLogs.length > 0 ? (
-						filteredLogs.map((log: LogLine, index: number) => (
-							<TerminalLine
-								key={`${log.rawTimestamp ?? ""}-${index}`}
-								log={log}
-								noTimestamp
-							/>
-						))
-					) : (
-						<>
-							{optionalErrors.length > 0 ? (
-								optionalErrors.map((log: LogLine, index: number) => (
-									<TerminalLine
-										key={`extra-${log.rawTimestamp ?? ""}-${index}`}
-										log={log}
-										noTimestamp
-									/>
-								))
-							) : (
-								<div className="flex justify-center items-center h-full text-muted-foreground">
-									<Loader2 className="h-6 w-6 animate-spin" />
-								</div>
-							)}
-						</>
-					)}
-				</div>
+					</VirtualLogList>
+				)}
 			</DialogContent>
 		</Dialog>
 	);

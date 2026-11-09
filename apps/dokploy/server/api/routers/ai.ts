@@ -15,6 +15,9 @@ import {
 	getAiSettingById,
 	getAiSettingsByOrganizationId,
 	getCustomAiProviders,
+	maskAiApiKey,
+	mergeAiApiKey,
+	resolveAiApiKey,
 	saveAiSettings,
 	saveCustomAiProviders,
 	suggestVariants,
@@ -23,6 +26,7 @@ import { createComposeByTemplate } from "@dokploy/server/services/compose";
 import {
 	addNewService,
 	checkServiceAccess,
+	hasPermission,
 } from "@dokploy/server/services/permission";
 import { findProjectById } from "@dokploy/server/services/project";
 import {
@@ -38,54 +42,50 @@ import { slugify } from "@/lib/slug";
 import {
 	adminProcedure,
 	createTRPCRouter,
-	protectedProcedure,
+	withAnyPermission,
+	withPermission,
 } from "@/server/api/trpc";
+import { audit } from "@/server/api/utils/audit";
 import { resolveHostIpForOrg } from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import { generatePassword } from "@/templates/utils";
 
-/**
- * `getAiSettingById` looks an AI provider up by primary key only, so every
- * procedure that accepts a caller-supplied `aiId` has to prove the row belongs
- * to the caller's active organization before returning it (the row carries the
- * provider `apiKey`) or using its credentials to talk to a model.
- */
-const findAiSettingInOrganization = async (
-	aiId: string,
-	activeOrganizationId: string,
-) => {
-	const notFound = new TRPCError({
-		code: "NOT_FOUND",
-		message: "AI settings not found",
+const resolveInputApiKey = (
+	input: { apiKey: string; apiUrl: string; aiId?: string },
+	ctx: { user: { id: string }; session: { activeOrganizationId: string } },
+) =>
+	resolveAiApiKey({
+		apiKey: input.apiKey,
+		apiUrl: input.apiUrl,
+		aiId: input.aiId,
+		organizationId: ctx.session.activeOrganizationId,
+		authorize: () => hasPermission(ctx, { ai: ["update"] }),
 	});
-	let aiSettings: Awaited<ReturnType<typeof getAiSettingById>>;
-	try {
-		aiSettings = await getAiSettingById(aiId);
-	} catch {
-		throw notFound;
-	}
-	if (aiSettings.organizationId !== activeOrganizationId) {
-		throw notFound;
-	}
-	return aiSettings;
-};
 
 export const aiRouter = createTRPCRouter({
-	one: adminProcedure
+	one: withAnyPermission("ai", ["read", "update"])
 		.input(z.object({ aiId: z.string() }))
-		.query(async ({ ctx, input }) => {
-			return await findAiSettingInOrganization(
+		.query(async ({ input, ctx }) => {
+			const setting = await getAiSettingById(
 				input.aiId,
 				ctx.session.activeOrganizationId,
 			);
+			return maskAiApiKey(setting);
 		}),
 
-	getModels: protectedProcedure
-		.input(z.object({ apiUrl: z.string().min(1), apiKey: z.string() }))
-		.query(async ({ input }) => {
+	getModels: withAnyPermission("ai", ["read", "create", "update"])
+		.input(
+			z.object({
+				apiUrl: z.string().min(1),
+				apiKey: z.string(),
+				aiId: z.string().optional(),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
 			try {
+				const apiKey = await resolveInputApiKey(input, ctx);
 				const providerName = getProviderName(input.apiUrl);
-				const headers = getProviderHeaders(input.apiUrl, input.apiKey);
+				const headers = getProviderHeaders(input.apiUrl, apiKey);
 				let response = null;
 				switch (providerName) {
 					case "ollama":
@@ -93,7 +93,7 @@ export const aiRouter = createTRPCRouter({
 						break;
 					case "gemini":
 						response = await fetch(
-							`${input.apiUrl}/models?key=${encodeURIComponent(input.apiKey)}`,
+							`${input.apiUrl}/models?key=${encodeURIComponent(apiKey)}`,
 							{ headers: {} },
 						);
 						break;
@@ -156,7 +156,7 @@ export const aiRouter = createTRPCRouter({
 							},
 						] as Model[];
 					default:
-						if (!input.apiKey)
+						if (!apiKey)
 							throw new TRPCError({
 								code: "BAD_REQUEST",
 								message: "API key must contain at least 1 character(s)",
@@ -208,46 +208,76 @@ export const aiRouter = createTRPCRouter({
 				});
 			}
 		}),
-	create: adminProcedure.input(apiCreateAi).mutation(async ({ ctx, input }) => {
-		return await saveAiSettings(ctx.session.activeOrganizationId, input);
-	}),
-
-	update: adminProcedure.input(apiUpdateAi).mutation(async ({ ctx, input }) => {
-		// `saveAiSettings` upserts on the `aiId` primary key, so an unscoped
-		// `aiId` would let an admin overwrite another organization's provider.
-		await findAiSettingInOrganization(
-			input.aiId,
-			ctx.session.activeOrganizationId,
-		);
-		return await saveAiSettings(ctx.session.activeOrganizationId, input);
-	}),
-
-	getAll: adminProcedure.query(async ({ ctx }) => {
-		return await getAiSettingsByOrganizationId(
-			ctx.session.activeOrganizationId,
-		);
-	}),
-
-	get: adminProcedure
-		.input(z.object({ aiId: z.string() }))
-		.query(async ({ ctx, input }) => {
-			return await findAiSettingInOrganization(
-				input.aiId,
-				ctx.session.activeOrganizationId,
-			);
-		}),
-
-	delete: adminProcedure
-		.input(z.object({ aiId: z.string() }))
+	create: withPermission("ai", "create")
+		.input(apiCreateAi)
 		.mutation(async ({ ctx, input }) => {
-			await findAiSettingInOrganization(
+			const result = await saveAiSettings(
+				ctx.session.activeOrganizationId,
+				input,
+			);
+			await audit(ctx, {
+				action: "create",
+				resourceType: "ai",
+				resourceName: input.name,
+			});
+			return result;
+		}),
+
+	update: withPermission("ai", "update")
+		.input(apiUpdateAi)
+		.mutation(async ({ ctx, input }) => {
+			const existing = await getAiSettingById(
 				input.aiId,
 				ctx.session.activeOrganizationId,
 			);
-			return await deleteAiSettings(input.aiId);
+			if (input.apiKey) {
+				input.apiKey = mergeAiApiKey(input.apiKey, existing.apiKey);
+			}
+			const result = await saveAiSettings(
+				ctx.session.activeOrganizationId,
+				input,
+				false,
+			);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "ai",
+				resourceId: input.aiId,
+				resourceName: input.name,
+			});
+			return result;
 		}),
 
-	getCustomProviders: protectedProcedure.query(async ({ ctx }) => {
+	getAll: withAnyPermission("ai", ["read", "create", "update", "delete"]).query(
+		async ({ ctx }) => {
+			const settings = await getAiSettingsByOrganizationId(
+				ctx.session.activeOrganizationId,
+			);
+			return settings.map(({ apiKey, ...rest }) => rest);
+		},
+	),
+
+	delete: withPermission("ai", "delete")
+		.input(z.object({ aiId: z.string() }))
+		.mutation(async ({ input, ctx }) => {
+			const setting = await getAiSettingById(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
+			await deleteAiSettings(input.aiId, ctx.session.activeOrganizationId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "ai",
+				resourceId: input.aiId,
+				resourceName: setting.name,
+			});
+			return true;
+		}),
+
+	getCustomProviders: withAnyPermission("ai", [
+		"read",
+		"create",
+		"update",
+	]).query(async ({ ctx }) => {
 		return await getCustomAiProviders(ctx.session.activeOrganizationId);
 	}),
 
@@ -260,7 +290,7 @@ export const aiRouter = createTRPCRouter({
 			);
 		}),
 
-	getEnabledProviders: protectedProcedure.query(async ({ ctx }) => {
+	getEnabledProviders: withPermission("ai", "read").query(async ({ ctx }) => {
 		const settings = await getAiSettingsByOrganizationId(
 			ctx.session.activeOrganizationId,
 		);
@@ -269,7 +299,7 @@ export const aiRouter = createTRPCRouter({
 			.map((s) => ({ aiId: s.aiId, name: s.name, model: s.model }));
 	}),
 
-	analyzeLogs: protectedProcedure
+	analyzeLogs: withPermission("ai", "read")
 		.input(
 			z.object({
 				aiId: z.string().min(1),
@@ -278,13 +308,11 @@ export const aiRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			// Resolved outside the try/catch below, which rewrites every failure
-			// to BAD_REQUEST and would otherwise swallow the authorization code.
-			const aiSettings = await findAiSettingInOrganization(
-				input.aiId,
-				ctx.session.activeOrganizationId,
-			);
 			try {
+				const aiSettings = await getAiSettingById(
+					input.aiId,
+					ctx.session.activeOrganizationId,
+				);
 				if (!aiSettings?.isEnabled) {
 					throw new TRPCError({
 						code: "BAD_REQUEST",
@@ -325,19 +353,21 @@ ${input.logs}`,
 			}
 		}),
 
-	testConnection: protectedProcedure
+	testConnection: withAnyPermission("ai", ["create", "update"])
 		.input(
 			z.object({
 				apiUrl: z.string().min(1),
 				apiKey: z.string(),
 				model: z.string().min(1),
+				aiId: z.string().optional(),
 			}),
 		)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				const apiKey = await resolveInputApiKey(input, ctx);
 				const provider = selectAIProvider({
 					apiUrl: input.apiUrl,
-					apiKey: input.apiKey,
+					apiKey,
 				});
 				const model = provider(input.model);
 				const result = await generateText({
@@ -359,7 +389,7 @@ ${input.logs}`,
 			}
 		}),
 
-	suggest: protectedProcedure
+	suggest: withPermission("ai", "read")
 		.input(
 			z.object({
 				aiId: z.string(),
@@ -371,10 +401,7 @@ ${input.logs}`,
 			// Both ids are scoped before the try/catch (which flattens errors to
 			// BAD_REQUEST): `suggestVariants` uses the provider credentials behind
 			// `aiId` and reads the ip address behind `serverId`.
-			await findAiSettingInOrganization(
-				input.aiId,
-				ctx.session.activeOrganizationId,
-			);
+			await getAiSettingById(input.aiId, ctx.session.activeOrganizationId);
 			await assertServerInOrganization(
 				input.serverId,
 				ctx.session.activeOrganizationId,
@@ -396,7 +423,7 @@ ${input.logs}`,
 				});
 			}
 		}),
-	deploy: protectedProcedure
+	deploy: withPermission("ai", "read")
 		.input(deploySuggestionSchema)
 		.mutation(async ({ ctx, input }) => {
 			const environment = await findEnvironmentById(input.environmentId);

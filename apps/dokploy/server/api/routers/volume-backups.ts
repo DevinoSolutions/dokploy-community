@@ -172,7 +172,7 @@ export const volumeBackupsRouter = createTRPCRouter({
 				input.destinationId,
 				ctx.session.activeOrganizationId,
 			);
-			if (IS_CLOUD && serviceType) {
+			if (IS_CLOUD && serviceType && serviceId) {
 				const existingVolumeBackups = await db.query.volumeBackups.findMany({
 					where: eq(volumeBackups[`${serviceType}Id`], serviceId),
 				});

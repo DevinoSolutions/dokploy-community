@@ -67,7 +67,7 @@ describe("createCommand with a build server", () => {
 
 	it("keeps --pull always when pulling on deploy is enabled", () => {
 		const command = createCommand(
-			{ ...base, pullImagesOnDeploy: true } as typeof base,
+			{ ...base, pullImages: true } as typeof base,
 			undefined,
 			{ overridePath: "/o.yml" },
 		);

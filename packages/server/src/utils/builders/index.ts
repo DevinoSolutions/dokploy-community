@@ -10,6 +10,12 @@ import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { getECRAuthToken } from "../aws/ecr";
 import { getRegistryTag, uploadImageRemoteCommand } from "../cluster/upload";
+import { buildDokployLabels } from "../docker/dokploy-labels";
+import {
+	anonymousRegistryAuth,
+	registryUrlMatchesImage,
+} from "../docker/registry-auth-clear";
+import { removeStagedFiles, type StageOptions } from "../docker/staging";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -20,12 +26,8 @@ import {
 	mergePredefinedEnvVariables,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
-import {
-	anonymousRegistryAuth,
-	registryUrlMatchesImage,
-} from "../docker/registry-auth-clear";
+import { sleep } from "../process/execAsync";
 import { getRemoteDocker } from "../servers/remote-docker";
-import { removeStagedFiles, type StageOptions } from "../docker/staging";
 import { withResolvedVaultRefs } from "../vault";
 import { getBuildPathGuardCommand } from "./build-path-guard";
 import { getDockerCommand } from "./docker-file";
@@ -248,7 +250,18 @@ export const mechanizeDockerContainer = async (
 						Args: args,
 					}),
 				...(Ulimits && { Ulimits }),
-				Labels,
+				Labels: {
+					...Labels,
+					...buildDokployLabels({
+						organizationId: application.environment.project.organizationId,
+						projectId: application.environment.projectId,
+						projectName: application.environment.project.name,
+						environmentId: application.environmentId,
+						environmentName: application.environment.name,
+						applicationId: application.applicationId,
+						applicationName: application.name,
+					}),
+				},
 			},
 			Networks: resolvedNetworks,
 			RestartPolicy,
@@ -272,9 +285,11 @@ export const mechanizeDockerContainer = async (
 		UpdateConfig,
 	};
 
+	let forceUpdate = 0;
 	try {
 		const service = docker.getService(appName);
 		const inspect = await service.inspect();
+		forceUpdate = inspect.Spec.TaskTemplate.ForceUpdate + 1;
 
 		await service.update({
 			version: Number.parseInt(inspect.Version.Index),
@@ -285,7 +300,7 @@ export const mechanizeDockerContainer = async (
 			Labels: inspect.Spec?.Labels ?? {},
 			TaskTemplate: {
 				...settings.TaskTemplate,
-				ForceUpdate: inspect.Spec.TaskTemplate.ForceUpdate + 1,
+				ForceUpdate: forceUpdate,
 			},
 		});
 	} catch (error) {
@@ -293,6 +308,35 @@ export const mechanizeDockerContainer = async (
 		// Pass the auth explicitly: dockerode's one-argument createService(opts)
 		// takes `opts` itself as the auth object, not `opts.authconfig`.
 		await docker.createService(authConfig, settings);
+	}
+
+	// Swarm only reports a task it can't place (e.g. insufficient resources) on the task itself.
+	const deadline = Date.now() + 3000;
+	while (Date.now() < deadline) {
+		const tasks = await docker.listTasks({
+			filters: JSON.stringify({
+				service: [appName],
+				"desired-state": ["running"],
+			}),
+		});
+		const newTasks = tasks.filter(
+			(task) => (task.Spec?.ForceUpdate ?? 0) === forceUpdate,
+		);
+		const unscheduled = newTasks.find(
+			(task) => task.Status?.State === "pending" && task.Status?.Err,
+		);
+		if (unscheduled) {
+			throw new Error(
+				`Swarm could not start the new version: ${unscheduled.Status.Err}. Lower the memory/CPU reservation or free resources on the server.`,
+			);
+		}
+		const scheduled =
+			newTasks.length > 0 &&
+			newTasks.every(
+				(task) => !["new", "allocated", "pending"].includes(task.Status?.State),
+			);
+		if (scheduled) return;
+		await sleep(300);
 	}
 };
 

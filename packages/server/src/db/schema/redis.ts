@@ -210,9 +210,3 @@ export const apiRebuildRedis = createSchema
 		redisId: true,
 	})
 	.required();
-
-// Schema for transferring redis to another server
-export const apiTransferRedis = z.object({
-	redisId: z.string().min(1),
-	targetServerId: z.string().trim().nullable(),
-});

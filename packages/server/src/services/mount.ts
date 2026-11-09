@@ -11,6 +11,7 @@ import { removeStagedFiles } from "@dokploy/server/utils/docker/staging";
 import {
 	createFile,
 	getCreateFilesCommand,
+	isValidMountFilePath,
 } from "@dokploy/server/utils/docker/utils";
 import { removeFileOrDirectory } from "@dokploy/server/utils/filesystem/directory";
 import {
@@ -145,6 +146,20 @@ export const applyMountPermissions = async (mountId: string) => {
 
 export const createMount = async (input: z.infer<typeof apiCreateMount>) => {
 	try {
+		// An empty filePath would write the content over the service's whole files/ directory
+		if (input.type === "file" && !input.filePath?.trim()) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "File path is required for file mounts",
+			});
+		}
+		// Checked before insert: deleting a saved row runs rm -rf on its path
+		if (input.type === "file" && !isValidMountFilePath(input.filePath ?? "")) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: `Invalid file path: ${input.filePath}`,
+			});
+		}
 		const { serviceId, ...rest } = input;
 		const value = await db
 			.insert(mounts)
@@ -309,6 +324,12 @@ export const updateMount = async (
 	mountId: string,
 	mountData: Partial<Mount>,
 ) => {
+	if (mountData.filePath && !isValidMountFilePath(mountData.filePath)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Invalid file path: ${mountData.filePath}`,
+		});
+	}
 	const mount = await db.transaction(async (tx) => {
 		const mount = await tx
 			.update(mounts)
@@ -429,9 +450,26 @@ export const updateFileMount = async (mountId: string) => {
 	}
 };
 
+export const readFileMountContent = async (mountId: string) => {
+	const mount = await findMountById(mountId);
+	if (mount.type !== "file" || !mount.filePath) return null;
+	const basePath = await getBaseFilesPath(mountId);
+	const fullPath = quote([path.join(basePath, mount.filePath)]);
+
+	// Check the opened file's real path so symlinks can't escape the files dir.
+	const command = `base=$(realpath ${quote([basePath])}) && [ -f ${fullPath} ] && { real=$(readlink /proc/self/fd/3 2>/dev/null || realpath ${fullPath}) && case "$real" in "$base"/*) content=$(base64 <&3) && printf 'found:%s' "$content" | tr -d '\\n';; esac; } 3< ${fullPath}; exit 0`;
+	const serverId = await getServerId(mount);
+	const { stdout } = serverId
+		? await execAsyncRemote(serverId, command)
+		: await execAsync(command);
+
+	if (!stdout.startsWith("found:")) return null;
+	return Buffer.from(stdout.slice("found:".length), "base64").toString("utf8");
+};
+
 export const deleteFileMount = async (mountId: string) => {
 	const mount = await findMountById(mountId);
-	if (!mount.filePath) return;
+	if (!mount.filePath || !isValidMountFilePath(mount.filePath)) return;
 	const basePath = await getBaseFilesPath(mountId);
 
 	const fullPath = path.join(basePath, mount.filePath);
