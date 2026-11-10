@@ -1,3 +1,4 @@
+import { IS_CLOUD } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreateServer,
@@ -311,4 +312,20 @@ export const getAccessibleServerIds = async (session: {
 			orgServerIds.has(serverId),
 		),
 	);
+};
+
+export const assertServerAccess = async (
+	session: { userId: string; activeOrganizationId: string },
+	serverId?: string | null,
+) => {
+	if (!serverId) {
+		if (IS_CLOUD) {
+			throw new TRPCError({ code: "UNAUTHORIZED" });
+		}
+		return;
+	}
+	const accessible = await getAccessibleServerIds(session);
+	if (!accessible.has(serverId)) {
+		throw new TRPCError({ code: "UNAUTHORIZED" });
+	}
 };

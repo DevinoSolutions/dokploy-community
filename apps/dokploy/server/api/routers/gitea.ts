@@ -242,6 +242,7 @@ export const giteaRouter = createTRPCRouter({
 					gitProviderId: gitea.gitProviderId,
 				});
 			}
+			await updateGitea(input.giteaId, data);
 
 			await audit(ctx, {
 				action: "update",

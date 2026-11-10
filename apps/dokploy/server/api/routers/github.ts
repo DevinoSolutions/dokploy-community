@@ -159,7 +159,7 @@ export const githubRouter = createTRPCRouter({
 			await audit(ctx, {
 				action: "update",
 				resourceType: "gitProvider",
-				resourceId: input.gitProviderId,
+				resourceId: existing.gitProvider.gitProviderId,
 				resourceName: input.name,
 			});
 		}),

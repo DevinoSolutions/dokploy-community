@@ -75,6 +75,12 @@ const caller = backupRouter.createCaller({
 	user: { id: "user-1", email: "user@example.com", role: "owner" },
 } as Parameters<typeof backupRouter.createCaller>[0]);
 
+const callerAs = (role: string) =>
+	backupRouter.createCaller({
+		session: { activeOrganizationId: "org-a" },
+		user: { id: "user-1", email: "user@example.com", role },
+	} as Parameters<typeof backupRouter.createCaller>[0]);
+
 const ownDestination = { destinationId: "dest-a", organizationId: "org-a" };
 const foreignDestination = { destinationId: "dest-b", organizationId: "org-b" };
 
@@ -124,7 +130,10 @@ describe("backup endpoints scope destinations to the active organization", () =>
 			databaseType: "postgres",
 			backupType: "database",
 		});
-		mocks.findPostgresById.mockResolvedValue({ postgresId: "pg-1" });
+		mocks.findPostgresById.mockResolvedValue({
+			postgresId: "pg-1",
+			appName: "app",
+		});
 	});
 
 	it("rejects creating a backup on a destination from another organization", async () => {

@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import {
+	assertServerAccess,
 	containerKill,
 	containerRemove,
 	containerRestart,
@@ -84,6 +85,7 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
+			await assertServerAccess(ctx.session, input.serverId ?? null);
 			await checkPermission(ctx, { docker: ["read"], server: ["read"] });
 			await assertLocalHostAccess(
 				input.serverId,

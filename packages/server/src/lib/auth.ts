@@ -164,6 +164,29 @@ const oauthClientSecretStorage = {
 			: symmetricDecrypt({ key: betterAuthSecret, data: storedSecret }),
 };
 
+const rewriteToCanonicalOrigin = async (url: string): Promise<string> => {
+	try {
+		const configured = process.env.BETTER_AUTH_URL;
+		let origin: string | null = configured ?? null;
+		if (!origin) {
+			const settings = await getWebServerSettings();
+			origin = settings?.host
+				? `${settings.https ? "https" : "http"}://${settings.host}`
+				: settings?.serverIp
+					? `http://${settings.serverIp}:3000`
+					: null;
+		}
+		if (!origin) return url;
+		const target = new URL(url);
+		const canonical = new URL(origin);
+		target.protocol = canonical.protocol;
+		target.host = canonical.host;
+		return target.toString();
+	} catch {
+		return url;
+	}
+};
+
 const createBetterAuth = () =>
 	betterAuth({
 		database: drizzleAdapter(db, {
@@ -217,6 +240,8 @@ const createBetterAuth = () =>
 			"/admin/oauth2/create-client",
 			"/admin/oauth2/update-client",
 			"/admin/oauth2/resources",
+			"/organization/update-member-role",
+			"/organization/invite-member",
 			// GHSA-j8v8-g9cx-5qf4: SCIM providers are managed via tRPC, org-scoped only.
 			"/scim/generate-token",
 			"/scim/list-provider-connections",
@@ -426,7 +451,7 @@ const createBetterAuth = () =>
 					await sendVerificationEmail({
 						userName: user.name || "User",
 						email: user.email,
-						verificationUrl: url,
+						verificationUrl: await rewriteToCanonicalOrigin(url),
 					});
 				}
 			},
@@ -445,11 +470,12 @@ const createBetterAuth = () =>
 				},
 			},
 			sendResetPassword: async ({ user, url }) => {
+				const safeUrl = await rewriteToCanonicalOrigin(url);
 				await sendEmail({
 					email: user.email,
 					subject: "Reset your password",
 					text: `
-				<p>Click the link to reset your password: <a href="${url}">Reset Password</a></p>
+				<p>Click the link to reset your password: <a href="${safeUrl}">Reset Password</a></p>
 				`,
 				});
 			},
@@ -994,15 +1020,59 @@ async function logRejectedSessionCookie(cookieHeader: string) {
 
 type UserRow = typeof schema.user.$inferSelect;
 
+type MemberRow = { role: string; organization: { ownerId: string } };
+
+const toMemberSession = (
+	userFromDb: UserRow,
+	organizationId: string,
+	member: MemberRow | undefined,
+) => ({
+	session: {
+		userId: userFromDb.id,
+		activeOrganizationId: organizationId,
+	},
+	user: {
+		id: userFromDb.id,
+		name: userFromDb.firstName, // Map firstName back to name for better-auth
+		email: userFromDb.email,
+		emailVerified: userFromDb.emailVerified,
+		image: userFromDb.image,
+		createdAt: userFromDb.createdAt,
+		updatedAt: userFromDb.updatedAt,
+		twoFactorEnabled: userFromDb.twoFactorEnabled,
+		role: member?.role || "member",
+		ownerId: member?.organization.ownerId || userFromDb.id,
+		enableEnterpriseFeatures: userFromDb.enableEnterpriseFeatures,
+		isValidEnterpriseLicense: userFromDb.isValidEnterpriseLicense,
+	},
+});
+
+type MemberSession = ReturnType<typeof toMemberSession>;
+
 /**
  * Synthesizes the `{ session, user }` shape tRPC's context expects for a
  * user acting inside one organization without a browser session. Shared by
  * the API-key branch of `validateRequest` and the MCP endpoint.
+ *
+ * `requireMember` answers null when the user holds no membership of the
+ * organization (an API key outlives the membership of the user it belongs
+ * to, so it must not turn into a session of that organization).
  */
-export const buildMemberSession = async (
+export async function buildMemberSession(
 	userFromDb: UserRow,
 	organizationId: string,
-) => {
+	options: { requireMember: true },
+): Promise<MemberSession | null>;
+export async function buildMemberSession(
+	userFromDb: UserRow,
+	organizationId: string,
+	options?: { requireMember?: boolean },
+): Promise<MemberSession>;
+export async function buildMemberSession(
+	userFromDb: UserRow,
+	organizationId: string,
+	options?: { requireMember?: boolean },
+): Promise<MemberSession | null> {
 	const member = await db.query.member.findFirst({
 		where: and(
 			eq(schema.member.userId, userFromDb.id),
@@ -1013,27 +1083,12 @@ export const buildMemberSession = async (
 		},
 	});
 
-	return {
-		session: {
-			userId: userFromDb.id,
-			activeOrganizationId: organizationId,
-		},
-		user: {
-			id: userFromDb.id,
-			name: userFromDb.firstName, // Map firstName back to name for better-auth
-			email: userFromDb.email,
-			emailVerified: userFromDb.emailVerified,
-			image: userFromDb.image,
-			createdAt: userFromDb.createdAt,
-			updatedAt: userFromDb.updatedAt,
-			twoFactorEnabled: userFromDb.twoFactorEnabled,
-			role: member?.role || "member",
-			ownerId: member?.organization.ownerId || userFromDb.id,
-			enableEnterpriseFeatures: userFromDb.enableEnterpriseFeatures,
-			isValidEnterpriseLicense: userFromDb.isValidEnterpriseLicense,
-		},
-	};
-};
+	if (!member && options?.requireMember) {
+		return null;
+	}
+
+	return toMemberSession(userFromDb, organizationId, member);
+}
 
 /**
  * Outcome of checking a Dokploy API key. A key that is over its per-key rate
@@ -1044,7 +1099,7 @@ export const buildMemberSession = async (
 export type ApiKeyVerification =
 	| {
 			status: "valid";
-			member: Awaited<ReturnType<typeof buildMemberSession>> & {
+			member: MemberSession & {
 				session: { apiKeyId: string };
 			};
 	  }
@@ -1138,7 +1193,12 @@ export const verifyApiKeyDetailed = async (
 			return { status: "invalid" };
 		}
 
-		const member = await buildMemberSession(apiKeyRecord.user, organizationId);
+		const member = await buildMemberSession(apiKeyRecord.user, organizationId, {
+			requireMember: true,
+		});
+		if (!member) {
+			return { status: "invalid" };
+		}
 		return {
 			status: "valid",
 			// The key id rides on the session so a cancel can be traced to the key.

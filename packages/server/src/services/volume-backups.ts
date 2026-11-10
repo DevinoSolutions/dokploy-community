@@ -8,6 +8,7 @@ import {
 	mounts,
 	volumeBackups,
 } from "../db/schema";
+import { findComposeById } from "./compose";
 
 export const findVolumeBackupById = async (volumeBackupId: string) => {
 	const volumeBackup = await db.query.volumeBackups.findFirst({
@@ -173,4 +174,23 @@ export const findRestorableVolumeNames = async (
 			.map((row) => row.volumeName)
 			.filter((name): name is string => !!name),
 	);
+};
+
+// Compose volumes can be renamed (`name:`) or external, so on top of the
+// service's own volumes (see findRestorableVolumeNames) a compose may also
+// restore the volumes Docker Compose names after its project (`<appName>_...`).
+export const isRestorableVolumeName = async (
+	serviceId: string,
+	serviceType: "application" | "compose",
+	volumeName: string,
+) => {
+	const own = await findRestorableVolumeNames(serviceId, serviceType);
+	if (own.has(volumeName)) {
+		return true;
+	}
+	if (serviceType !== "compose") {
+		return false;
+	}
+	const compose = await findComposeById(serviceId);
+	return volumeName.startsWith(`${compose.appName}_`);
 };

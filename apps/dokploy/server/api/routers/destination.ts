@@ -1,4 +1,5 @@
 import {
+	assertServerAccess,
 	createDestination,
 	execAsync,
 	execAsyncRemote,
@@ -51,6 +52,7 @@ export const destinationRouter = createTRPCRouter({
 	testConnection: withPermission("destination", "create")
 		.input(apiCreateDestination)
 		.mutation(async ({ input, ctx }) => {
+			await assertServerAccess(ctx.session, input.serverId ?? null);
 			const {
 				secretAccessKey,
 				bucket,

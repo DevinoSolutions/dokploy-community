@@ -8,7 +8,7 @@ import {
 	findGithubById,
 	findPreviewDeploymentByApplicationId,
 	findPreviewDeploymentByComposeId,
-	findPreviewDeploymentsByPullRequestId,
+	findPreviewDeploymentsByPullRequestIdForGithub,
 	IS_CLOUD,
 	normalizeChangedFilesFromCommits,
 	removePreviewDeployment,
@@ -432,7 +432,10 @@ export default async function handler(
 
 		if (action === "closed") {
 			const previewDeploymentResult =
-				await findPreviewDeploymentsByPullRequestId(prId);
+				await findPreviewDeploymentsByPullRequestIdForGithub(
+					prId,
+					githubResult.githubId,
+				);
 
 			if (previewDeploymentResult.length > 0) {
 				for (const previewDeployment of previewDeploymentResult) {

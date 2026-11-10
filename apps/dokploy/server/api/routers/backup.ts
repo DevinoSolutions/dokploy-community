@@ -833,28 +833,49 @@ export const backupRouter = createTRPCRouter({
 			const queue: string[] = [];
 			let done = false;
 			const onLog = (log: string) => queue.push(log);
+			const assertBackupFileInService = (...folders: string[]) => {
+				if (
+					input.backupFile.split("/").includes("..") ||
+					!folders.some((folder) => input.backupFile.startsWith(`${folder}/`))
+				) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "Backup file does not belong to this service",
+					});
+				}
+			};
 			const runRestore = async () => {
 				if (isInstanceRestore) {
 					await restoreWebServerBackup(destination, input.backupFile, onLog);
 				} else if (input.backupType === "database") {
 					if (input.databaseType === "postgres") {
 						const postgres = await findPostgresById(input.databaseId);
+						assertBackupFileInService(postgres.appName);
 						await restorePostgresBackup(postgres, destination, input, onLog);
 					} else if (input.databaseType === "mysql") {
 						const mysql = await findMySqlById(input.databaseId);
+						assertBackupFileInService(mysql.appName);
 						await restoreMySqlBackup(mysql, destination, input, onLog);
 					} else if (input.databaseType === "mariadb") {
 						const mariadb = await findMariadbById(input.databaseId);
+						assertBackupFileInService(mariadb.appName);
 						await restoreMariadbBackup(mariadb, destination, input, onLog);
 					} else if (input.databaseType === "mongo") {
 						const mongo = await findMongoById(input.databaseId);
+						assertBackupFileInService(mongo.appName);
 						await restoreMongoBackup(mongo, destination, input, onLog);
 					} else if (input.databaseType === "libsql") {
 						const libsql = await findLibsqlById(input.databaseId);
+						assertBackupFileInService(libsql.appName);
 						await restoreLibsqlBackup(libsql, destination, input, onLog);
 					}
 				} else if (input.backupType === "compose") {
 					const compose = await findComposeById(input.databaseId);
+					const serviceName = input.metadata?.serviceName;
+					assertBackupFileInService(
+						compose.appName,
+						...(serviceName ? [`${compose.appName}_${serviceName}`] : []),
+					);
 					await restoreComposeBackup(compose, destination, input, onLog);
 				}
 			};

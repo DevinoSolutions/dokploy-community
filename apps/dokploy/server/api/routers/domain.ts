@@ -162,6 +162,16 @@ export const domainRouter = createTRPCRouter({
 		.input(apiCreateDomain)
 		.mutation(async ({ input, ctx }) => {
 			try {
+				if (
+					!input.applicationId &&
+					!input.composeId &&
+					!input.previewDeploymentId
+				) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "A target service is required",
+					});
+				}
 				// Gate by the service the domain attaches to, keyed off the id(s)
 				// present rather than `domainType` (which is optional and defaults to
 				// "application"). Both ids are checked independently so a caller can't
@@ -174,6 +184,14 @@ export const domainRouter = createTRPCRouter({
 				}
 				if (input.applicationId) {
 					await checkServicePermissionAndAccess(ctx, input.applicationId, {
+						domain: ["create"],
+					});
+				}
+				if (input.previewDeploymentId) {
+					const preview = await findPreviewDeploymentById(
+						input.previewDeploymentId,
+					);
+					await checkServicePermissionAndAccess(ctx, preview.applicationId, {
 						domain: ["create"],
 					});
 				}

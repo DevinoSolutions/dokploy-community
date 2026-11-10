@@ -23,7 +23,7 @@ import {
 } from "@dokploy/server/services/destination";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import { findServerById } from "@dokploy/server/services/server";
-import { findRestorableVolumeNames } from "@dokploy/server/services/volume-backups";
+import { isRestorableVolumeName } from "@dokploy/server/services/volume-backups";
 import {
 	execAsyncRemote,
 	execAsyncStream,
@@ -347,7 +347,16 @@ export const volumeBackupsRouter = createTRPCRouter({
 		})
 		.input(
 			z.object({
-				backupFileName: z.string().min(1),
+				backupFileName: z
+					.string()
+					.min(1)
+					.refine(
+						(name) =>
+							!name.startsWith("/") &&
+							!name.split("/").includes("..") &&
+							!/[\0\r\n]/.test(name),
+						"Invalid backup file name",
+					),
 				destinationId: z.string().min(1),
 				volumeName: z
 					.string()
@@ -364,11 +373,13 @@ export const volumeBackupsRouter = createTRPCRouter({
 			});
 			// The restore removes and recreates the named Docker volume, so it
 			// must be one of this service's own volumes, not any volume on the host.
-			const restorableVolumes = await findRestorableVolumeNames(
-				input.id,
-				input.serviceType,
-			);
-			if (!restorableVolumes.has(input.volumeName)) {
+			if (
+				!(await isRestorableVolumeName(
+					input.id,
+					input.serviceType,
+					input.volumeName,
+				))
+			) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "This volume does not belong to the service.",
