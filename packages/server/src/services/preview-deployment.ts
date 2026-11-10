@@ -477,8 +477,7 @@ export const findPreviewDeploymentsByPullRequestIdForGithub = async (
 		},
 	});
 	return rows.filter(
-		(row) =>
-			(row.application ?? row.compose)?.githubId === githubId,
+		(row) => (row.application ?? row.compose)?.githubId === githubId,
 	);
 };
 

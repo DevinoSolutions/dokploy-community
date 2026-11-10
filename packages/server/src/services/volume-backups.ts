@@ -158,14 +158,18 @@ export const findRestorableVolumeNames = async (
 	serviceId: string,
 	serviceType: "application" | "compose",
 ) => {
-	const serviceColumn = serviceType === "compose" ? "composeId" : "applicationId";
+	const serviceColumn =
+		serviceType === "compose" ? "composeId" : "applicationId";
 	const [backupRows, mountRows] = await Promise.all([
 		db.query.volumeBackups.findMany({
 			where: eq(volumeBackups[serviceColumn], serviceId),
 			columns: { volumeName: true },
 		}),
 		db.query.mounts.findMany({
-			where: and(eq(mounts[serviceColumn], serviceId), eq(mounts.type, "volume")),
+			where: and(
+				eq(mounts[serviceColumn], serviceId),
+				eq(mounts.type, "volume"),
+			),
 			columns: { volumeName: true },
 		}),
 	]);

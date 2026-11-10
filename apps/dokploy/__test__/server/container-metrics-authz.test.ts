@@ -374,7 +374,9 @@ describe("user.getContainerMetrics: the names the UI sends", () => {
 			expect(fetchMock).toHaveBeenCalledWith(
 				`http://localhost:3001/metrics/containers?limit=50&appName=${appName}`,
 				// providerFetch adds a redirect refusal, a timeout and a guarded dispatcher.
-				expect.objectContaining({ headers: { Authorization: "Bearer metrics" } }),
+				expect.objectContaining({
+					headers: { Authorization: "Bearer metrics" },
+				}),
 			);
 		},
 	);
@@ -414,7 +416,9 @@ describe("user.getContainerMetrics: the names the UI sends", () => {
 		expect(fetchMock).toHaveBeenCalledWith(
 			"http://203.0.113.10:4500/metrics/containers?limit=50&appName=app-r-abc123",
 			// providerFetch adds a redirect refusal, a timeout and a guarded dispatcher.
-			expect.objectContaining({ headers: { Authorization: "Bearer remote-token" } }),
+			expect.objectContaining({
+				headers: { Authorization: "Bearer remote-token" },
+			}),
 		);
 		// the same service asked for on the local host is not there
 		await expect(metrics("app-r-abc123")).rejects.toMatchObject(notFound);

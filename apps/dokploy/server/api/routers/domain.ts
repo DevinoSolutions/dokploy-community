@@ -414,9 +414,7 @@ export const domainRouter = createTRPCRouter({
 			return generated;
 		}),
 	canGenerateTraefikMeDomains: withPermission("domain", "read")
-		.input(
-			z.object({ serverId: z.string(), projectId: z.string().optional() }),
-		)
+		.input(z.object({ serverId: z.string(), projectId: z.string().optional() }))
 		.query(async ({ input, ctx }) => {
 			if (input.projectId) {
 				await assertProjectInOrganization(
