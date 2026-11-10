@@ -27,6 +27,7 @@ import { db } from "@dokploy/server/db";
 import {
 	addNewService,
 	assertEnvironmentInOrganization,
+	checkEnvironmentAccess,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
@@ -37,6 +38,7 @@ import {
 } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { quote } from "shell-quote";
 import { z } from "zod";
 import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
@@ -458,7 +460,15 @@ export const redisRouter = createTRPCRouter({
 				});
 			}
 
-			const command = `docker exec ${container.Id} redis-cli -a '${databasePassword}' CONFIG SET requirepass '${password}'`;
+			const command = `docker exec ${container.Id} ${quote([
+				"redis-cli",
+				"-a",
+				databasePassword,
+				"CONFIG",
+				"SET",
+				"requirepass",
+				password,
+			])}`;
 
 			await db.transaction(async (tx) => {
 				await tx
@@ -490,6 +500,7 @@ export const redisRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await checkEnvironmentAccess(ctx, input.targetEnvironmentId, "read");
 			await checkServicePermissionAndAccess(ctx, input.redisId, {
 				service: ["create"],
 			});

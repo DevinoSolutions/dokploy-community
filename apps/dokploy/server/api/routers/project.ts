@@ -46,6 +46,7 @@ import {
 	assertServiceInOrganization,
 	checkPermission,
 	checkProjectAccess,
+	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
@@ -1186,6 +1187,9 @@ export const projectRouter = createTRPCRouter({
 							selected.id,
 							ctx.session.activeOrganizationId,
 						);
+						await checkServicePermissionAndAccess(ctx, selected.id, {
+							service: ["read"],
+						});
 						// The copy keeps the registry, git provider and SSH key ids of the
 						// source row: one of another organization is refused, not copied.
 						if (selected.type === "application") {

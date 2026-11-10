@@ -57,9 +57,11 @@ import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
 	assertEnvironmentInOrganization,
+	checkEnvironmentAccess,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
+	hasPermission,
 } from "@dokploy/server/services/permission";
 import {
 	listEnvKeys,
@@ -390,6 +392,8 @@ export const applicationRouter = createTRPCRouter({
 				}
 			}
 
+			const canEdit = await hasPermission(ctx, { service: ["create"] });
+			const canDeploy = await hasPermission(ctx, { deployment: ["create"] });
 			return {
 				...shapeServiceRead(application, input.includeEnv),
 				hasGitProviderAccess,
@@ -1673,6 +1677,7 @@ export const applicationRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await checkEnvironmentAccess(ctx, input.targetEnvironmentId, "read");
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});

@@ -75,10 +75,13 @@ import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
 	assertEnvironmentInOrganization,
+	checkEnvironmentAccess,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
+	hasPermission,
 } from "@dokploy/server/services/permission";
+
 import {
 	listEnvKeys,
 	shapeServiceRead,
@@ -133,6 +136,7 @@ import {
 	TEMPLATE_CLONE_ENV,
 	TemplateFileRefusedError,
 } from "@/server/utils/template-file-read";
+import { containerBelongsToService } from "@/server/wss/container-ownership";
 import { generatePassword } from "@/templates/utils";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { audit } from "../utils/audit";
@@ -290,6 +294,7 @@ export const composeRouter = createTRPCRouter({
 				}
 			}
 
+			const canDeploy = await hasPermission(ctx, { deployment: ["create"] });
 			return {
 				...shapeServiceRead(compose, input.includeEnv),
 				hasGitProviderAccess,
@@ -1619,6 +1624,7 @@ export const composeRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await checkEnvironmentAccess(ctx, input.targetEnvironmentId, "read");
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
@@ -2101,6 +2107,18 @@ export const composeRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "UNAUTHORIZED",
 					message: "You are not authorized to access this compose",
+				});
+			}
+			if (
+				!(await containerBelongsToService(
+					input.composeId,
+					input.containerId,
+					compose.serverId,
+				))
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "Container does not belong to this compose",
 				});
 			}
 			return await getContainerLogs(

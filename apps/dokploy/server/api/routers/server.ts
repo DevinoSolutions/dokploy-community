@@ -33,6 +33,7 @@ import {
 } from "@dokploy/server/services/permission";
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
 import { scrubCommandFields } from "@dokploy/server/services/service-secrets";
+import { findSSHKeyById } from "@dokploy/server/services/ssh-key";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, getTableColumns, isNotNull, sql } from "drizzle-orm";
@@ -127,6 +128,20 @@ const toServerOptions = async (
 	}));
 };
 
+const assertSshKeyInOrganization = async (
+	sshKeyId: string | null | undefined,
+	organizationId: string,
+) => {
+	if (!sshKeyId) return;
+	const sshKey = await findSSHKeyById(sshKeyId);
+	if (sshKey.organizationId !== organizationId) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "You are not authorized to use this SSH key",
+		});
+	}
+};
+
 export const serverRouter = createTRPCRouter({
 	create: withPermission("server", "create")
 		.input(apiCreateServer)
@@ -140,6 +155,10 @@ export const serverRouter = createTRPCRouter({
 						message: "You cannot create more servers",
 					});
 				}
+				await assertSshKeyInOrganization(
+					input.sshKeyId,
+					ctx.session.activeOrganizationId,
+				);
 				const project = await createServer(
 					input,
 					ctx.session.activeOrganizationId,
@@ -673,17 +692,10 @@ export const serverRouter = createTRPCRouter({
 						message: "Server is inactive",
 					});
 				}
-				// The server would connect with this key: it has to be the
-				// caller's organization's.
-				if (input.sshKeyId) {
-					const sshKey = await findSSHKeyById(input.sshKeyId);
-					if (sshKey.organizationId !== ctx.session.activeOrganizationId) {
-						throw new TRPCError({
-							code: "UNAUTHORIZED",
-							message: "You are not authorized to use this SSH key",
-						});
-					}
-				}
+				await assertSshKeyInOrganization(
+					input.sshKeyId,
+					ctx.session.activeOrganizationId,
+				);
 				const currentServer = await updateServerById(input.serverId, {
 					...input,
 				});
