@@ -49,6 +49,7 @@ vi.mock("ssh2", () => ({
 		connect = mockSshConnect;
 		exec = mockSshExec;
 		end = vi.fn();
+		destroy = vi.fn();
 	},
 }));
 
