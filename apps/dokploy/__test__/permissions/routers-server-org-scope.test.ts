@@ -29,6 +29,8 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@dokploy/server")>();
 	return {
 		...actual,
+		// The member-level server scope; covered by permissions/assert-server-access.
+		assertServerAccess: vi.fn(async () => {}),
 		findServerById: vi.fn(async () => ({
 			serverId: "srv-1",
 			organizationId: "org-1",

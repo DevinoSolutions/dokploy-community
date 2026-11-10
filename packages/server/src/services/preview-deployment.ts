@@ -466,11 +466,20 @@ export const findPreviewDeploymentsByPullRequestIdForGithub = async (
 	pullRequestId: string,
 	githubId: string,
 ) => {
+	// The application table is wider than Postgres' 100-argument limit for a
+	// relational `with`, so only the column that is read is selected. A preview
+	// belongs to an application or to a compose, and both can be GitHub-sourced.
 	const rows = await db.query.previewDeployments.findMany({
 		where: eq(previewDeployments.pullRequestId, pullRequestId),
-		with: { application: true },
+		with: {
+			application: { columns: { githubId: true } },
+			compose: { columns: { githubId: true } },
+		},
 	});
-	return rows.filter((row) => row.application?.githubId === githubId);
+	return rows.filter(
+		(row) =>
+			(row.application ?? row.compose)?.githubId === githubId,
+	);
 };
 
 export const findPreviewDeploymentByApplicationId = async (

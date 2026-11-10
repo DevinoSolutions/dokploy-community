@@ -59,6 +59,10 @@ vi.mock("@/server/wss/authorize", () => ({
 vi.mock("@/server/wss/container-ownership", () => ({
 	containerBelongsToService: vi.fn(async () => true),
 }));
+// The fork resolves the container reference with resolveDockerTarget.
+vi.mock("@/server/wss/resolve-container", () => ({
+	resolveDockerTarget: vi.fn(async () => "abc123"),
+}));
 
 import { setupDockerContainerTerminalWebSocketServer } from "@/server/wss/docker-container-terminal";
 import { setupTerminalWebSocketServer } from "@/server/wss/terminal";

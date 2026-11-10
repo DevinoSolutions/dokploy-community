@@ -9,6 +9,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@dokploy/server", () => ({
 	createDomain: mocks.createDomain,
 	findPreviewDeploymentById: mocks.findPreviewDeploymentById,
+	// The fork's Cloudflare protection policy: none is configured here.
+	resolveOrgCloudflarePolicy: vi.fn(async () => null),
+	isCloudflarePublished: vi.fn(() => false),
 }));
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkServicePermissionAndAccess: mocks.checkServiceAccess,

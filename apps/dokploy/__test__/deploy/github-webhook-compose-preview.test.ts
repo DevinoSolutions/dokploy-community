@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
 	findGithubById: vi.fn(),
 	findPreviewDeploymentByApplicationId: vi.fn(),
 	findPreviewDeploymentByComposeId: vi.fn(),
-	findPreviewDeploymentsByPullRequestId: vi.fn(),
+	findPreviewDeploymentsByPullRequestIdForGithub: vi.fn(),
 	removePreviewDeployment: vi.fn(),
 }));
 
@@ -89,8 +89,8 @@ vi.mock("@dokploy/server", () => ({
 	findPreviewDeploymentByApplicationId:
 		mocks.findPreviewDeploymentByApplicationId,
 	findPreviewDeploymentByComposeId: mocks.findPreviewDeploymentByComposeId,
-	findPreviewDeploymentsByPullRequestId:
-		mocks.findPreviewDeploymentsByPullRequestId,
+	findPreviewDeploymentsByPullRequestIdForGithub:
+		mocks.findPreviewDeploymentsByPullRequestIdForGithub,
 	getBitbucketHeaders: vi.fn(() => ({})),
 	removePreviewDeployment: mocks.removePreviewDeployment,
 }));
@@ -290,7 +290,7 @@ describe("GitHub webhook compose preview deployments", () => {
 	});
 
 	it("tears down every preview of the PR on closed", async () => {
-		mocks.findPreviewDeploymentsByPullRequestId.mockResolvedValue([
+		mocks.findPreviewDeploymentsByPullRequestIdForGithub.mockResolvedValue([
 			{ previewDeploymentId: "app-preview-id" },
 			{ previewDeploymentId: "compose-preview-id" },
 		]);
@@ -298,9 +298,10 @@ describe("GitHub webhook compose preview deployments", () => {
 
 		await handler(createPullRequestRequest("closed"), res);
 
-		expect(mocks.findPreviewDeploymentsByPullRequestId).toHaveBeenCalledWith(
-			"pr-id-999",
-		);
+		// Scoped to the provider that received the webhook.
+		expect(
+			mocks.findPreviewDeploymentsByPullRequestIdForGithub,
+		).toHaveBeenCalledWith("pr-id-999", "github-provider-id");
 		expect(mocks.removePreviewDeployment).toHaveBeenCalledTimes(2);
 		expect(mocks.removePreviewDeployment).toHaveBeenCalledWith(
 			"app-preview-id",

@@ -1,5 +1,4 @@
 import {
-	assertServerAccess,
 	deleteVolumeFile,
 	findServerById,
 	getVolumeConfig,

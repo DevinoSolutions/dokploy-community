@@ -2,14 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	findGithubById: vi.fn(),
-	assertGitProviderAccess: vi.fn(),
+	assertCanUpdateGitProvider: vi.fn(),
 	updateGitProvider: vi.fn(),
 	updateGithub: vi.fn(),
 }));
 
 vi.mock("@dokploy/server", () => ({
 	findGithubById: mocks.findGithubById,
-	assertGitProviderAccess: mocks.assertGitProviderAccess,
+	assertCanUpdateGitProvider: mocks.assertCanUpdateGitProvider,
 	updateGitProvider: mocks.updateGitProvider,
 	updateGithub: mocks.updateGithub,
 	canViewGitProviderSecrets: vi.fn(async () => true),
@@ -41,6 +41,9 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.findGithubById.mockResolvedValue({
 		githubId: "gh-1",
+		gitProviderId: "gp-1",
+		// Unchanged from the input, so the app URL check is not reached.
+		githubAppName: "app",
 		gitProvider: { gitProviderId: "gp-1", organizationId: "org-a" },
 	});
 });
@@ -48,9 +51,9 @@ beforeEach(() => {
 describe("github.update — owner/admin update their own provider", () => {
 	for (const role of ["owner", "admin"]) {
 		it(`${role} can update a provider in their org`, async () => {
-			mocks.assertGitProviderAccess.mockResolvedValue(undefined);
+			mocks.assertCanUpdateGitProvider.mockResolvedValue(undefined);
 			await callerAs(role).update(input as never);
-			expect(mocks.assertGitProviderAccess).toHaveBeenCalledTimes(1);
+			expect(mocks.assertCanUpdateGitProvider).toHaveBeenCalledTimes(1);
 			expect(mocks.updateGitProvider).toHaveBeenCalledTimes(1);
 			expect(mocks.updateGithub).toHaveBeenCalledTimes(1);
 		});
@@ -59,7 +62,7 @@ describe("github.update — owner/admin update their own provider", () => {
 
 describe("github.update — cross-org takeover is blocked", () => {
 	it("rejects and does not mutate when the provider is not in the caller's org", async () => {
-		mocks.assertGitProviderAccess.mockRejectedValue(
+		mocks.assertCanUpdateGitProvider.mockRejectedValue(
 			Object.assign(new Error("not found"), { code: "NOT_FOUND" }),
 		);
 		await expect(callerAs("owner").update(input as never)).rejects.toBeTruthy();
