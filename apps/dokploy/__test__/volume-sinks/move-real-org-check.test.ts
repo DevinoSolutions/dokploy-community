@@ -31,6 +31,9 @@ vi.mock("@dokploy/server/services/permission", async (importOriginal) => ({
 		typeof import("@dokploy/server/services/permission")
 	>()),
 	checkServicePermissionAndAccess: vi.fn(async () => undefined),
+	// The member allow-list of the target environment; the organization scope
+	// under test is the real assertEnvironmentInOrganization.
+	checkEnvironmentAccess: vi.fn(async () => undefined),
 }));
 
 vi.mock("@dokploy/server/db", async (importOriginal) => ({

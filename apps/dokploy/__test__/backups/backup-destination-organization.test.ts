@@ -11,7 +11,13 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@dokploy/server/db", () => ({
-	db: { query: { destinations: { findFirst: mocks.findDestinationRow } } },
+	db: {
+		query: {
+			destinations: { findFirst: mocks.findDestinationRow },
+			// The prefixes the service's own backups write to (restore binding).
+			backups: { findMany: vi.fn(async () => [{ prefix: "app" }]) },
+		},
+	},
 }));
 
 vi.mock("@dokploy/server/services/permission", () => ({

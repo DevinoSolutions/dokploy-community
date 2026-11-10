@@ -41,6 +41,8 @@ vi.mock("@dokploy/server/services/permission", async (importOriginal) => ({
 		typeof import("@dokploy/server/services/permission")
 	>()),
 	checkProjectAccess: vi.fn(async () => undefined),
+	// Per-service read permission of each service to clone.
+	checkServicePermissionAndAccess: vi.fn(async () => undefined),
 	findMemberByUserId: vi.fn(async () => ({ accessedProjects: [] })),
 }));
 

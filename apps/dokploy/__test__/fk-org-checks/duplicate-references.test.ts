@@ -99,6 +99,8 @@ vi.mock("@dokploy/server/services/permission", () => ({
 	assertServiceInOrganization: vi.fn(),
 	checkPermission: vi.fn(),
 	checkProjectAccess: vi.fn(),
+	// Per-service read permission of each service to clone.
+	checkServicePermissionAndAccess: vi.fn(),
 	findMemberByUserId: vi.fn(),
 }));
 
