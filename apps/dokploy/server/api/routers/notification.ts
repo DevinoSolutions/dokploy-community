@@ -1442,7 +1442,10 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (input.mattermostId && notification.mattermostId !== input.mattermostId) {
+				if (
+					input.mattermostId &&
+					notification.mattermostId !== input.mattermostId
+				) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
