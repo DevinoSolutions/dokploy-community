@@ -33,7 +33,6 @@ import {
 } from "@dokploy/server/services/permission";
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
 import { scrubCommandFields } from "@dokploy/server/services/service-secrets";
-import { findSSHKeyById } from "@dokploy/server/services/ssh-key";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, getTableColumns, isNotNull, sql } from "drizzle-orm";
