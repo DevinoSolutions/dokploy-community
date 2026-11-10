@@ -795,7 +795,7 @@ const getDeploymentsByType = async (
 		where: eq(deployments[`${type}Id`], id),
 		orderBy: desc(deployments.createdAt),
 		with: {
-			rollback: true,
+			rollback: { columns: { fullContext: false } },
 		},
 	});
 	return deploymentList;
@@ -1359,4 +1359,14 @@ export const clearOldDeployments = async (
 			);
 		}
 	}
+};
+
+// The deployment behind a log file, in the shape `assertDeploymentAccess`
+// authorizes (the same row `findDeploymentById` returns).
+export const findDeploymentByLogPath = async (logPath: string) => {
+	const row = await db.query.deployments.findFirst({
+		where: eq(deployments.logPath, logPath),
+		columns: { deploymentId: true },
+	});
+	return row ? await findDeploymentById(row.deploymentId) : undefined;
 };

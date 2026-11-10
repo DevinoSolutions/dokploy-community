@@ -57,9 +57,11 @@ import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
 	assertEnvironmentInOrganization,
+	checkEnvironmentAccess,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
+	hasPermission,
 } from "@dokploy/server/services/permission";
 import {
 	listEnvKeys,
@@ -390,8 +392,16 @@ export const applicationRouter = createTRPCRouter({
 				}
 			}
 
+			const canEdit = await hasPermission(ctx, { service: ["create"] });
+			const canDeploy = await hasPermission(ctx, { deployment: ["create"] });
+			const shaped = shapeServiceRead(application, input.includeEnv);
 			return {
-				...shapeServiceRead(application, input.includeEnv),
+				...shaped,
+				// The registry password and the deploy webhook token go only to
+				// the roles that can edit or deploy the service. Read from the
+				// shaped row so an MCP redaction (includeEnv: false) stays blanked.
+				password: canEdit ? shaped.password : null,
+				refreshToken: canDeploy ? shaped.refreshToken : null,
 				hasGitProviderAccess,
 				unauthorizedProvider,
 				// Where the image was built, from the latest done deployment (T-12149).
@@ -1673,6 +1683,7 @@ export const applicationRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await checkEnvironmentAccess(ctx, input.targetEnvironmentId, "read");
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});

@@ -1,4 +1,5 @@
 import {
+	assertServerAccess,
 	createRegistry,
 	findAllRegistryByOrganizationId,
 	findRegistryById,
@@ -120,6 +121,11 @@ export const registryRouter = createTRPCRouter({
 					: undefined,
 				ctx.session?.activeOrganizationId,
 			);
+			// Upstream's per-member server scope (accessedServers) on top of the org check.
+			await assertServerAccess(
+				ctx.session,
+				input.serverId && input.serverId !== "none" ? input.serverId : null,
+			);
 			try {
 				if (IS_CLOUD && !input.serverId) {
 					throw new TRPCError({
@@ -195,6 +201,11 @@ export const registryRouter = createTRPCRouter({
 					? input.serverId
 					: undefined,
 				ctx.session?.activeOrganizationId,
+			);
+			// Upstream's per-member server scope (accessedServers) on top of the org check.
+			await assertServerAccess(
+				ctx.session,
+				input.serverId && input.serverId !== "none" ? input.serverId : null,
 			);
 
 			try {

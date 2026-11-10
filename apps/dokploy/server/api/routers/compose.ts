@@ -75,10 +75,13 @@ import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
 	assertEnvironmentInOrganization,
+	checkEnvironmentAccess,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
+	hasPermission,
 } from "@dokploy/server/services/permission";
+
 import {
 	listEnvKeys,
 	shapeServiceRead,
@@ -133,6 +136,7 @@ import {
 	TEMPLATE_CLONE_ENV,
 	TemplateFileRefusedError,
 } from "@/server/utils/template-file-read";
+import { resolveDockerTarget } from "@/server/wss/resolve-container";
 import { generatePassword } from "@/templates/utils";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { audit } from "../utils/audit";
@@ -290,8 +294,12 @@ export const composeRouter = createTRPCRouter({
 				}
 			}
 
+			const canDeploy = await hasPermission(ctx, { deployment: ["create"] });
+			const shaped = shapeServiceRead(compose, input.includeEnv);
 			return {
-				...shapeServiceRead(compose, input.includeEnv),
+				...shaped,
+				// The deploy webhook token goes only to roles that can deploy.
+				refreshToken: canDeploy ? shaped.refreshToken : null,
 				hasGitProviderAccess,
 				unauthorizedProvider,
 				// Where the image was built, from the latest done deployment (T-12149).
@@ -1619,6 +1627,7 @@ export const composeRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await checkEnvironmentAccess(ctx, input.targetEnvironmentId, "read");
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
@@ -2103,8 +2112,25 @@ export const composeRouter = createTRPCRouter({
 					message: "You are not authorized to access this compose",
 				});
 			}
+			// Service access alone must not reach other tenants' containers: the
+			// reference is resolved to the full id of a container that belongs to
+			// THIS compose on its server (the fork's resolver, shared with the
+			// docker WebSockets), and the logs are read from that id.
+			const targetId = await resolveDockerTarget({
+				user: ctx.user,
+				session: ctx.session,
+				reference: input.containerId,
+				serverId: compose.serverId,
+				serviceId: input.composeId,
+			});
+			if (!targetId) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "Container does not belong to this compose",
+				});
+			}
 			return await getContainerLogs(
-				input.containerId,
+				targetId,
 				input.tail,
 				input.since,
 				input.search,

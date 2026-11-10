@@ -26,6 +26,7 @@ import {
 	updateServerById,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import { providerFetch } from "@dokploy/server/services/logs-and-metrics/provider-fetch";
 import {
 	findMemberByUserId,
 	hasPermission,
@@ -126,6 +127,20 @@ const toServerOptions = async (
 	}));
 };
 
+const assertSshKeyInOrganization = async (
+	sshKeyId: string | null | undefined,
+	organizationId: string,
+) => {
+	if (!sshKeyId) return;
+	const sshKey = await findSSHKeyById(sshKeyId);
+	if (sshKey.organizationId !== organizationId) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "You are not authorized to use this SSH key",
+		});
+	}
+};
+
 export const serverRouter = createTRPCRouter({
 	create: withPermission("server", "create")
 		.input(apiCreateServer)
@@ -139,6 +154,10 @@ export const serverRouter = createTRPCRouter({
 						message: "You cannot create more servers",
 					});
 				}
+				await assertSshKeyInOrganization(
+					input.sshKeyId,
+					ctx.session.activeOrganizationId,
+				);
 				const project = await createServer(
 					input,
 					ctx.session.activeOrganizationId,
@@ -672,17 +691,10 @@ export const serverRouter = createTRPCRouter({
 						message: "Server is inactive",
 					});
 				}
-				// The server would connect with this key: it has to be the
-				// caller's organization's.
-				if (input.sshKeyId) {
-					const sshKey = await findSSHKeyById(input.sshKeyId);
-					if (sshKey.organizationId !== ctx.session.activeOrganizationId) {
-						throw new TRPCError({
-							code: "UNAUTHORIZED",
-							message: "You are not authorized to use this SSH key",
-						});
-					}
-				}
+				await assertSshKeyInOrganization(
+					input.sshKeyId,
+					ctx.session.activeOrganizationId,
+				);
 				const currentServer = await updateServerById(input.serverId, {
 					...input,
 				});
@@ -766,7 +778,7 @@ export const serverRouter = createTRPCRouter({
 			try {
 				const url = new URL(`${baseUrl}/metrics`);
 				url.searchParams.append("limit", input.dataPoints);
-				const response = await fetch(url.toString(), {
+				const response = await providerFetch(url.toString(), {
 					headers: {
 						Authorization: `Bearer ${token}`,
 					},

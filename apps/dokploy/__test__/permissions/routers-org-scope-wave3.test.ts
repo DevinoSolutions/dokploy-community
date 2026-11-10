@@ -88,6 +88,8 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@dokploy/server")>();
 	return {
 		...actual,
+		// The member-level server scope; covered by permissions/assert-server-access.
+		assertServerAccess: vi.fn(async () => {}),
 		findServerById: vi.fn(async () => serverRow),
 		getWebServerSettings: vi.fn(async () => ({
 			serverIp: "10.0.0.1",
@@ -553,7 +555,10 @@ describe("metrics procedures derive their endpoint from the server row", () => {
 
 		expect(fetchMock).toHaveBeenCalledWith(
 			"http://203.0.113.10:4500/metrics?limit=50",
-			{ headers: { Authorization: "Bearer remote-token" } },
+			// providerFetch adds a redirect refusal, a timeout and a guarded dispatcher.
+			expect.objectContaining({
+				headers: { Authorization: "Bearer remote-token" },
+			}),
 		);
 	});
 
@@ -582,7 +587,10 @@ describe("metrics procedures derive their endpoint from the server row", () => {
 
 		expect(fetchMock).toHaveBeenCalledWith(
 			"http://203.0.113.10:4500/metrics/containers?limit=50&appName=app",
-			{ headers: { Authorization: "Bearer remote-token" } },
+			// providerFetch adds a redirect refusal, a timeout and a guarded dispatcher.
+			expect.objectContaining({
+				headers: { Authorization: "Bearer remote-token" },
+			}),
 		);
 	});
 
@@ -598,7 +606,10 @@ describe("metrics procedures derive their endpoint from the server row", () => {
 
 		expect(fetchMock).toHaveBeenCalledWith(
 			"http://203.0.113.10:4500/metrics?limit=50",
-			{ headers: { Authorization: "Bearer remote-token" } },
+			// providerFetch adds a redirect refusal, a timeout and a guarded dispatcher.
+			expect.objectContaining({
+				headers: { Authorization: "Bearer remote-token" },
+			}),
 		);
 		expect(fetchMock).not.toHaveBeenCalledWith(
 			expect.stringContaining("169.254.169.254"),

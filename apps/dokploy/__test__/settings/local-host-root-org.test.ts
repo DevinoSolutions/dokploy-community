@@ -46,6 +46,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
+	// The member-level server scope; covered by permissions/assert-server-access.
+	assertServerAccess: async () => undefined,
 	// enterpriseProcedure asks for a licence.
 	hasValidLicense: async () => true,
 	paths: () => ({

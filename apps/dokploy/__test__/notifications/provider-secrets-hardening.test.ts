@@ -632,6 +632,41 @@ describe.each(cases)("$type notification", (c) => {
 			expect(mocks.updates).toEqual([]);
 		});
 
+		// The dashboard form does not send the provider id; a client that does
+		// must send the one of the notification it updates.
+		describe("provider id sent by the client", () => {
+			beforeEach(() => {
+				mocks.notification = storedNotification(c, {
+					[c.idKey]: c.row[c.idKey],
+				});
+			});
+
+			it("an update without the id succeeds", async () => {
+				await call(c.routerUpdate, { notificationId: "n-1", name: "Renamed" });
+				expect(mocks.updates.map((u) => u.table)).toContain("notification");
+			});
+
+			it("an update with the notification's own id succeeds", async () => {
+				await call(c.routerUpdate, {
+					notificationId: "n-1",
+					name: "Renamed",
+					[c.idKey]: c.row[c.idKey],
+				});
+				expect(mocks.updates.map((u) => u.table)).toContain("notification");
+			});
+
+			it("an update with another notification's id is refused and writes nothing", async () => {
+				await expect(
+					call(c.routerUpdate, {
+						notificationId: "n-1",
+						name: "Hijack",
+						[c.idKey]: "provider-of-org-2",
+					}),
+				).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+				expect(mocks.updates).toEqual([]);
+			});
+		});
+
 		it("through the router: a missing notification keeps its NOT_FOUND", async () => {
 			mocks.notification = null;
 

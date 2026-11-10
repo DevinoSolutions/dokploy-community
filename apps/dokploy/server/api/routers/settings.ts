@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
 	assertRunningTraefikImageKept,
+	assertServerAccess,
 	assertTraefikInstalled,
 	checkGPUStatus,
 	checkPortInUse,
@@ -1431,6 +1432,7 @@ export const settingsRouter = createTRPCRouter({
 	readDirectories: protectedProcedure
 		.input(apiServerSchema)
 		.query(async ({ ctx, input }) => {
+			await assertServerAccess(ctx.session, input?.serverId);
 			try {
 				await assertLocalHostAccess(
 					input?.serverId,
@@ -1724,7 +1726,7 @@ export const settingsRouter = createTRPCRouter({
 			return await isTraefikDashboardPortEnabled(input?.serverId);
 		}),
 
-	readStatsLogs: protectedProcedure
+	readStatsLogs: adminProcedure
 		.meta({
 			openapi: {
 				path: "/read-stats-logs",
@@ -1801,7 +1803,7 @@ export const settingsRouter = createTRPCRouter({
 
 		return !!parsedConfig?.accessLog?.filePath;
 	}),
-	toggleRequests: protectedProcedure
+	toggleRequests: adminProcedure
 		.input(
 			z.object({
 				enable: z.boolean(),
@@ -1892,6 +1894,7 @@ export const settingsRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await assertServerAccess(ctx.session, input?.serverId);
 			if (IS_CLOUD && !input.serverId) {
 				throw new Error("Select a server to enable the GPU Setup");
 			}
@@ -2174,7 +2177,7 @@ export const settingsRouter = createTRPCRouter({
 			});
 			return true;
 		}),
-	updateLogCleanup: protectedProcedure
+	updateLogCleanup: adminProcedure
 		.input(
 			z.object({
 				cronExpression: z.string().nullable(),

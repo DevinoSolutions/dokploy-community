@@ -20,6 +20,8 @@ vi.mock("@dokploy/server/services/permission", () => ({
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
+	// The member-level server scope; covered by permissions/assert-server-access.
+	assertServerAccess: async () => undefined,
 	isRootOrganization: async () => true,
 	paths: (isServer?: boolean) => ({
 		MAIN_TRAEFIK_PATH: isServer ? "/etc/dokploy/traefik" : traefikPath,

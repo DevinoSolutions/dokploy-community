@@ -33,6 +33,9 @@ vi.mock("@dokploy/server", async () => {
 
 vi.mock("@dokploy/server/services/permission", () => ({
 	assertEnvironmentInOrganization: mocks.assertEnvironmentInOrganization,
+	// The member allow-list of the target environment; the organization scope
+	// under test is assertEnvironmentInOrganization.
+	checkEnvironmentAccess: vi.fn(async () => undefined),
 	checkServicePermissionAndAccess: mocks.checkServicePermissionAndAccess,
 	checkServiceAccess: vi.fn(),
 	addNewService: vi.fn(),

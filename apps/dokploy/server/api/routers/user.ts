@@ -34,6 +34,7 @@ import {
 	session,
 	user,
 } from "@dokploy/server/db/schema";
+import { providerFetch } from "@dokploy/server/services/logs-and-metrics/provider-fetch";
 import {
 	hasPermission,
 	resolvePermissions,
@@ -760,7 +761,7 @@ export const userRouter = createTRPCRouter({
 				const url = new URL(`${baseUrl}/metrics/containers`);
 				url.searchParams.append("limit", input.dataPoints);
 				url.searchParams.append("appName", input.appName);
-				const response = await fetch(url.toString(), {
+				const response = await providerFetch(url.toString(), {
 					headers: {
 						Authorization: `Bearer ${token}`,
 					},

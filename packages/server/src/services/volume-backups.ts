@@ -8,6 +8,7 @@ import {
 	mounts,
 	volumeBackups,
 } from "../db/schema";
+import { findComposeById } from "./compose";
 
 export const findVolumeBackupById = async (volumeBackupId: string) => {
 	const volumeBackup = await db.query.volumeBackups.findFirst({
@@ -157,14 +158,18 @@ export const findRestorableVolumeNames = async (
 	serviceId: string,
 	serviceType: "application" | "compose",
 ) => {
-	const serviceColumn = serviceType === "compose" ? "composeId" : "applicationId";
+	const serviceColumn =
+		serviceType === "compose" ? "composeId" : "applicationId";
 	const [backupRows, mountRows] = await Promise.all([
 		db.query.volumeBackups.findMany({
 			where: eq(volumeBackups[serviceColumn], serviceId),
 			columns: { volumeName: true },
 		}),
 		db.query.mounts.findMany({
-			where: and(eq(mounts[serviceColumn], serviceId), eq(mounts.type, "volume")),
+			where: and(
+				eq(mounts[serviceColumn], serviceId),
+				eq(mounts.type, "volume"),
+			),
 			columns: { volumeName: true },
 		}),
 	]);
@@ -173,4 +178,23 @@ export const findRestorableVolumeNames = async (
 			.map((row) => row.volumeName)
 			.filter((name): name is string => !!name),
 	);
+};
+
+// Compose volumes can be renamed (`name:`) or external, so on top of the
+// service's own volumes (see findRestorableVolumeNames) a compose may also
+// restore the volumes Docker Compose names after its project (`<appName>_...`).
+export const isRestorableVolumeName = async (
+	serviceId: string,
+	serviceType: "application" | "compose",
+	volumeName: string,
+) => {
+	const own = await findRestorableVolumeNames(serviceId, serviceType);
+	if (own.has(volumeName)) {
+		return true;
+	}
+	if (serviceType !== "compose") {
+		return false;
+	}
+	const compose = await findComposeById(serviceId);
+	return volumeName.startsWith(`${compose.appName}_`);
 };
