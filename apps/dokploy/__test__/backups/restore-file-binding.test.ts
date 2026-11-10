@@ -22,9 +22,9 @@ describe("isBackupFileInPrefixes", () => {
 		expect(isBackupFileInPrefixes("daily/pg/x.sql.gz", ["/daily/pg/"])).toBe(
 			true,
 		);
-		expect(isBackupFileInPrefixes("daily/pg/x.sql.gz", ["other", "daily/pg"])).toBe(
-			true,
-		);
+		expect(
+			isBackupFileInPrefixes("daily/pg/x.sql.gz", ["other", "daily/pg"]),
+		).toBe(true);
 	});
 
 	it("refuses a file outside every prefix, including a sibling that only shares the start", () => {
