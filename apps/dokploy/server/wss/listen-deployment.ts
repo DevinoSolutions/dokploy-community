@@ -6,12 +6,12 @@ import {
 	IS_CLOUD,
 	validateRequest,
 } from "@dokploy/server";
+import { assertDeploymentAccess } from "@dokploy/server/services/deployment-access";
 import { encodeBase64 } from "@dokploy/server/utils/docker/utils";
 import { readValidDirectory } from "@dokploy/server/wss/utils";
 import { Client } from "ssh2";
 import { WebSocketServer } from "ws";
 import { onGuardedConnection } from "./guard";
-import { assertDeploymentAccess } from "../api/utils/deployment-access";
 
 export const setupDeploymentLogsWebSocketServer = (
 	server: http.Server<typeof http.IncomingMessage, typeof http.ServerResponse>,
@@ -68,11 +68,12 @@ export const setupDeploymentLogsWebSocketServer = (
 				user: { id: user.id },
 				session: { activeOrganizationId: session.activeOrganizationId },
 			} as Parameters<typeof assertDeploymentAccess>[0];
-			await assertDeploymentAccess(
-				ctxLike,
-				await findDeploymentByLogPath(logPath),
-				"read",
-			);
+			const deployment = await findDeploymentByLogPath(logPath);
+			if (!deployment) {
+				ws.close(4003, "Not authorized");
+				return;
+			}
+			await assertDeploymentAccess(ctxLike, deployment, "read");
 		} catch {
 			ws.close(4003, "Not authorized");
 			return;

@@ -4,7 +4,10 @@ import {
 	backups,
 	member,
 } from "@dokploy/server/db/schema";
-import { isBackupFileInPrefixes } from "@dokploy/server/db/validations/backup";
+import {
+	isBackupFileInPrefixes,
+	isRelativeBackupFile,
+} from "@dokploy/server/db/validations/backup";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, or } from "drizzle-orm";
@@ -197,10 +200,25 @@ export const validateBackupServiceBinding = (
 // services share. It has to lie below a prefix one of the service's own backups
 // writes to (the fork stores `normalizeS3Path(prefix)` + file, with no per-service
 // folder), and may not climb out of it or start at the root.
+//
+// Owners and admins (`anyPrefix`) are not held to the service's current
+// prefixes, which a rename under a backup policy, a manual prefix edit, a
+// detached policy or a recreated database all change; they keep the `..` and
+// absolute path refusal.
 export const assertBackupFileBelongsToService = async (
 	serviceId: string,
 	backupFile: string,
+	options: { anyPrefix?: boolean } = {},
 ) => {
+	if (options.anyPrefix) {
+		if (!isRelativeBackupFile(backupFile)) {
+			throw new TRPCError({
+				code: "UNAUTHORIZED",
+				message: "Backup file does not belong to this service",
+			});
+		}
+		return;
+	}
 	const rows = await db.query.backups.findMany({
 		where: or(
 			eq(backups.postgresId, serviceId),

@@ -198,6 +198,61 @@ describe("backup endpoints scope destinations to the active organization", () =>
 		expect(mocks.restorePostgresBackup).toHaveBeenCalledTimes(1);
 	});
 
+	describe("restore file binding by role", () => {
+		// The service's current backups write below "app/"; this file sits
+		// elsewhere (a renamed project, an edited prefix, a recreated database).
+		const elsewhere = { ...restoreInput, backupFile: "old-name/2024.sql.gz" };
+
+		beforeEach(() => {
+			mocks.findDestinationRow.mockResolvedValue(ownDestination);
+		});
+
+		for (const role of ["owner", "admin"]) {
+			it(`${role} can restore a file outside the current prefixes`, async () => {
+				const stream = await callerAs(role).restoreBackupWithLogs({
+					...elsewhere,
+					destinationId: "dest-a",
+				});
+				await drain(stream);
+				expect(mocks.restorePostgresBackup).toHaveBeenCalledTimes(1);
+			});
+
+			it(`${role} still cannot use '..' or an absolute path`, async () => {
+				for (const backupFile of ["../x.sql.gz", "/etc/x.sql.gz"]) {
+					const stream = await callerAs(role).restoreBackupWithLogs({
+						...restoreInput,
+						backupFile,
+						destinationId: "dest-a",
+					});
+					await expect(drain(stream)).rejects.toMatchObject({
+						code: "UNAUTHORIZED",
+					});
+				}
+				expect(mocks.restorePostgresBackup).not.toHaveBeenCalled();
+			});
+		}
+
+		it("a member is bound to the service's current prefixes", async () => {
+			const stream = await callerAs("member").restoreBackupWithLogs({
+				...elsewhere,
+				destinationId: "dest-a",
+			});
+			await expect(drain(stream)).rejects.toMatchObject({
+				code: "UNAUTHORIZED",
+			});
+			expect(mocks.restorePostgresBackup).not.toHaveBeenCalled();
+		});
+
+		it("a member can restore a file below the current prefix", async () => {
+			const stream = await callerAs("member").restoreBackupWithLogs({
+				...restoreInput,
+				destinationId: "dest-a",
+			});
+			await drain(stream);
+			expect(mocks.restorePostgresBackup).toHaveBeenCalledTimes(1);
+		});
+	});
+
 	it("rejects a web-server schedule on a destination from another organization", async () => {
 		mocks.findDestinationRow.mockResolvedValue(foreignDestination);
 

@@ -53,6 +53,7 @@ const mockValidateRequest = vi.hoisted(() => vi.fn());
 const mockFindServerById = vi.hoisted(() => vi.fn());
 const mockFindDeploymentByLogPath = vi.hoisted(() => vi.fn());
 const mockCheckServiceAccess = vi.hoisted(() => vi.fn());
+const mockFindPreviewDeploymentById = vi.hoisted(() => vi.fn());
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
 	validateRequest: mockValidateRequest,
@@ -61,6 +62,19 @@ vi.mock("@dokploy/server", () => ({
 }));
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkServicePermissionAndAccess: mockCheckServiceAccess,
+}));
+// assertDeploymentAccess runs for real; what it reads is mocked.
+vi.mock("@dokploy/server/services/preview-deployment", () => ({
+	findPreviewDeploymentById: mockFindPreviewDeploymentById,
+}));
+vi.mock("@dokploy/server/services/backup", () => ({ findBackupById: vi.fn() }));
+vi.mock("@dokploy/server/services/schedule", () => ({
+	assertHostScheduleAccess: vi.fn(),
+	assertScheduleOrganization: vi.fn(),
+}));
+vi.mock("@dokploy/server/services/server", () => ({ findServerById: vi.fn() }));
+vi.mock("@dokploy/server/services/volume-backups", () => ({
+	findVolumeBackupById: vi.fn(),
 }));
 vi.mock("@dokploy/server/wss/utils", () => ({
 	readValidDirectory: () => true,
@@ -175,5 +189,56 @@ describe("deployment logs websocket (#5518)", () => {
 		await closeClient(ws);
 		await new Promise((r) => setTimeout(r, 1100));
 		expect(children[0]!.signals).toEqual(["SIGTERM", "SIGKILL"]);
+	});
+
+	describe("compose preview deployment logs", () => {
+		// A compose preview row has a previewDeploymentId and neither an
+		// applicationId nor a composeId of its own.
+		const composePreviewRow = {
+			deploymentId: "dep-1",
+			applicationId: null,
+			composeId: null,
+			previewDeploymentId: "prev-1",
+			scheduleId: null,
+			backupId: null,
+			volumeBackupId: null,
+			serverId: null,
+		};
+
+		beforeEach(() => {
+			mockFindDeploymentByLogPath.mockResolvedValue(composePreviewRow);
+			mockFindPreviewDeploymentById.mockResolvedValue({
+				applicationId: null,
+				composeId: "compose-1",
+			});
+		});
+
+		it("streams the log to a member with access to the compose", async () => {
+			mockValidateRequest.mockResolvedValue(AUTH);
+			const ws = await connect();
+			await flush();
+
+			expect(mockCheckServiceAccess).toHaveBeenCalledWith(
+				expect.anything(),
+				"compose-1",
+				{ deployment: ["read"] },
+			);
+			expect(children).toHaveLength(1);
+			await closeClient(ws);
+		});
+
+		it("refuses the log of a compose of another organization", async () => {
+			mockValidateRequest.mockResolvedValue(AUTH);
+			mockCheckServiceAccess.mockRejectedValue(
+				Object.assign(new Error("not found"), { code: "UNAUTHORIZED" }),
+			);
+			const ws = new WebSocket(url);
+			const closed = new Promise<number>((r) =>
+				ws.once("close", (code) => r(code)),
+			);
+
+			expect(await closed).toBe(4003);
+			expect(children).toHaveLength(0);
+		});
 	});
 });

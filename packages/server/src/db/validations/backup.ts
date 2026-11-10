@@ -42,11 +42,14 @@ export const isSafeRestoreFilePath = (value: string) =>
  * never allowed, and a root prefix (empty after normalization) covers the whole
  * destination, as it does for the backups themselves.
  */
+export const isRelativeBackupFile = (backupFile: string) =>
+	!backupFile.startsWith("/") && !backupFile.split("/").includes("..");
+
 export const isBackupFileInPrefixes = (
 	backupFile: string,
 	prefixes: readonly string[],
 ) => {
-	if (backupFile.startsWith("/") || backupFile.split("/").includes("..")) {
+	if (!isRelativeBackupFile(backupFile)) {
 		return false;
 	}
 	return prefixes.some((prefix) => {

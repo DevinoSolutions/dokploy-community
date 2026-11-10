@@ -829,6 +829,7 @@ export const backupRouter = createTRPCRouter({
 				await assertBackupFileBelongsToService(
 					input.databaseId,
 					input.backupFile,
+					{ anyPrefix: ctx.user.role === "owner" || ctx.user.role === "admin" },
 				);
 			}
 			const destination = await findDestinationByIdForOrganization(

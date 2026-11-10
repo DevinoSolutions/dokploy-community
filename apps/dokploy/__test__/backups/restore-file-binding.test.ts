@@ -82,6 +82,36 @@ describe("assertBackupFileBelongsToService", () => {
 		}
 	});
 
+	it("lets an owner or admin restore from any prefix, but never '..' or an absolute path", async () => {
+		mockDb.query.backups.findMany.mockResolvedValue([{ prefix: "daily/pg" }]);
+		await expect(
+			assertBackupFileBelongsToService("pg-1", "renamed/pg/x.sql.gz", {
+				anyPrefix: true,
+			}),
+		).resolves.toBeUndefined();
+		// also for a recreated database with no backup row yet
+		mockDb.query.backups.findMany.mockResolvedValue([]);
+		await expect(
+			assertBackupFileBelongsToService("pg-2", "old-project/x.sql.gz", {
+				anyPrefix: true,
+			}),
+		).resolves.toBeUndefined();
+		for (const file of ["../x.sql.gz", "a/../../x.sql.gz", "/etc/x.sql.gz"]) {
+			await expect(
+				assertBackupFileBelongsToService("pg-1", file, { anyPrefix: true }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		}
+	});
+
+	it("keeps a member bound to the current prefixes", async () => {
+		mockDb.query.backups.findMany.mockResolvedValue([{ prefix: "daily/pg" }]);
+		await expect(
+			assertBackupFileBelongsToService("pg-1", "renamed/pg/x.sql.gz", {
+				anyPrefix: false,
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+	});
+
 	it("refuses every file when the service has no backup at all", async () => {
 		mockDb.query.backups.findMany.mockResolvedValue([]);
 		await expect(

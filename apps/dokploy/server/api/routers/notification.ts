@@ -394,7 +394,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.slackId !== input.slackId) {
+				if (input.slackId && notification.slackId !== input.slackId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -478,7 +478,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.telegramId !== input.telegramId) {
+				if (input.telegramId && notification.telegramId !== input.telegramId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -563,7 +563,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.discordId !== input.discordId) {
+				if (input.discordId && notification.discordId !== input.discordId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -649,7 +649,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.emailId !== input.emailId) {
+				if (input.emailId && notification.emailId !== input.emailId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -739,7 +739,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.resendId !== input.resendId) {
+				if (input.resendId && notification.resendId !== input.resendId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1209,7 +1209,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.gotifyId !== input.gotifyId) {
+				if (input.gotifyId && notification.gotifyId !== input.gotifyId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1308,7 +1308,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.ntfyId !== input.ntfyId) {
+				if (input.ntfyId && notification.ntfyId !== input.ntfyId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1442,7 +1442,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.mattermostId !== input.mattermostId) {
+				if (input.mattermostId && notification.mattermostId !== input.mattermostId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1525,7 +1525,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.customId !== input.customId) {
+				if (input.customId && notification.customId !== input.customId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1631,7 +1631,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.larkId !== input.larkId) {
+				if (input.larkId && notification.larkId !== input.larkId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1713,7 +1713,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.teamsId !== input.teamsId) {
+				if (input.teamsId && notification.teamsId !== input.teamsId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1796,7 +1796,7 @@ export const notificationRouter = createTRPCRouter({
 						message: "You are not authorized to update this notification",
 					});
 				}
-				if (notification.pushoverId !== input.pushoverId) {
+				if (input.pushoverId && notification.pushoverId !== input.pushoverId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
