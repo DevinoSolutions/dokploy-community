@@ -34,3 +34,23 @@ export const isSafeRestoreFilePath = (value: string) =>
 	value.endsWith(".tar") &&
 	!value.startsWith("/") &&
 	!value.split("/").includes("..");
+
+/**
+ * Whether a file picked for a restore lies below one of the destination
+ * prefixes the service's own backups write to (`<prefix>/<file>`, the same
+ * layout `normalizeS3Path` produces). A `..` segment or a leading slash is
+ * never allowed, and a root prefix (empty after normalization) covers the whole
+ * destination, as it does for the backups themselves.
+ */
+export const isBackupFileInPrefixes = (
+	backupFile: string,
+	prefixes: readonly string[],
+) => {
+	if (backupFile.startsWith("/") || backupFile.split("/").includes("..")) {
+		return false;
+	}
+	return prefixes.some((prefix) => {
+		const normalized = prefix.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+		return normalized === "" || backupFile.startsWith(`${normalized}/`);
+	});
+};

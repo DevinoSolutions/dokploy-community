@@ -4,9 +4,10 @@ import {
 	backups,
 	member,
 } from "@dokploy/server/db/schema";
+import { isBackupFileInPrefixes } from "@dokploy/server/db/validations/backup";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import { TRPCError } from "@trpc/server";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import type { z } from "zod";
 
 export type Backup = typeof backups.$inferSelect;
@@ -192,6 +193,38 @@ export const validateBackupServiceBinding = (
 // Instance backups (the Dokploy web server itself) belong to no service and
 // no project. The backup row records only its creator (`userId`) and its
 // destination.
+// Restore reads a file the client names from the destination, which several
+// services share. It has to lie below a prefix one of the service's own backups
+// writes to (the fork stores `normalizeS3Path(prefix)` + file, with no per-service
+// folder), and may not climb out of it or start at the root.
+export const assertBackupFileBelongsToService = async (
+	serviceId: string,
+	backupFile: string,
+) => {
+	const rows = await db.query.backups.findMany({
+		where: or(
+			eq(backups.postgresId, serviceId),
+			eq(backups.mysqlId, serviceId),
+			eq(backups.mariadbId, serviceId),
+			eq(backups.mongoId, serviceId),
+			eq(backups.libsqlId, serviceId),
+			eq(backups.composeId, serviceId),
+		),
+		columns: { prefix: true },
+	});
+	if (
+		!isBackupFileInPrefixes(
+			backupFile,
+			rows.map((row) => row.prefix),
+		)
+	) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "Backup file does not belong to this service",
+		});
+	}
+};
+
 export const isInstanceBackup = (
 	backup: BackupServiceIds & { databaseType: string },
 ) => backup.databaseType === "web-server" || !getBackupServiceId(backup);

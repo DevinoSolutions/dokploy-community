@@ -29,6 +29,7 @@ import {
 	updateBackupById,
 } from "@dokploy/server";
 import {
+	assertBackupFileBelongsToService,
 	assertInstanceBackupInOrganization,
 	getBackupServiceId,
 	getBackupServiceIds,
@@ -825,6 +826,10 @@ export const backupRouter = createTRPCRouter({
 				await checkServicePermissionAndAccess(ctx, input.databaseId, {
 					backup: ["restore"],
 				});
+				await assertBackupFileBelongsToService(
+					input.databaseId,
+					input.backupFile,
+				);
 			}
 			const destination = await findDestinationByIdForOrganization(
 				input.destinationId,
