@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.31.0** | Fork version **v0.31.0-community.2**
+Based on **Dokploy v0.31.0** | Fork version **v0.31.0-community.3**
 
 Everything in upstream Dokploy **v0.31.0**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.2 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.3 \
   --with-registry-auth \
   dokploy
 ```
@@ -121,10 +121,11 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.31.0-community.2
+## What's new in v0.31.0-community.3
 
-- Composes no longer recreate every container (databases included) on their first deploy after upgrading to v0.31: Dokploy's new metadata labels are only added to compose services when the organization uses logs and metrics telemetry.
-- No database migration, and an image-only rollback to v0.31.0-community.1 keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Upstream Dokploy's security fixes released after v0.31.0: organization and role checks across routers, webhooks and sign-in, hidden registry passwords and webhook tokens, no SSH private key in the web server settings, and shell-safe database password changes and mount deletes.
+- Terminal SSH sessions close with the browser connection, and scheduled jobs are restored before Dokploy accepts requests.
+- No database migration, and an image-only rollback to v0.31.0-community.2 keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -139,7 +140,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.31.0-community.2
+export DOKPLOY_VERSION=v0.31.0-community.3
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -152,7 +153,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.2      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.3      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -195,7 +196,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.31.0-community.2` is the 2nd fork release on top of Dokploy v0.31.0.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.31.0-community.3` is the 3rd fork release on top of Dokploy v0.31.0.
 
 ## Contributing
 
