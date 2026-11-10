@@ -169,12 +169,11 @@ export const gitlabRouter = createTRPCRouter({
 					gitProviderId: gitlab.gitProviderId,
 				});
 			}
-			await updateGitlab(input.gitlabId, data);
 
 			await audit(ctx, {
 				action: "update",
 				resourceType: "gitProvider",
-				resourceId: existing.gitProvider.gitProviderId,
+				resourceId: gitlab.gitProviderId,
 				resourceName: input.name,
 			});
 		}),

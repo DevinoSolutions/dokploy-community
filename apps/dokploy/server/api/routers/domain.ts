@@ -191,9 +191,14 @@ export const domainRouter = createTRPCRouter({
 					const preview = await findPreviewDeploymentById(
 						input.previewDeploymentId,
 					);
-					await checkServicePermissionAndAccess(ctx, preview.applicationId, {
-						domain: ["create"],
-					});
+					// A preview belongs to an application or (fork) to a compose.
+					await checkServicePermissionAndAccess(
+						ctx,
+						(preview.composeId ?? preview.applicationId) as string,
+						{
+							domain: ["create"],
+						},
+					);
 				}
 
 				const isAdmin = ctx.user.role === "owner" || ctx.user.role === "admin";
