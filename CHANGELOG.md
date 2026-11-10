@@ -2,6 +2,28 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.31.0-community.3
+
+Upstream Dokploy's security fixes released after v0.31.0 are merged into the fork (upstream canary 1048bcb, #623).
+
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.2 keeps working. API keys now need their owner to still be a member of the key's organization. Members can restore a database backup only from the backup folders of that service's own backup schedules; owners and admins can restore from any folder of the destination. This release includes everything in v0.31.0-community.2.
+
+**Security.**
+
+- Organization and role checks across routers, webhooks and sign-in: projects, environments and services can no longer be moved into another organization, servers only accept SSH keys from their own organization, and every deployment type is authorized before its logs or processes are reached.
+- Registry passwords and webhook tokens are hidden from roles that cannot use them, and deployment lists no longer return rollback contexts. The web server settings no longer return the server's SSH private key.
+- `user.update` only changes profile fields.
+- Database password changes are shell-quoted, and local file mounts are deleted without a shell.
+- A mount can no longer be moved to another service with `mounts.update`.
+- Restoring a backup refuses `..` and absolute file paths.
+
+**Fixed.**
+
+- Terminal SSH sessions are closed when the browser's terminal connection closes.
+- Scheduled jobs are restored before Dokploy accepts requests.
+- Access log cleanup rewrites `access.log` in place, so Traefik keeps writing to it.
+- Named compose volumes and backup names with dots can be restored.
+
 ### New in v0.31.0-community.2
 
 A compose no longer recreates its containers, databases included, on its first deploy after upgrading to v0.31.
