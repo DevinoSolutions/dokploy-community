@@ -18,16 +18,7 @@ import {
 	getGithubToken,
 	haveGithubRequirements,
 } from "@dokploy/server/utils/providers/github";
-import {
-	and,
-	desc,
-	eq,
-	inArray,
-	isNotNull,
-	isNull,
-	ne,
-	or,
-} from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
 import { quote } from "shell-quote";
 import {
 	LIVE_BUILD_RUN_STATUSES,

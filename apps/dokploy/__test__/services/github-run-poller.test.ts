@@ -612,9 +612,7 @@ describe("a run Dokploy cannot read, superseded by a newer deployed run", () => 
 	});
 
 	it("never touches a row whose deploy waits in the queue", async () => {
-		rows = [
-			unreadableRow({ deployQueuedAt: new Date(START).toISOString() }),
-		];
+		rows = [unreadableRow({ deployQueuedAt: new Date(START).toISOString() })];
 		newerDeployedRun.mockResolvedValue(newerRun);
 		await makePoller().poll();
 		expect(newerDeployedRun).not.toHaveBeenCalled();

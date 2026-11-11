@@ -534,3 +534,50 @@ describe.skipIf(!ready)("M4: the stops that target the running build", () => {
 		expect((await rowsOfService())[0]?.status).toBe("running");
 	});
 });
+
+describe.skipIf(!ready)(
+	"a run Dokploy cannot read, superseded by a newer deployed run",
+	() => {
+		it("ends the unreadable row once the newer run's deploy took over, with the real query", async () => {
+			const exec = (sql: string) =>
+				(client as NonNullable<typeof client>).exec(sql);
+			const old = await register(42);
+			const newer = await register(43);
+			await exec(
+				`UPDATE "deployment" SET "createdAt" = '2026-11-02T09:00:00.000Z', "buildRunStep" = 'steps not readable', "buildRunStatus" = 'in_progress' WHERE "deploymentId" = '${old.deploymentId}'`,
+			);
+			await exec(
+				`UPDATE "deployment" SET "createdAt" = '2026-11-02T09:30:00.000Z' WHERE "deploymentId" = '${newer.deploymentId}'`,
+			);
+
+			const clock = { now: START + MINUTE };
+			const poller = pollerModule.createGithubRunPoller({
+				...pollerDeps.createDefaultGithubRunPollerDeps(),
+				now: () => clock.now,
+				fetchRun: async () => ({ kind: "unreadable" as const }),
+				readLog: async () => "",
+				appendLines: async () => {},
+			});
+
+			// The newer run only registered: nothing deployed yet, so the old row keeps running.
+			await poller.poll();
+			const byRun = async (run: string) =>
+				(await rowsOfService()).find((row) => row.buildRunId === run);
+			expect(await byRun("42")).toMatchObject({ status: "running" });
+
+			// A deploy took the newer row over.
+			await exec(
+				`UPDATE "deployment" SET "externalBuildOnly" = false, "deployStartedAt" = '2026-11-02T09:31:00.000Z' WHERE "deploymentId" = '${newer.deploymentId}'`,
+			);
+			clock.now += 2 * MINUTE;
+			await poller.poll();
+			expect(await byRun("42")).toMatchObject({
+				status: "cancelled",
+				buildRunStatus: "completed",
+				errorMessage:
+					"GitHub Actions run #42 was superseded: run #43 deployed this service since. Dokploy cannot read this run's result.",
+			});
+			expect((await byRun("43"))?.status).toBe("running");
+		});
+	},
+);
