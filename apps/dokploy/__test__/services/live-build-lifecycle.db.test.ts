@@ -536,40 +536,80 @@ describe.skipIf(!ready)("M4: the stops that target the running build", () => {
 });
 
 describe.skipIf(!ready)(
-	"a run Dokploy cannot read, superseded by a newer deployed run",
+	"a run Dokploy cannot read, superseded by a later deployed run",
 	() => {
-		it("ends the unreadable row once the newer run's deploy took over, with the real query", async () => {
-			const exec = (sql: string) =>
-				(client as NonNullable<typeof client>).exec(sql);
-			const old = await register(42);
-			const newer = await register(43);
-			await exec(
-				`UPDATE "deployment" SET "createdAt" = '2026-11-02T09:00:00.000Z', "buildRunStep" = 'steps not readable', "buildRunStatus" = 'in_progress' WHERE "deploymentId" = '${old.deploymentId}'`,
+		const exec = (sql: string) =>
+			(client as NonNullable<typeof client>).exec(sql);
+		const byRun = async (run: string, service = "app-1") =>
+			(await rowsOfService()).find(
+				(row) =>
+					row.buildRunId === run &&
+					(row.applicationId === service || row.composeId === service),
 			);
-			await exec(
-				`UPDATE "deployment" SET "createdAt" = '2026-11-02T09:30:00.000Z' WHERE "deploymentId" = '${newer.deploymentId}'`,
-			);
-
-			const clock = { now: START + MINUTE };
-			const poller = pollerModule.createGithubRunPoller({
+		const insert = (values: Record<string, unknown>) =>
+			(
+				holder.db as never as {
+					insert: (t: unknown) => { values: (v: unknown) => Promise<unknown> };
+				}
+			)
+				.insert(deployments)
+				.values({
+					title: "other",
+					logPath: "x",
+					buildOrigin: "github-actions",
+					buildRepository: "acme/web",
+					createdAt: "2026-11-02T09:30:00.000Z",
+					...values,
+				});
+		/** A row that already waited an hour and a half, unreadable, when the clock starts. */
+		const unreadable = async (
+			run: number,
+			where: { applicationId?: string; composeId?: string } = {},
+		) => {
+			const id = `old-${run}-${where.composeId ?? "app"}`;
+			await insert({
+				deploymentId: id,
+				...where,
+				...(where.composeId ? {} : { applicationId: "app-1" }),
+				status: "running",
+				buildRunId: String(run),
+				buildRunUrl: `https://github.com/acme/web/actions/runs/${run}`,
+				buildRunStatus: "in_progress",
+				buildRunStep: "steps not readable",
+				externalBuildOnly: true,
+				createdAt: "2026-11-02T08:00:00.000Z",
+				startedAt: "2026-11-02T08:00:00.000Z",
+			});
+			return id;
+		};
+		const makePoller = (clock: { now: number }) =>
+			pollerModule.createGithubRunPoller({
 				...pollerDeps.createDefaultGithubRunPollerDeps(),
 				now: () => clock.now,
 				fetchRun: async () => ({ kind: "unreadable" as const }),
 				readLog: async () => "",
 				appendLines: async () => {},
 			});
+		const clock = () => ({ now: START + 30 * MINUTE });
 
-			// The newer run only registered: nothing deployed yet, so the old row keeps running.
+		it("ends the unreadable row once a later run's deploy took over, with the real query", async () => {
+			const old = await register(42);
+			const newer = await register(43);
+			await exec(
+				`UPDATE "deployment" SET "createdAt" = '2026-11-02T08:00:00.000Z', "startedAt" = '2026-11-02T08:00:00.000Z', "buildRunStep" = 'steps not readable', "buildRunStatus" = 'in_progress' WHERE "deploymentId" = '${old.deploymentId}'`,
+			);
+			const time = clock();
+			const poller = makePoller(time);
+
+			// The later run only registered: nothing deployed yet, so the old row keeps running.
 			await poller.poll();
-			const byRun = async (run: string) =>
-				(await rowsOfService()).find((row) => row.buildRunId === run);
 			expect(await byRun("42")).toMatchObject({ status: "running" });
 
-			// A deploy took the newer row over.
+			// A deploy took the later row over.
 			await exec(
 				`UPDATE "deployment" SET "externalBuildOnly" = false, "deployStartedAt" = '2026-11-02T09:31:00.000Z' WHERE "deploymentId" = '${newer.deploymentId}'`,
 			);
-			clock.now += 2 * MINUTE;
+			time.now += 2 * MINUTE;
 			await poller.poll();
 			expect(await byRun("42")).toMatchObject({
 				status: "cancelled",
@@ -578,6 +618,95 @@ describe.skipIf(!ready)(
 					"GitHub Actions run #42 was superseded: run #43 deployed this service since. Dokploy cannot read this run's result.",
 			});
 			expect((await byRun("43"))?.status).toBe("running");
+		});
+
+		it("works for a compose service", async () => {
+			const id = await unreadable(42, { composeId: "compose-1" });
+			await insert({
+				deploymentId: "later-compose",
+				composeId: "compose-1",
+				status: "done",
+				buildRunId: "43",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/43",
+				externalBuildOnly: false,
+			});
+			await makePoller(clock()).poll();
+			expect(await byRun("42", "compose-1")).toMatchObject({
+				deploymentId: id,
+				status: "cancelled",
+			});
+		});
+
+		it("a re-run that deployed supersedes the first attempt of the same run", async () => {
+			await unreadable(42);
+			await insert({
+				deploymentId: "rerun",
+				applicationId: "app-1",
+				status: "done",
+				buildRunId: "42",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/42/attempts/2",
+				externalBuildOnly: false,
+			});
+			await makePoller(clock()).poll();
+			expect(
+				(await rowsOfService()).find((r) => r.deploymentId === "old-42-app"),
+			).toMatchObject({
+				status: "cancelled",
+				errorMessage: expect.stringContaining("run #42 (attempt 2) deployed"),
+			});
+		});
+
+		it("does not count a later row that only waits in the queue", async () => {
+			await unreadable(42);
+			await insert({
+				deploymentId: "queued",
+				applicationId: "app-1",
+				status: "running",
+				buildRunId: "43",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/43",
+				externalBuildOnly: true,
+				deployQueuedAt: "2026-11-02T09:31:00.000Z",
+				buildRunStatus: "deploy_queued",
+			});
+			await makePoller(clock()).poll();
+			expect(await byRun("42")).toMatchObject({ status: "running" });
+		});
+
+		it("does not count a later deployed row of another service or repository", async () => {
+			await unreadable(42);
+			await insert({
+				deploymentId: "other-service",
+				applicationId: "app-2",
+				status: "done",
+				buildRunId: "43",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/43",
+				externalBuildOnly: false,
+			});
+			await insert({
+				deploymentId: "other-repo",
+				applicationId: "app-1",
+				status: "done",
+				buildRepository: "acme/api",
+				buildRunId: "44",
+				buildRunUrl: "https://github.com/acme/api/actions/runs/44",
+				externalBuildOnly: false,
+			});
+			await makePoller(clock()).poll();
+			expect(await byRun("42")).toMatchObject({ status: "running" });
+		});
+
+		it("does not let an older run that deployed later (a rollback) supersede it", async () => {
+			await unreadable(50);
+			await insert({
+				deploymentId: "rollback",
+				applicationId: "app-1",
+				status: "done",
+				buildRunId: "41",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/41",
+				externalBuildOnly: false,
+			});
+			await makePoller(clock()).poll();
+			expect(await byRun("50")).toMatchObject({ status: "running" });
 		});
 	},
 );

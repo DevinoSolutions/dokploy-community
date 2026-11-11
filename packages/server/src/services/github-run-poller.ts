@@ -1,4 +1,7 @@
-import { GITHUB_RUN_STEP_UNREADABLE } from "./build-origin-shared";
+import {
+	GITHUB_RUN_STEP_UNREADABLE,
+	parseBuildRunUrl,
+} from "./build-origin-shared";
 import {
 	type ExternalBuildConclusion,
 	externalBuildOutcome,
@@ -26,11 +29,15 @@ import {
  * - A run that completed with failure or cancel and was not taken over ends the row (error / cancelled).
  * - A run that succeeded leaves the row 10 minutes for the deploy call to take it over; after that it ends as error
  *   ("Run finished without deploying to Dokploy").
- * - A row whose run Dokploy cannot read (steps not readable) ends as cancelled ("superseded") as soon as a newer
- *   GitHub Actions row of the same service, for a different run, was taken over by a deploy or finished. A runner
- *   that dies mid-build never closes its row, and nothing can read the run to learn it; the newer deployed run
- *   proves the old one is no longer the service's. Checked at most once a minute per row, never for a row whose
- *   deploy waits in the queue, never for a row whose run is readable (its conclusion ends it).
+ * - A row whose run Dokploy cannot read (steps not readable) ends as cancelled ("superseded") once it is older than
+ *   60 minutes and a LATER run of the same repository deployed the same service: a deployed row (a deploy took it
+ *   over, or it finished) whose run id is higher, or whose run id is the same at a higher attempt ("Re-run failed
+ *   jobs"). An older run that deployed later (a rollback) does not count, nor does a row of another repository,
+ *   nor one still waiting in the queue. A runner that dies mid-build never closes its row, and nothing can read the
+ *   run to learn it; the later deployed run proves the old one is no longer the service's. The 60 minutes protect a
+ *   run still building while another workflow of the repository deploys the same service. Checked at most once a
+ *   minute per row, never for a row whose deploy waits in the queue, never for a row whose run is readable (its
+ *   conclusion ends it).
  * - A row older than 6 hours that nothing took over ends as error: "run finished without deploying". This is the
  *   backstop for runs Dokploy cannot read.
  */
@@ -54,6 +61,11 @@ export const MAX_READS_PER_PASS = 25;
 export const DEPLOY_QUEUED_BACKSTOP_MS = 24 * 60 * 60_000;
 /** How often a row Dokploy cannot read is checked for a newer run that deployed its service. */
 export const SUPERSEDED_CHECK_INTERVAL_MS = 60_000;
+/**
+ * A row younger than this is never superseded: another workflow of the same repository may target the same service
+ * and deploy while this run still builds. Normal builds end well within it.
+ */
+export const SUPERSEDE_MIN_AGE_MS = 60 * 60_000;
 
 export const RUN_UNREADABLE_LINE = `${GITHUB_LOG_PREFIX} Dokploy cannot read this run, so the steps are not shown here. Connect GitHub in Settings to see them, or open the run.`;
 
@@ -94,16 +106,59 @@ export type RunFetchResult =
 	| { kind: "unreadable" }
 	| { kind: "backoff"; retryAfterMs: number };
 
+/** A deployed GitHub Actions row of a service, as far as the superseded check needs it. */
+export type DeployedRunRow = {
+	buildRunId: string;
+	/** The normalised run link; names the attempt when the run was re-run. */
+	buildRunUrl: string | null;
+	/** `owner/name`. */
+	buildRepository: string | null;
+};
+
+const attemptOf = (row: { buildRunUrl: string | null }): number => {
+	const attempt = Number(parseBuildRunUrl(row.buildRunUrl)?.attempt);
+	return Number.isInteger(attempt) && attempt > 0 ? attempt : 1;
+};
+
+const runLabel = (row: { buildRunId: string; buildRunUrl: string | null }) => {
+	const attempt = attemptOf(row);
+	return `#${row.buildRunId}${attempt > 1 ? ` (attempt ${attempt})` : ""}`;
+};
+
+const bigIntOf = (value: string): bigint | null => {
+	try {
+		return BigInt(value);
+	} catch {
+		return null;
+	}
+};
+
+/**
+ * Whether a deployed row is a later run of the same repository than the live row: a higher run id (GitHub run ids
+ * only grow), or the same run at a higher attempt ("Re-run failed jobs"). An older run that deployed later (a
+ * rollback) is not later, however recent its row.
+ */
+export const isLaterRun = (
+	live: Pick<LiveRunRow, "buildRepository" | "buildRunId" | "buildRunUrl">,
+	deployed: DeployedRunRow,
+): boolean => {
+	if (deployed.buildRepository !== live.buildRepository) return false;
+	const liveId = bigIntOf(live.buildRunId);
+	const deployedId = bigIntOf(deployed.buildRunId);
+	if (liveId === null || deployedId === null) return false;
+	if (deployedId !== liveId) return deployedId > liveId;
+	return attemptOf(deployed) > attemptOf(live);
+};
+
 export interface PollerDeps {
 	now: () => number;
 	listLiveRows: () => Promise<LiveRunRow[]>;
 	/**
-	 * The newest GitHub Actions row of the same service (application or compose) for another run that a deploy took
-	 * over or that finished, or null. The poller only acts when it was created after the live row.
+	 * The latest GitHub Actions rows of the same service (application or compose) and repository that a deploy took
+	 * over or that finished, newest first, a small number of them. Never the row itself nor another row of its run
+	 * link. Whether one of them is a later run than the live row is decided here, not by the query.
 	 */
-	newerDeployedRun: (
-		row: LiveRunRow,
-	) => Promise<{ buildRunId: string; createdAt: string } | null>;
+	deployedRunsOfService: (row: LiveRunRow) => Promise<DeployedRunRow[]>;
 	fetchRun: (row: LiveRunRow) => Promise<RunFetchResult>;
 	/** The tail of the deployment log, to know which lines are already in it. */
 	readLog: (row: LiveRunRow) => Promise<string>;
@@ -274,20 +329,14 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 		if (
 			(state.lastStep === GITHUB_RUN_STEP_UNREADABLE ||
 				row.buildRunStep === GITHUB_RUN_STEP_UNREADABLE) &&
+			now - startedAt > SUPERSEDE_MIN_AGE_MS &&
 			now - state.supersededCheckedAt >= SUPERSEDED_CHECK_INTERVAL_MS
 		) {
 			state.supersededCheckedAt = now;
-			const newer = await deps.newerDeployedRun(row);
-			const newerAt = timeOf(newer?.createdAt);
-			const rowAt = timeOf(row.createdAt);
-			if (
-				newer &&
-				newer.buildRunId !== row.buildRunId &&
-				newerAt !== null &&
-				rowAt !== null &&
-				newerAt > rowAt
-			) {
-				const message = `GitHub Actions run #${row.buildRunId} was superseded: run #${newer.buildRunId} deployed this service since. Dokploy cannot read this run's result.`;
+			const candidates = await deps.deployedRunsOfService(row);
+			const newer = candidates.find((candidate) => isLaterRun(row, candidate));
+			if (newer) {
+				const message = `GitHub Actions run ${runLabel(row)} was superseded: run ${runLabel(newer)} deployed this service since. Dokploy cannot read this run's result.`;
 				await endBecause(
 					row,
 					state,

@@ -27,6 +27,7 @@ import {
 import { appendGithubLines } from "./external-build";
 import {
 	createGithubRunPoller,
+	type DeployedRunRow,
 	type LiveRunRow,
 	POLL_INTERVAL_MS,
 	type PollerDeps,
@@ -84,33 +85,44 @@ const listLiveRows = async (): Promise<LiveRunRow[]> => {
 	);
 };
 
+/** How many deployed rows of a service the superseded check looks at. */
+const DEPLOYED_RUNS_LIMIT = 20;
+
 /**
- * The newest GitHub Actions row of the same service for another run that a deploy took over (deployStartedAt) or
- * finished ('done', or no longer external-only). Column projection only: a deployment row carries large fields.
- * The poller compares its createdAt with the live row's; the newest row not being newer means none is.
+ * The latest GitHub Actions rows of the same service and repository that a deploy took over (deployStartedAt) or
+ * finished ('done', or no longer external-only), newest first. Never the row itself nor another row of its run
+ * link. Column projection only: a deployment row carries large fields. Whether one is a later run than the live row
+ * is the poller's decision (isLaterRun).
  */
-const newerDeployedRun = async (
+const deployedRunsOfService = async (
 	row: LiveRunRow,
-): Promise<{ buildRunId: string; createdAt: string } | null> => {
+): Promise<DeployedRunRow[]> => {
 	const target = row.applicationId
 		? eq(deployments.applicationId, row.applicationId)
 		: row.composeId
 			? eq(deployments.composeId, row.composeId)
 			: null;
-	if (!target) return null;
-	const [found] = await db
+	if (!target) return [];
+	const found = await db
 		.select({
 			buildRunId: deployments.buildRunId,
-			createdAt: deployments.createdAt,
+			buildRunUrl: deployments.buildRunUrl,
+			buildRepository: deployments.buildRepository,
 		})
 		.from(deployments)
 		.where(
 			and(
 				target,
 				eq(deployments.buildOrigin, "github-actions"),
+				eq(deployments.buildRepository, row.buildRepository),
 				isNotNull(deployments.buildRunId),
-				ne(deployments.buildRunId, row.buildRunId),
 				ne(deployments.deploymentId, row.deploymentId),
+				row.buildRunUrl
+					? or(
+							isNull(deployments.buildRunUrl),
+							ne(deployments.buildRunUrl, row.buildRunUrl),
+						)
+					: undefined,
 				or(
 					isNotNull(deployments.deployStartedAt),
 					eq(deployments.status, "done"),
@@ -119,10 +131,12 @@ const newerDeployedRun = async (
 			),
 		)
 		.orderBy(desc(deployments.createdAt))
-		.limit(1);
-	return found?.buildRunId
-		? { buildRunId: found.buildRunId, createdAt: found.createdAt }
-		: null;
+		.limit(DEPLOYED_RUNS_LIMIT);
+	return found.flatMap((deployed) =>
+		deployed.buildRunId
+			? [{ ...deployed, buildRunId: deployed.buildRunId }]
+			: [],
+	);
 };
 
 const organizationOf = async (row: LiveRunRow): Promise<string | null> => {
@@ -393,7 +407,7 @@ const runStillGoing = and(
 export const createDefaultGithubRunPollerDeps = (): PollerDeps => ({
 	now: () => Date.now(),
 	listLiveRows,
-	newerDeployedRun,
+	deployedRunsOfService,
 	fetchRun,
 	readLog,
 	appendLines: async (row, lines) => {

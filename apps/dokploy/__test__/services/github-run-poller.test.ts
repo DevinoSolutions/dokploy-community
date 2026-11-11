@@ -2,6 +2,7 @@ import { GITHUB_RUN_STEP_UNREADABLE } from "@dokploy/server/services/build-origi
 import {
 	createGithubRunPoller,
 	DEPLOY_TAKEOVER_GRACE_MS,
+	type DeployedRunRow,
 	type LiveRunRow,
 	MAX_LIVE_ROW_AGE_MS,
 	MAX_READS_PER_PASS,
@@ -9,6 +10,7 @@ import {
 	type PollerDeps,
 	RUN_UNREADABLE_LINE,
 	type RunFetchResult,
+	SUPERSEDE_MIN_AGE_MS,
 	SUPERSEDED_CHECK_INTERVAL_MS,
 	UNAUTHENTICATED_POLL_INTERVAL_MS,
 	UNREADABLE_POLL_INTERVAL_MS,
@@ -107,14 +109,14 @@ const appended: string[][] = [];
 const setProgress = vi.fn<PollerDeps["setProgress"]>();
 const markRunFinished = vi.fn<PollerDeps["markRunFinished"]>();
 const endRow = vi.fn<PollerDeps["endRow"]>();
-const newerDeployedRun = vi.fn<PollerDeps["newerDeployedRun"]>();
+const deployedRunsOfService = vi.fn<PollerDeps["deployedRunsOfService"]>();
 const readLog = vi.fn<PollerDeps["readLog"]>();
 
 const makePoller = () =>
 	createGithubRunPoller({
 		now: () => clock,
 		listLiveRows: async () => rows,
-		newerDeployedRun,
+		deployedRunsOfService,
 		fetchRun,
 		readLog,
 		appendLines: async (_row, lines) => {
@@ -138,7 +140,7 @@ beforeEach(() => {
 	setProgress.mockResolvedValue(true);
 	markRunFinished.mockResolvedValue(true);
 	endRow.mockResolvedValue(true);
-	newerDeployedRun.mockResolvedValue(null);
+	deployedRunsOfService.mockResolvedValue([]);
 	fetchRun.mockResolvedValue(ok(building));
 });
 
@@ -520,48 +522,150 @@ describe("many live rows", () => {
 	});
 });
 
-describe("a run Dokploy cannot read, superseded by a newer deployed run", () => {
+describe("a run Dokploy cannot read, superseded by a later deployed run", () => {
 	const unreadableRow = (overrides: Partial<LiveRunRow> = {}) =>
 		row({
 			buildRunStep: GITHUB_RUN_STEP_UNREADABLE,
 			...overrides,
 		});
-	const newerRun = {
+	const deployed = (
+		overrides: Partial<DeployedRunRow> = {},
+	): DeployedRunRow => ({
 		buildRunId: "43",
-		createdAt: new Date(START + 30_000).toISOString(),
-	};
+		buildRunUrl: "https://github.com/acme/web/actions/runs/43",
+		buildRepository: "acme/web",
+		...overrides,
+	});
+	const message43 =
+		"GitHub Actions run #42 was superseded: run #43 deployed this service since. Dokploy cannot read this run's result.";
 
 	beforeEach(() => {
 		fetchRun.mockResolvedValue({ kind: "unreadable" });
+		// Older than the 60 minute floor, younger than the 6 hour backstop.
+		clock = START + SUPERSEDE_MIN_AGE_MS + 60_000;
 	});
 
-	it("ends the row as cancelled once a newer run deployed the service", async () => {
+	it("ends the row as cancelled once a later run deployed the service", async () => {
 		rows = [unreadableRow()];
-		newerDeployedRun.mockResolvedValue(newerRun);
+		deployedRunsOfService.mockResolvedValue([deployed()]);
 		const poller = makePoller();
 		await poller.poll();
 
-		const message =
-			"GitHub Actions run #42 was superseded: run #43 deployed this service since. Dokploy cannot read this run's result.";
 		expect(endRow).toHaveBeenCalledTimes(1);
 		expect(endRow).toHaveBeenCalledWith("dep-1", {
 			status: "cancelled",
-			errorMessage: message,
+			errorMessage: message43,
 		});
 		expect(writtenLines()).toEqual([
-			`${GITHUB_LOG_PREFIX} ${message}`,
+			`${GITHUB_LOG_PREFIX} ${message43}`,
 			`${GITHUB_LOG_PREFIX} Open the run: https://github.com/acme/web/actions/runs/42`,
 		]);
 		expect(fetchRun).not.toHaveBeenCalled();
 		expect(poller.followedCount()).toBe(0);
 	});
 
-	it("also ends a row that only learned it is unreadable in this process", async () => {
-		rows = [row()];
-		newerDeployedRun.mockResolvedValue(newerRun);
+	it("a re-run (same run, attempt 2) supersedes attempt 1", async () => {
+		rows = [unreadableRow()];
+		deployedRunsOfService.mockResolvedValue([
+			deployed({
+				buildRunId: "42",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/42/attempts/2",
+			}),
+		]);
+		await makePoller().poll();
+		expect(endRow).toHaveBeenCalledWith("dep-1", {
+			status: "cancelled",
+			errorMessage:
+				"GitHub Actions run #42 was superseded: run #42 (attempt 2) deployed this service since. Dokploy cannot read this run's result.",
+		});
+	});
+
+	it("an attempt 2 row is superseded by attempt 3, not by attempt 2 or 1", async () => {
+		rows = [
+			unreadableRow({
+				buildRunUrl: "https://github.com/acme/web/actions/runs/42/attempts/2",
+			}),
+		];
+		deployedRunsOfService.mockResolvedValue([
+			deployed({
+				buildRunId: "42",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/42/attempts/2",
+			}),
+			deployed({
+				buildRunId: "42",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/42",
+			}),
+		]);
 		const poller = makePoller();
 		await poller.poll();
-		// The first pass reads the run, finds it unreadable and marks the row; no newer run is asked yet.
+		expect(endRow).not.toHaveBeenCalled();
+		clock += SUPERSEDED_CHECK_INTERVAL_MS;
+		deployedRunsOfService.mockResolvedValue([
+			deployed({
+				buildRunId: "42",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/42/attempts/3",
+			}),
+		]);
+		await poller.poll();
+		expect(endRow).toHaveBeenCalledTimes(1);
+	});
+
+	it("compares run ids as numbers, not as text", async () => {
+		rows = [unreadableRow({ buildRunId: "9" })];
+		deployedRunsOfService.mockResolvedValue([deployed({ buildRunId: "10" })]);
+		await makePoller().poll();
+		expect(endRow).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not count a deployed row of another repository", async () => {
+		rows = [unreadableRow()];
+		deployedRunsOfService.mockResolvedValue([
+			deployed({
+				buildRepository: "acme/other",
+				buildRunUrl: "https://github.com/acme/other/actions/runs/43",
+			}),
+		]);
+		await makePoller().poll();
+		expect(endRow).not.toHaveBeenCalled();
+	});
+
+	it("does not let an older run that deployed later (a rollback) supersede a newer live run", async () => {
+		rows = [
+			unreadableRow({
+				buildRunId: "50",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/50",
+			}),
+		];
+		deployedRunsOfService.mockResolvedValue([
+			deployed({
+				buildRunId: "41",
+				buildRunUrl: "https://github.com/acme/web/actions/runs/41",
+			}),
+		]);
+		await makePoller().poll();
+		expect(deployedRunsOfService).toHaveBeenCalledTimes(1);
+		expect(endRow).not.toHaveBeenCalled();
+	});
+
+	it("leaves a row younger than the age floor alone, without asking", async () => {
+		clock = START + SUPERSEDE_MIN_AGE_MS;
+		rows = [unreadableRow()];
+		deployedRunsOfService.mockResolvedValue([deployed()]);
+		const poller = makePoller();
+		await poller.poll();
+		expect(deployedRunsOfService).not.toHaveBeenCalled();
+		expect(endRow).not.toHaveBeenCalled();
+		clock += 1;
+		await poller.poll();
+		expect(endRow).toHaveBeenCalledTimes(1);
+	});
+
+	it("also ends a row that only learned it is unreadable in this process", async () => {
+		rows = [row()];
+		deployedRunsOfService.mockResolvedValue([deployed()]);
+		const poller = makePoller();
+		await poller.poll();
+		// The first pass reads the run, finds it unreadable and marks the row; nothing was asked yet.
 		expect(endRow).not.toHaveBeenCalled();
 		clock += SUPERSEDED_CHECK_INTERVAL_MS;
 		await poller.poll();
@@ -571,20 +675,10 @@ describe("a run Dokploy cannot read, superseded by a newer deployed run", () => 
 		});
 	});
 
-	it("leaves the row alone when no newer run deployed", async () => {
+	it("leaves the row alone when no later run deployed", async () => {
 		rows = [unreadableRow()];
 		await makePoller().poll();
-		expect(newerDeployedRun).toHaveBeenCalledTimes(1);
-		expect(endRow).not.toHaveBeenCalled();
-	});
-
-	it("ignores a run that is not newer than the row", async () => {
-		rows = [unreadableRow()];
-		newerDeployedRun.mockResolvedValue({
-			buildRunId: "41",
-			createdAt: new Date(START - 30_000).toISOString(),
-		});
-		await makePoller().poll();
+		expect(deployedRunsOfService).toHaveBeenCalledTimes(1);
 		expect(endRow).not.toHaveBeenCalled();
 	});
 
@@ -596,32 +690,32 @@ describe("a run Dokploy cannot read, superseded by a newer deployed run", () => 
 		await poller.poll();
 		clock += SUPERSEDED_CHECK_INTERVAL_MS - POLL_INTERVAL_MS - 1;
 		await poller.poll();
-		expect(newerDeployedRun).toHaveBeenCalledTimes(1);
+		expect(deployedRunsOfService).toHaveBeenCalledTimes(1);
 		clock += 1;
 		await poller.poll();
-		expect(newerDeployedRun).toHaveBeenCalledTimes(2);
+		expect(deployedRunsOfService).toHaveBeenCalledTimes(2);
 	});
 
 	it("does not apply to a row whose run is readable", async () => {
 		fetchRun.mockResolvedValue(ok(building));
 		rows = [row({ buildRunStep: "build · Build image (2/2)" })];
-		newerDeployedRun.mockResolvedValue(newerRun);
+		deployedRunsOfService.mockResolvedValue([deployed()]);
 		await makePoller().poll();
-		expect(newerDeployedRun).not.toHaveBeenCalled();
+		expect(deployedRunsOfService).not.toHaveBeenCalled();
 		expect(endRow).not.toHaveBeenCalled();
 	});
 
 	it("never touches a row whose deploy waits in the queue", async () => {
 		rows = [unreadableRow({ deployQueuedAt: new Date(START).toISOString() })];
-		newerDeployedRun.mockResolvedValue(newerRun);
+		deployedRunsOfService.mockResolvedValue([deployed()]);
 		await makePoller().poll();
-		expect(newerDeployedRun).not.toHaveBeenCalled();
+		expect(deployedRunsOfService).not.toHaveBeenCalled();
 		expect(endRow).not.toHaveBeenCalled();
 	});
 
 	it("writes nothing more when a deploy took the row over while it was checked", async () => {
 		rows = [unreadableRow()];
-		newerDeployedRun.mockResolvedValue(newerRun);
+		deployedRunsOfService.mockResolvedValue([deployed()]);
 		endRow.mockResolvedValue(false);
 		await makePoller().poll();
 		expect(endRow).toHaveBeenCalledTimes(1);
