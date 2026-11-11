@@ -2,6 +2,14 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.31.0-community.4
+
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.3 keeps working. This release includes everything in v0.31.0-community.3.
+
+**Fixed.**
+
+- A live GitHub Actions deployment whose run Dokploy cannot read no longer stays "running" for 6 hours after its runner died mid-build. Once a later run (a higher run id) or a re-run (a higher attempt) from the same repository has deployed the same service, and the old row is at least an hour old, the old row ends as cancelled and its log names the run that superseded it. Rows whose deploy is queued, and runs Dokploy can read, are unchanged (#625).
+
 ### New in v0.31.0-community.3
 
 Upstream Dokploy's security fixes released after v0.31.0 are merged into the fork (upstream canary 1048bcb, #623).
