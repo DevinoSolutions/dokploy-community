@@ -18,7 +18,16 @@ import {
 	getGithubToken,
 	haveGithubRequirements,
 } from "@dokploy/server/utils/providers/github";
-import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import {
+	and,
+	desc,
+	eq,
+	inArray,
+	isNotNull,
+	isNull,
+	ne,
+	or,
+} from "drizzle-orm";
 import { quote } from "shell-quote";
 import {
 	LIVE_BUILD_RUN_STATUSES,
@@ -82,6 +91,47 @@ const listLiveRows = async (): Promise<LiveRunRow[]> => {
 				]
 			: [],
 	);
+};
+
+/**
+ * The newest GitHub Actions row of the same service for another run that a deploy took over (deployStartedAt) or
+ * finished ('done', or no longer external-only). Column projection only: a deployment row carries large fields.
+ * The poller compares its createdAt with the live row's; the newest row not being newer means none is.
+ */
+const newerDeployedRun = async (
+	row: LiveRunRow,
+): Promise<{ buildRunId: string; createdAt: string } | null> => {
+	const target = row.applicationId
+		? eq(deployments.applicationId, row.applicationId)
+		: row.composeId
+			? eq(deployments.composeId, row.composeId)
+			: null;
+	if (!target) return null;
+	const [found] = await db
+		.select({
+			buildRunId: deployments.buildRunId,
+			createdAt: deployments.createdAt,
+		})
+		.from(deployments)
+		.where(
+			and(
+				target,
+				eq(deployments.buildOrigin, "github-actions"),
+				isNotNull(deployments.buildRunId),
+				ne(deployments.buildRunId, row.buildRunId),
+				ne(deployments.deploymentId, row.deploymentId),
+				or(
+					isNotNull(deployments.deployStartedAt),
+					eq(deployments.status, "done"),
+					eq(deployments.externalBuildOnly, false),
+				),
+			),
+		)
+		.orderBy(desc(deployments.createdAt))
+		.limit(1);
+	return found?.buildRunId
+		? { buildRunId: found.buildRunId, createdAt: found.createdAt }
+		: null;
 };
 
 const organizationOf = async (row: LiveRunRow): Promise<string | null> => {
@@ -352,6 +402,7 @@ const runStillGoing = and(
 export const createDefaultGithubRunPollerDeps = (): PollerDeps => ({
 	now: () => Date.now(),
 	listLiveRows,
+	newerDeployedRun,
 	fetchRun,
 	readLog,
 	appendLines: async (row, lines) => {

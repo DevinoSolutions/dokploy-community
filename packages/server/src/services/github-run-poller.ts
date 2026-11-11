@@ -26,6 +26,11 @@ import {
  * - A run that completed with failure or cancel and was not taken over ends the row (error / cancelled).
  * - A run that succeeded leaves the row 10 minutes for the deploy call to take it over; after that it ends as error
  *   ("Run finished without deploying to Dokploy").
+ * - A row whose run Dokploy cannot read (steps not readable) ends as cancelled ("superseded") as soon as a newer
+ *   GitHub Actions row of the same service, for a different run, was taken over by a deploy or finished. A runner
+ *   that dies mid-build never closes its row, and nothing can read the run to learn it; the newer deployed run
+ *   proves the old one is no longer the service's. Checked at most once a minute per row, never for a row whose
+ *   deploy waits in the queue, never for a row whose run is readable (its conclusion ends it).
  * - A row older than 6 hours that nothing took over ends as error: "run finished without deploying". This is the
  *   backstop for runs Dokploy cannot read.
  */
@@ -47,6 +52,8 @@ export const MAX_READS_PER_PASS = 25;
  * waits, however long. This only closes one whose deploy never ran (a lost queue job).
  */
 export const DEPLOY_QUEUED_BACKSTOP_MS = 24 * 60 * 60_000;
+/** How often a row Dokploy cannot read is checked for a newer run that deployed its service. */
+export const SUPERSEDED_CHECK_INTERVAL_MS = 60_000;
 
 export const RUN_UNREADABLE_LINE = `${GITHUB_LOG_PREFIX} Dokploy cannot read this run, so the steps are not shown here. Connect GitHub in Settings to see them, or open the run.`;
 
@@ -90,6 +97,13 @@ export type RunFetchResult =
 export interface PollerDeps {
 	now: () => number;
 	listLiveRows: () => Promise<LiveRunRow[]>;
+	/**
+	 * The newest GitHub Actions row of the same service (application or compose) for another run that a deploy took
+	 * over or that finished, or null. The poller only acts when it was created after the live row.
+	 */
+	newerDeployedRun: (
+		row: LiveRunRow,
+	) => Promise<{ buildRunId: string; createdAt: string } | null>;
 	fetchRun: (row: LiveRunRow) => Promise<RunFetchResult>;
 	/** The tail of the deployment log, to know which lines are already in it. */
 	readLog: (row: LiveRunRow) => Promise<string>;
@@ -126,6 +140,8 @@ type RowState = {
 	finishedAt: number | null;
 	/** When GitHub was last read for this row (0: never), to serve the rows read longest ago first. */
 	lastReadAt: number;
+	/** When a newer deployed run was last looked for (0: never), for a row Dokploy cannot read. */
+	supersededCheckedAt: number;
 };
 
 const conclusionOfRun = (
@@ -177,6 +193,7 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 			lastStep: row.buildRunStep,
 			finishedAt: null,
 			lastReadAt: 0,
+			supersededCheckedAt: 0,
 		};
 		states.set(row.deploymentId, fresh);
 		return fresh;
@@ -250,6 +267,35 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 				...openRunLine(row),
 			]);
 			return;
+		}
+
+		// A run Dokploy cannot read never reports its end, and a dead runner never closes its row: a newer run of the
+		// same service that deployed shows this one is over. Asked before the (5 minute) read gate, once a minute.
+		if (
+			(state.lastStep === GITHUB_RUN_STEP_UNREADABLE ||
+				row.buildRunStep === GITHUB_RUN_STEP_UNREADABLE) &&
+			now - state.supersededCheckedAt >= SUPERSEDED_CHECK_INTERVAL_MS
+		) {
+			state.supersededCheckedAt = now;
+			const newer = await deps.newerDeployedRun(row);
+			const newerAt = timeOf(newer?.createdAt);
+			const rowAt = timeOf(row.createdAt);
+			if (
+				newer &&
+				newer.buildRunId !== row.buildRunId &&
+				newerAt !== null &&
+				rowAt !== null &&
+				newerAt > rowAt
+			) {
+				const message = `GitHub Actions run #${row.buildRunId} was superseded: run #${newer.buildRunId} deployed this service since. Dokploy cannot read this run's result.`;
+				await endBecause(
+					row,
+					state,
+					{ status: "cancelled", errorMessage: message },
+					[`${GITHUB_LOG_PREFIX} ${message}`, ...openRunLine(row)],
+				);
+				return;
+			}
 		}
 		if (now < state.nextPollAt) return;
 		if (budget.reads <= 0) return;
