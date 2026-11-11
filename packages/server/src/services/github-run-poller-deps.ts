@@ -18,7 +18,7 @@ import {
 	getGithubToken,
 	haveGithubRequirements,
 } from "@dokploy/server/utils/providers/github";
-import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
 import { quote } from "shell-quote";
 import {
 	LIVE_BUILD_RUN_STATUSES,
@@ -27,6 +27,7 @@ import {
 import { appendGithubLines } from "./external-build";
 import {
 	createGithubRunPoller,
+	type DeployedRunRow,
 	type LiveRunRow,
 	POLL_INTERVAL_MS,
 	type PollerDeps,
@@ -80,6 +81,60 @@ const listLiveRows = async (): Promise<LiveRunRow[]> => {
 						buildRunId: row.buildRunId,
 					},
 				]
+			: [],
+	);
+};
+
+/** How many deployed rows of a service the superseded check looks at. */
+const DEPLOYED_RUNS_LIMIT = 20;
+
+/**
+ * The latest GitHub Actions rows of the same service and repository that a deploy took over (deployStartedAt) or
+ * finished ('done', or no longer external-only), newest first. Never the row itself nor another row of its run
+ * link. Column projection only: a deployment row carries large fields. Whether one is a later run than the live row
+ * is the poller's decision (isLaterRun).
+ */
+const deployedRunsOfService = async (
+	row: LiveRunRow,
+): Promise<DeployedRunRow[]> => {
+	const target = row.applicationId
+		? eq(deployments.applicationId, row.applicationId)
+		: row.composeId
+			? eq(deployments.composeId, row.composeId)
+			: null;
+	if (!target) return [];
+	const found = await db
+		.select({
+			buildRunId: deployments.buildRunId,
+			buildRunUrl: deployments.buildRunUrl,
+			buildRepository: deployments.buildRepository,
+		})
+		.from(deployments)
+		.where(
+			and(
+				target,
+				eq(deployments.buildOrigin, "github-actions"),
+				eq(deployments.buildRepository, row.buildRepository),
+				isNotNull(deployments.buildRunId),
+				ne(deployments.deploymentId, row.deploymentId),
+				row.buildRunUrl
+					? or(
+							isNull(deployments.buildRunUrl),
+							ne(deployments.buildRunUrl, row.buildRunUrl),
+						)
+					: undefined,
+				or(
+					isNotNull(deployments.deployStartedAt),
+					eq(deployments.status, "done"),
+					eq(deployments.externalBuildOnly, false),
+				),
+			),
+		)
+		.orderBy(desc(deployments.createdAt))
+		.limit(DEPLOYED_RUNS_LIMIT);
+	return found.flatMap((deployed) =>
+		deployed.buildRunId
+			? [{ ...deployed, buildRunId: deployed.buildRunId }]
 			: [],
 	);
 };
@@ -352,6 +407,7 @@ const runStillGoing = and(
 export const createDefaultGithubRunPollerDeps = (): PollerDeps => ({
 	now: () => Date.now(),
 	listLiveRows,
+	deployedRunsOfService,
 	fetchRun,
 	readLog,
 	appendLines: async (row, lines) => {
