@@ -211,3 +211,22 @@ describe("redactBackupMetadata", () => {
 		expect(input.mysql.databaseRootPassword).toBe("s");
 	});
 });
+
+describe("redactBackupMetadata with a visible key that is not a string", () => {
+	it("blanks an array under databaseUser or serviceName", () => {
+		expect(
+			redactBackupMetadata({
+				serviceName: ["db-password"],
+				mysql: { databaseUser: ["pw"] },
+			}),
+		).toEqual({ serviceName: [""], mysql: { databaseUser: [""] } });
+	});
+
+	it("blanks a number or boolean under a visible key", () => {
+		expect(
+			redactBackupMetadata({
+				mongo: { databaseUser: 12345, serviceName: true },
+			}),
+		).toEqual({ mongo: { databaseUser: null, serviceName: null } });
+	});
+});

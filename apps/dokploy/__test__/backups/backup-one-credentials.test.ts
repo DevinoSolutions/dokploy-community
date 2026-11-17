@@ -603,3 +603,44 @@ describe("backupPolicy.one", () => {
 		expect(loaded).toEqual(expect.arrayContaining(["destinationId", "name"]));
 	});
 });
+
+describe("backup.backupContext on a row that names two services", () => {
+	const twoServices = () => ({
+		...composeBackup(),
+		postgresId: "pg-1",
+		postgres: dbRow("postgresId", "pg-1"),
+	});
+	const restoreOnly = (allowed: string[]) =>
+		mocks.checkServicePermissionAndAccess.mockImplementation(
+			async (_ctx: unknown, id: string, permissions: { backup?: string[] }) => {
+				if (permissions.backup?.includes("restore") && !allowed.includes(id)) {
+					throw new Error("no restore permission");
+				}
+			},
+		);
+
+	it("does not offer the restore, or the metadata credentials, when the caller may restore only the first service", async () => {
+		mocks.findBackupById.mockResolvedValue(twoServices());
+		// pg-1 is the first id on the row (see getBackupServiceIds).
+		restoreOnly(["pg-1"]);
+
+		const result = await backupRouter
+			.createCaller(ctx("member"))
+			.backupContext({ backupId: "backup-1" });
+
+		expect(result.canRestore).toBe(false);
+		expect(leaked(result)).toEqual([]);
+	});
+
+	it("offers it when the caller may restore every service on the row", async () => {
+		mocks.findBackupById.mockResolvedValue(twoServices());
+		restoreOnly(["pg-1", "compose-1"]);
+
+		const result = await backupRouter
+			.createCaller(ctx("member"))
+			.backupContext({ backupId: "backup-1" });
+
+		expect(result.canRestore).toBe(true);
+		expect(result.metadata).toEqual(composeBackup().metadata);
+	});
+});
