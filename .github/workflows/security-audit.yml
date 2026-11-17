@@ -6,9 +6,12 @@
 # Ignored advisories live in package.json (pnpm.auditConfig.ignoreGhsas):
 # - GHSA-fc5q-39xc-vjpf (picomatch ReDoS, high), added 2026-11-17: no patched
 #   release exists (every version up to 4.0.7 is affected). It reaches the tree
-#   through vite and micromatch, which glob paths this repo chooses, not user
-#   input. Remove the ignore and raise picomatch once a fixed release is out;
-#   re-check by 2026-12-17.
+#   through vite (build time) and micromatch. micromatch runs on the server:
+#   packages/server/src/utils/watch-paths/should-deploy.ts matches a service's
+#   watch paths, which a signed-in member with edit rights on that service sets,
+#   against the file list of a git webhook. So a member could store a slow
+#   pattern; it is not reachable without an account. Remove the ignore and
+#   raise picomatch once a fixed release is out; re-check by 2026-12-17.
 name: Security audit
 
 on:
