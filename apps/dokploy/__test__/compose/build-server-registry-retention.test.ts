@@ -913,8 +913,25 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 			child.stdin.end(input ?? "");
 		});
 
-	/** A registry stand-in: `latest` resolves to `state.latest`; every DELETE takes `delayMs`. */
-	const startRegistry = async (delayMs: number, onDelete?: (digest: string) => void) => {
+	/**
+	 * A registry stand-in: `latest` resolves to `state.latest`; every DELETE takes `delayMs`.
+	 *
+	 * With `gated`, a DELETE is also held until `release()` is called, so a test can
+	 * keep the job alive for exactly as long as it needs to look at it. A fixed delay
+	 * cannot do that: the job runs in real processes, and how long the shell, curl and
+	 * flock take to start depends on the load of the machine the suite runs on.
+	 */
+	const startRegistry = async (
+		delayMs: number,
+		onDelete?: (digest: string) => void,
+		options: { gated?: boolean } = {},
+	) => {
+		let release = () => {};
+		const gate = options.gated
+			? new Promise<void>((resolve) => {
+					release = resolve;
+				})
+			: null;
 		const state = {
 			latest: dg(9999),
 			/** how `latest` answers: ok, 404, no digest header, a body cut off mid-transfer, or a repeated header */
@@ -960,12 +977,16 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 			state.active += 1;
 			state.maxActive = Math.max(state.maxActive, state.active);
 			const digest = (req.url ?? "").split("/manifests/")[1] as string;
-			setTimeout(() => {
-				state.active -= 1;
-				state.deleted.push(digest);
-				onDelete?.(digest);
-				res.writeHead(202).end();
-			}, delayMs);
+			const respond = () => {
+				setTimeout(() => {
+					state.active -= 1;
+					state.deleted.push(digest);
+					onDelete?.(digest);
+					res.writeHead(202).end();
+				}, delayMs);
+			};
+			if (gate) void gate.then(respond);
+			else respond();
 		});
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -976,7 +997,7 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 				deleteUrl: `${base}/v2/a/manifests/${dg(id + 1)}`,
 				guards: [{ url: `${base}/v2/a/manifests/latest`, optional: optionalLatest }],
 			}));
-		return { state, server, base, entries };
+		return { state, server, base, entries, release };
 	};
 
 	const setup = () => {
@@ -1004,24 +1025,26 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 
 	it("runs its DELETEs one at a time after the starting command has returned, under a lock", async () => {
 		const { dir, start, status, files } = setup();
-		const registry = await startRegistry(120);
+		// Held at the registry until released, so the job is provably still going
+		// when the starting command is back, however slow the machine is to spawn it.
+		const registry = await startRegistry(120, undefined, { gated: true });
 		try {
 			const config = buildRegistryDeleteJobConfig({
 				entries: registry.entries(3),
 				username: "ci",
 				password,
 			});
-			const started = Date.now();
 			const out = await runCommand(start("aaaaaaaaaaaaaaaa"), config);
 			expect(parseRegistryJobOutput(out).kind).toBe("started");
-			// the command is back while the job (3 x 120 ms) is still going
-			expect(Date.now() - started).toBeLessThan(330);
+			// the command is back while the job has not got a single DELETE through
+			expect(registry.state.deleted).toEqual([]);
 
 			// a second start finds the lock held and sends nothing
 			const second = await runCommand(start("bbbbbbbbbbbbbbbb"), config);
 			expect(parseRegistryJobOutput(second).kind).toBe("busy");
 			expect(parseRegistryJobOutput(await runCommand(status)).kind).toBe("busy");
 
+			registry.release();
 			const result = await settle(status, [0, 1, 2]);
 			expect(result.token).toBe("aaaaaaaaaaaaaaaa");
 			expect(statusesOf(result)).toEqual([202, 202, 202]);
@@ -1036,6 +1059,7 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 			expect(parseRegistryJobOutput(third).kind).toBe("started");
 			await settle(status, [0, 1, 2]);
 		} finally {
+			registry.release();
 			registry.server.close();
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -1043,7 +1067,10 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 
 	it("200 simultaneous starts run at most one job", async () => {
 		const { dir, start, status } = setup();
-		const registry = await startRegistry(1500);
+		// The first job is held at the registry until all 200 starters are back, so
+		// none of them can find the lock free by being slow: the job used to be
+		// 1.5 s long, which 200 shell spawns on a busy machine can outlast.
+		const registry = await startRegistry(20, undefined, { gated: true });
 		try {
 			const config = buildRegistryDeleteJobConfig({
 				entries: registry.entries(2),
@@ -1058,12 +1085,14 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 			const kinds = outputs.map((output) => parseRegistryJobOutput(output).kind);
 			expect(kinds.filter((kind) => kind === "started" || kind === "late")).toHaveLength(1);
 			expect(kinds.filter((kind) => kind === "busy")).toHaveLength(199);
+			registry.release();
 			const result = await settle(status, [0, 1]);
 			expect(statusesOf(result)).toEqual([202, 202]);
 			// two DELETEs reached the registry in all, never two at once
 			expect(registry.state.deleted).toHaveLength(2);
 			expect(registry.state.maxActive).toBe(1);
 		} finally {
+			registry.release();
 			registry.server.close();
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -1293,7 +1322,8 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 
 	it("keeps the password out of every argv and environment while the job runs", async () => {
 		const { dir, start, status } = setup();
-		const registry = await startRegistry(900);
+		// Held at the registry, so curl is certainly running while /proc is read.
+		const registry = await startRegistry(20, undefined, { gated: true });
 		try {
 			const config = buildRegistryDeleteJobConfig({
 				entries: registry.entries(2),
@@ -1314,8 +1344,10 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 				}
 			}
 			expect(leaks).toEqual([]);
+			registry.release();
 			await settle(status, [0, 1]);
 		} finally {
+			registry.release();
 			registry.server.close();
 			rmSync(dir, { recursive: true, force: true });
 		}

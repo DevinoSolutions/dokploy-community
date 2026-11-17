@@ -553,8 +553,21 @@ describe("createSchedulePidCapture", () => {
 
 // The wrapper and the kill script run inside the container, so they are run for
 // real here (this needs /proc, i.e. Linux; CI is).
+//
+// Time bound for these tests. The kill script walks /proc and forks a subshell,
+// `tr` and `grep` for every process on the host, twice (SCHEDULE_KILL_SCRIPT
+// scans before and after freezing), so a run costs roughly 1.3 ms per process
+// (measured: 40 ms with 29 processes, 830 ms with 629). The CI host runs the
+// whole suite in parallel forks, so a count in the hundreds and a CPU that is
+// not ours are normal there, and the default 5 s test timeout (and the 5 s the
+// polls below used to give a process to die) was a coin flip. Nothing here
+// waits for a fixed time: every poll returns as soon as its condition holds, so
+// a generous bound only costs time on a real failure.
+const REAL_SHELL_TIMEOUT_MS = 40_000;
+
 describe.skipIf(process.platform !== "linux")(
 	"wrapper and kill script in a real shell",
+	{ timeout: REAL_SHELL_TIMEOUT_MS },
 	() => {
 		const RUN_ID = `testrun${process.pid}`;
 		const spawned: number[] = [];
@@ -570,7 +583,10 @@ describe.skipIf(process.platform !== "linux")(
 				return false;
 			}
 		};
-		const until = async (condition: () => boolean, timeoutMs = 5000) => {
+		const until = async (
+			condition: () => boolean,
+			timeoutMs = REAL_SHELL_TIMEOUT_MS / 2,
+		) => {
 			const start = Date.now();
 			while (!condition() && Date.now() - start < timeoutMs) {
 				await new Promise((resolve) => setTimeout(resolve, 25));
@@ -868,42 +884,42 @@ describe.skipIf(process.platform !== "linux")(
 			const run = runWrapper("sh", 'echo "$0"\nexit 0');
 
 			expect(run.stdout.split("\n")[1]).toBe("/dev/fd/3");
-			expect(SCHEDULE_RUN_WRAPPER).toContain(String.raw`printf 'exec 3<&-\n%s\n'`);
+			expect(SCHEDULE_RUN_WRAPPER).toContain(
+				String.raw`printf 'exec 3<&-\n%s\n'`,
+			);
 		});
 
 		describe("temp file name", () => {
-			const realMktemp = spawnSync("sh", ["-c", "command -v mktemp"], {
-				encoding: "utf8",
-			}).stdout?.trim() ?? "";
+			const realMktemp =
+				spawnSync("sh", ["-c", "command -v mktemp"], {
+					encoding: "utf8",
+				}).stdout?.trim() ?? "";
 
-			it.skipIf(!realMktemp)(
-				"uses mktemp for an unpredictable name",
-				() => {
-					const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
-					const tmp = mkdtempSync(join(tmpdir(), "schedule-tmp-"));
-					try {
-						const calls = join(bin, "calls");
-						writeFileSync(
-							join(bin, "mktemp"),
-							`#!/bin/sh\necho "$@" >> '${calls}'\nexec '${realMktemp}' "$@"\n`,
-							{ mode: 0o755 },
-						);
-						const run = runWrapper("sh", "exit 5", {
-							TMPDIR: tmp,
-							PATH: `${bin}:${process.env.PATH}`,
-						});
+			it.skipIf(!realMktemp)("uses mktemp for an unpredictable name", () => {
+				const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+				const tmp = mkdtempSync(join(tmpdir(), "schedule-tmp-"));
+				try {
+					const calls = join(bin, "calls");
+					writeFileSync(
+						join(bin, "mktemp"),
+						`#!/bin/sh\necho "$@" >> '${calls}'\nexec '${realMktemp}' "$@"\n`,
+						{ mode: 0o755 },
+					);
+					const run = runWrapper("sh", "exit 5", {
+						TMPDIR: tmp,
+						PATH: `${bin}:${process.env.PATH}`,
+					});
 
-						expect(run.status).toBe(5);
-						expect(readFileSync(calls, "utf8")).toContain(
-							`${tmp}/.dokploy-schedule-XXXXXX`,
-						);
-						expect(readdirSync(tmp)).toEqual([]);
-					} finally {
-						rmSync(bin, { recursive: true, force: true });
-						rmSync(tmp, { recursive: true, force: true });
-					}
-				},
-			);
+					expect(run.status).toBe(5);
+					expect(readFileSync(calls, "utf8")).toContain(
+						`${tmp}/.dokploy-schedule-XXXXXX`,
+					);
+					expect(readdirSync(tmp)).toEqual([]);
+				} finally {
+					rmSync(bin, { recursive: true, force: true });
+					rmSync(tmp, { recursive: true, force: true });
+				}
+			});
 
 			it("still runs from the file, under the pid based name, when there is no mktemp", () => {
 				const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
@@ -929,7 +945,6 @@ describe.skipIf(process.platform !== "linux")(
 					expect(run.stdout).toContain("ran /dev/fd/3\n");
 					expect(run.stderr).not.toContain("could not stage");
 					expect(readdirSync(tmp)).toEqual([]);
-
 				} finally {
 					rmSync(bin, { recursive: true, force: true });
 					rmSync(tmp, { recursive: true, force: true });
