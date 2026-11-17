@@ -2,6 +2,15 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.31.0-community.6
+
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.5 keeps working. This release includes everything in v0.31.0-community.5.
+
+**Security.**
+
+- Dependency updates for security advisories: hono 4.13.13 to 4.13.19 and @hono/node-server 2.1.5 to 2.1.9 (API and schedules services), next 16.4.2 to 16.4.5 (web app), and fast-xml-parser 5.10.1 to 5.12.0. These close all 10 open Dependabot alerts, which were medium and low severity (#631).
+- Known open item: the picomatch ReDoS advisory (GHSA-fc5q-39xc-vjpf, high severity) has no patched release yet, so it is not fixed. It is listed as an accepted exception in the dependency audit configuration and will be re-checked by 2026-12-17.
+
 ### New in v0.31.0-community.5
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.4 keeps working. This release includes everything in v0.31.0-community.4.
