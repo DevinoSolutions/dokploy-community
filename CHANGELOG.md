@@ -2,6 +2,18 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.31.0-community.5
+
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.4 keeps working. This release includes everything in v0.31.0-community.4.
+
+**Security.**
+
+- Backup and service read endpoints no longer hand credentials to read-only users. Before, a user who could only view a service could read its backups' destination encryption keys and rclone flags, and the backup, volume backup and backup policy detail views and the user backup list could expose destination credentials and API keys. Now backup details, volume backup details and backup context require the restore permission on every service involved, the service detail views (compose, Postgres, MySQL, MariaDB, MongoDB, libSQL) no longer return a destination's encryption keys or rclone flags, backup metadata in the compose detail is redacted for users who cannot update backups, removing a backup returns only its id, and the user backup list no longer loads API keys (#628).
+
+**Fixed.**
+
+- Two flaky tests (schedule run PID and build-server registry retention) are stabilized, and the OpenAPI document is regenerated with a rewritten generator test (#627).
+
 ### New in v0.31.0-community.4
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.3 keeps working. This release includes everything in v0.31.0-community.3.
