@@ -17,6 +17,7 @@ import {
 	VOLUME_NAME_REGEX,
 	volumeBackups,
 } from "@dokploy/server/db/schema";
+import { toVolumeBackupReadView } from "@dokploy/server/services/backup-read-view";
 import {
 	findDestinationById,
 	findDestinationByIdForOrganization,
@@ -214,7 +215,9 @@ export const volumeBackupsRouter = createTRPCRouter({
 				requireVolumeBackupServiceId(vb),
 				{ volumeBackup: ["read"] },
 			);
-			return vb;
+			// The finder loads whole service rows for the backup runner; the client
+			// only gets what identifies them, not their passwords, env or tokens.
+			return toVolumeBackupReadView(vb);
 		}),
 	delete: protectedProcedure
 		.input(

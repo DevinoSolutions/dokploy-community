@@ -36,6 +36,7 @@ import {
 	isInstanceBackup,
 	validateBackupServiceBinding,
 } from "@dokploy/server/services/backup";
+import { toBackupReadView } from "@dokploy/server/services/backup-read-view";
 import {
 	findDestinationById,
 	findDestinationByIdForOrganization,
@@ -287,7 +288,16 @@ export const backupRouter = createTRPCRouter({
 			const backup = await findBackupById(input.backupId);
 			await authorizeBackupAccess(ctx, backup, "read");
 
-			return backup;
+			// The finder loads whole service and destination rows for the backup
+			// runners. The client gets a view without their credentials (database
+			// passwords, compose refreshToken, env, destination keys); only a caller
+			// who may edit the backup gets the credentials of its own metadata back,
+			// because the edit form sends them again on save.
+			const canUpdate = await authorizeBackupAccess(ctx, backup, "update").then(
+				() => true,
+				() => false,
+			);
+			return toBackupReadView(backup, { canUpdate });
 		}),
 	update: protectedProcedure
 		.input(apiUpdateBackup)
