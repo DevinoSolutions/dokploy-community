@@ -37,6 +37,10 @@ import {
 	validateBackupServiceBinding,
 } from "@dokploy/server/services/backup";
 import {
+	redactBackupMetadata,
+	toBackupReadView,
+} from "@dokploy/server/services/backup-read-view";
+import {
 	findDestinationById,
 	findDestinationByIdForOrganization,
 } from "@dokploy/server/services/destination";
@@ -287,7 +291,16 @@ export const backupRouter = createTRPCRouter({
 			const backup = await findBackupById(input.backupId);
 			await authorizeBackupAccess(ctx, backup, "read");
 
-			return backup;
+			// The finder loads whole service and destination rows for the backup
+			// runners. The client gets a view without their credentials (database
+			// passwords, compose refreshToken, env, destination keys); only a caller
+			// who may edit the backup gets the credentials of its own metadata back,
+			// because the edit form sends them again on save.
+			const canUpdate = await authorizeBackupAccess(ctx, backup, "update").then(
+				() => true,
+				() => false,
+			);
+			return toBackupReadView(backup, { canUpdate });
 		}),
 	update: protectedProcedure
 		.input(apiUpdateBackup)
@@ -390,7 +403,8 @@ export const backupRouter = createTRPCRouter({
 					resourceType: "backup",
 					resourceId: input.backupId,
 				});
-				return value;
+				// Not the deleted row: its metadata holds database credentials.
+				return { backupId: input.backupId };
 			} catch (error) {
 				const message =
 					error instanceof Error ? error.message : "Error deleting this Backup";
@@ -715,12 +729,18 @@ export const backupRouter = createTRPCRouter({
 				null;
 
 			// Instance backups were gated on the owner/admin role above.
+			// Every service id on the row, like authorizeBackupAccess above: a row
+			// that names more than one service is restorable only by a caller who
+			// may restore each of them.
 			let canRestore = instanceBackup;
-			if (serviceId) {
+			const serviceIds = instanceBackup ? [] : getBackupServiceIds(backup);
+			if (serviceIds.length > 0) {
 				try {
-					await checkServicePermissionAndAccess(ctx, serviceId, {
-						backup: ["restore"],
-					});
+					for (const id of serviceIds) {
+						await checkServicePermissionAndAccess(ctx, id, {
+							backup: ["restore"],
+						});
+					}
 					canRestore = true;
 				} catch {
 					canRestore = false;
@@ -743,7 +763,13 @@ export const backupRouter = createTRPCRouter({
 						? (backup.libsql?.appName ?? null)
 						: null,
 				serverId,
-				metadata: backup.metadata ?? null,
+				// The restore dialog sends these back to the restore subscription, which
+				// requires `backup: ["restore"]` on the service, so that permission (the
+				// `canRestore` above) is what lets a caller read the credentials in them.
+				metadata:
+					(canRestore
+						? backup.metadata
+						: redactBackupMetadata(backup.metadata)) ?? null,
 				canRestore,
 			};
 		}),

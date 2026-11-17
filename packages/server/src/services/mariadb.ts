@@ -17,6 +17,7 @@ import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
+import { DESTINATION_READ_COLUMNS } from "./backup-read-view";
 import { validUniqueServerAppName } from "./project";
 
 export type Mariadb = typeof mariadb.$inferSelect;
@@ -74,12 +75,9 @@ export const findMariadbById = async (mariadbId: string) => {
 			server: true,
 			backups: {
 				with: {
-					destination: {
-						columns: {
-							accessKey: false,
-							secretAccessKey: false,
-						},
-					},
+					// An allowlist: the destination's encryption keys and rclone flags stay
+					// server side. The backup runners load the destination themselves.
+					destination: { columns: DESTINATION_READ_COLUMNS },
 					deployments: true,
 				},
 			},

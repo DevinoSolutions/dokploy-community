@@ -24,6 +24,7 @@ import {
 	updateBackupPolicy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import { DESTINATION_READ_COLUMNS } from "@dokploy/server/services/backup-read-view";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import {
 	checkServicePermissionAndAccess,
@@ -206,9 +207,9 @@ export const backupPolicyRouter = createTRPCRouter({
 			const policy = await db.query.backupPolicies.findFirst({
 				where: eq(backupPolicies.backupPolicyId, input.backupPolicyId),
 				with: {
-					destination: {
-						columns: { accessKey: false, secretAccessKey: false },
-					},
+					// An allowlist: the encryption keys and additionalFlags of a
+					// destination are not for a caller with backup read access.
+					destination: { columns: DESTINATION_READ_COLUMNS },
 					backups: {
 						columns: {
 							backupId: true,

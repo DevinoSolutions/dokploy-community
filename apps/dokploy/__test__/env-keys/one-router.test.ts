@@ -99,7 +99,11 @@ describe("compose.one", () => {
 	it("keeps the dashboard behaviour by default", async () => {
 		const result = await caller.compose.one({ composeId: "comp-1" });
 		expect(result.env).toBe("DB_PASSWORD=SECRET-compose-env");
-		expect(result.backups[0]?.destination.encryptionKey).toContain(SECRET_MARK);
+		// The finder no longer loads the destination's encryption fields (see
+		// service-finder-destination.test.ts), so the type has none to read; the
+		// fields it does load pass through the router untouched.
+		expect(result.backups[0]?.destination.name).toBe("b2");
+		expect(result.backups[0]?.destination.bucket).toBe("backups");
 	});
 
 	it("strips every secret field when includeEnv is false", async () => {
