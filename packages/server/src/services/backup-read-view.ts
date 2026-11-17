@@ -199,7 +199,7 @@ const blankMetadata = (value: unknown, depth: number): unknown => {
 		if (depth >= MAX_METADATA_DEPTH) return {};
 		const next: AnyRecord = {};
 		for (const [key, inner] of Object.entries(value)) {
-			if (METADATA_VISIBLE_KEYS.has(key) && !isRecord(inner)) {
+			if (METADATA_VISIBLE_KEYS.has(key) && typeof inner === "string") {
 				next[key] = inner;
 			} else {
 				next[key] = blankMetadata(inner, depth + 1);

@@ -729,12 +729,18 @@ export const backupRouter = createTRPCRouter({
 				null;
 
 			// Instance backups were gated on the owner/admin role above.
+			// Every service id on the row, like authorizeBackupAccess above: a row
+			// that names more than one service is restorable only by a caller who
+			// may restore each of them.
 			let canRestore = instanceBackup;
-			if (serviceId) {
+			const serviceIds = instanceBackup ? [] : getBackupServiceIds(backup);
+			if (serviceIds.length > 0) {
 				try {
-					await checkServicePermissionAndAccess(ctx, serviceId, {
-						backup: ["restore"],
-					});
+					for (const id of serviceIds) {
+						await checkServicePermissionAndAccess(ctx, id, {
+							backup: ["restore"],
+						});
+					}
 					canRestore = true;
 				} catch {
 					canRestore = false;

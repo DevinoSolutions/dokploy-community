@@ -62,6 +62,7 @@ import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import { getDokployUrl } from "./admin";
+import { DESTINATION_READ_COLUMNS } from "./backup-read-view";
 import {
 	composeFileHasBuildSection,
 	inferBuildOriginFromSource,
@@ -780,12 +781,9 @@ export const findComposeById = async (composeId: string) => {
 			buildServer: { columns: { serverId: true, name: true } },
 			backups: {
 				with: {
-					destination: {
-						columns: {
-							accessKey: false,
-							secretAccessKey: false,
-						},
-					},
+					// An allowlist: the destination's encryption keys and rclone flags stay
+					// server side. The backup runners load the destination themselves.
+					destination: { columns: DESTINATION_READ_COLUMNS },
 					deployments: true,
 				},
 			},

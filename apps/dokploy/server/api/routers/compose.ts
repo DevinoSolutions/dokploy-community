@@ -56,6 +56,7 @@ import {
 	withdrawLiveBuildDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import { redactBackupMetadata } from "@dokploy/server/services/backup-read-view";
 import { getBuildOriginsByService } from "@dokploy/server/services/build-origin";
 import {
 	buildOriginJobFields,
@@ -295,11 +296,27 @@ export const composeRouter = createTRPCRouter({
 			}
 
 			const canDeploy = await hasPermission(ctx, { deployment: ["create"] });
+			// The metadata of a compose backup holds database credentials; only a
+			// caller who may update the service's backups reads them (as in backup.one).
+			const canUpdateBackups = await checkServicePermissionAndAccess(
+				ctx,
+				input.composeId,
+				{ backup: ["update"] },
+			).then(
+				() => true,
+				() => false,
+			);
 			const shaped = shapeServiceRead(compose, input.includeEnv);
 			return {
 				...shaped,
 				// The deploy webhook token goes only to roles that can deploy.
 				refreshToken: canDeploy ? shaped.refreshToken : null,
+				backups: shaped.backups.map((backup) => ({
+					...backup,
+					metadata: canUpdateBackups
+						? backup.metadata
+						: redactBackupMetadata(backup.metadata),
+				})),
 				hasGitProviderAccess,
 				unauthorizedProvider,
 				// Where the image was built, from the latest done deployment (T-12149).

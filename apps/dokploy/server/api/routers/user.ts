@@ -34,6 +34,7 @@ import {
 	session,
 	user,
 } from "@dokploy/server/db/schema";
+import { DESTINATION_READ_COLUMNS } from "@dokploy/server/services/backup-read-view";
 import { providerFetch } from "@dokploy/server/services/logs-and-metrics/provider-fetch";
 import {
 	hasPermission,
@@ -263,11 +264,12 @@ export const userRouter = createTRPCRouter({
 						with: {
 							backups: {
 								with: {
-									destination: true,
+									// An allowlist, and no apiKeys: the only consumer
+									// (show-backups) reads the backups.
+									destination: { columns: DESTINATION_READ_COLUMNS },
 									deployments: true,
 								},
 							},
-							apiKeys: true,
 						},
 					},
 				},
