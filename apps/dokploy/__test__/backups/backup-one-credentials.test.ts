@@ -1,3 +1,5 @@
+import { destinations } from "@dokploy/server/db/schema";
+import { getTableColumns } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -13,10 +15,17 @@ const mocks = vi.hoisted(() => ({
 	checkPermission: vi.fn(),
 	checkServicePermissionAndAccess: vi.fn(),
 	findServiceOrganizationId: vi.fn(),
+	removeBackupById: vi.fn(),
+	findPolicyRow: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => ({
-	db: { query: { destinations: { findFirst: vi.fn() } } },
+	db: {
+		query: {
+			destinations: { findFirst: vi.fn() },
+			backupPolicies: { findFirst: mocks.findPolicyRow },
+		},
+	},
 }));
 
 vi.mock("@dokploy/server/services/permission", () => ({
@@ -29,6 +38,7 @@ vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
 	findBackupById: mocks.findBackupById,
 	findVolumeBackupById: mocks.findVolumeBackupById,
+	removeBackupById: mocks.removeBackupById,
 	findServerById: vi.fn(),
 	isRootOrganization: vi.fn(),
 	scheduleBackup: vi.fn(),
@@ -78,6 +88,9 @@ vi.mock("@/server/utils/backup", () => ({
 const { backupRouter } = await import("@/server/api/routers/backup");
 const { volumeBackupsRouter } = await import(
 	"@/server/api/routers/volume-backups"
+);
+const { backupPolicyRouter } = await import(
+	"@/server/api/routers/backup-policy"
 );
 
 const ctx = (role: string) =>
@@ -401,5 +414,192 @@ describe("the finders keep what the backup runners need", () => {
 		// object is what the cron and the manual runners read the password from.
 		expect(row.postgres.databasePassword).toBe(SECRET.dbPassword);
 		expect(row.destination.encryptionKey).toBe(SECRET.encryptionKey);
+	});
+});
+
+// What the compose backup form stores in `metadata`, per engine (see the
+// `metadata` column), plus a stray credential the `z.any()` input would accept.
+const METADATA_BY_ENGINE = {
+	postgres: {
+		stored: { postgres: { databaseUser: "app" } },
+		withStray: {
+			postgres: {
+				databaseUser: "app",
+				databasePassword: SECRET.metadataPassword,
+			},
+		},
+		readOnlyView: { postgres: { databaseUser: "app", databasePassword: "" } },
+	},
+	mariadb: {
+		stored: {
+			mariadb: {
+				databaseUser: "app",
+				databasePassword: SECRET.metadataPassword,
+			},
+		},
+		withStray: {
+			mariadb: {
+				databaseUser: "app",
+				databasePassword: SECRET.metadataPassword,
+				databaseRootPassword: SECRET.metadataRootPassword,
+			},
+		},
+		readOnlyView: {
+			mariadb: {
+				databaseUser: "app",
+				databasePassword: "",
+				databaseRootPassword: "",
+			},
+		},
+	},
+	mongo: {
+		stored: {
+			mongo: { databaseUser: "app", databasePassword: SECRET.metadataPassword },
+		},
+		withStray: {
+			mongo: {
+				databaseUser: "app",
+				databasePassword: SECRET.metadataPassword,
+				options: { authToken: SECRET.metadataRootPassword },
+			},
+		},
+		readOnlyView: {
+			mongo: {
+				databaseUser: "app",
+				databasePassword: "",
+				options: { authToken: "" },
+			},
+		},
+	},
+	mysql: {
+		stored: { mysql: { databaseRootPassword: SECRET.metadataRootPassword } },
+		withStray: {
+			mysql: {
+				databaseRootPassword: SECRET.metadataRootPassword,
+				databasePassword: SECRET.metadataPassword,
+			},
+		},
+		readOnlyView: { mysql: { databaseRootPassword: "", databasePassword: "" } },
+	},
+} as const;
+
+const readOnly = () =>
+	mocks.checkServicePermissionAndAccess.mockImplementation(
+		async (_ctx: unknown, _id: string, permissions: { backup?: string[] }) => {
+			if (
+				permissions.backup?.includes("update") ||
+				permissions.backup?.includes("restore")
+			) {
+				throw new Error("no permission");
+			}
+		},
+	);
+
+const composeBackupWith = (metadata: unknown) => ({
+	...composeBackup(),
+	metadata,
+});
+
+describe.each(Object.entries(METADATA_BY_ENGINE))(
+	"metadata of a %s compose backup for a read-only caller",
+	(_engine, { stored, withStray, readOnlyView }) => {
+		it("is blanked by backup.one", async () => {
+			mocks.findBackupById.mockResolvedValue(composeBackupWith(withStray));
+			readOnly();
+
+			const result = await backupRouter
+				.createCaller(ctx("member"))
+				.one({ backupId: "backup-1" });
+
+			expect(leaked(result)).toEqual([]);
+			expect(result.metadata).toEqual(readOnlyView);
+		});
+
+		it("is blanked by backup.backupContext", async () => {
+			mocks.findBackupById.mockResolvedValue(composeBackupWith(withStray));
+			readOnly();
+
+			const result = await backupRouter
+				.createCaller(ctx("member"))
+				.backupContext({ backupId: "backup-1" });
+
+			expect(result.canRestore).toBe(false);
+			expect(leaked(result)).toEqual([]);
+			expect(result.metadata).toEqual(readOnlyView);
+		});
+
+		it("is still returned by backup.backupContext to a caller who may restore", async () => {
+			mocks.findBackupById.mockResolvedValue(composeBackupWith(stored));
+
+			const result = await backupRouter
+				.createCaller(ctx("owner"))
+				.backupContext({ backupId: "backup-1" });
+
+			expect(result.canRestore).toBe(true);
+			expect(result.metadata).toEqual(stored);
+		});
+	},
+);
+
+describe("backup.remove", () => {
+	it("returns the id and not the deleted row, whose metadata holds credentials", async () => {
+		mocks.findBackupById.mockResolvedValue(composeBackup());
+		mocks.removeBackupById.mockResolvedValue(composeBackup());
+
+		const result = await backupRouter
+			.createCaller(ctx("owner"))
+			.remove({ backupId: "backup-1" });
+
+		expect(result).toEqual({ backupId: "backup-1" });
+		expect(leaked(result)).toEqual([]);
+		expect(mocks.removeBackupById).toHaveBeenCalledWith("backup-1");
+	});
+});
+
+describe("backupPolicy.one", () => {
+	/** The columns drizzle returns for a relation's `columns` option. */
+	const selectedColumns = (
+		all: string[],
+		config: Record<string, boolean> | undefined,
+	) => {
+		if (!config) return all;
+		const wanted = Object.entries(config).filter(([, on]) => on);
+		return wanted.length > 0
+			? wanted.map(([key]) => key)
+			: all.filter((key) => config[key] !== false);
+	};
+
+	it("loads the destination without its keys, encryption passwords or rclone flags", async () => {
+		mocks.findPolicyRow.mockResolvedValue({
+			backupPolicyId: "policy-1",
+			organizationId: "org-a",
+			destination: destinationRow(),
+			backups: [],
+			volumeBackups: [],
+		});
+
+		await backupPolicyRouter
+			.createCaller(ctx("owner"))
+			.one({ backupPolicyId: "policy-1" });
+
+		const query = mocks.findPolicyRow.mock.calls[0]?.[0] as {
+			with: { destination: { columns?: Record<string, boolean> } };
+		};
+		const loaded = selectedColumns(
+			Object.keys(getTableColumns(destinations)),
+			query.with.destination.columns,
+		);
+
+		for (const column of [
+			"accessKey",
+			"secretAccessKey",
+			"encryptionKey",
+			"encryptionPassword2",
+			"additionalFlags",
+		]) {
+			expect(loaded).not.toContain(column);
+		}
+		// What the policy screen needs is still there.
+		expect(loaded).toEqual(expect.arrayContaining(["destinationId", "name"]));
 	});
 });
