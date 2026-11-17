@@ -8,7 +8,11 @@ Upgrade notes: no database migration and nothing to configure. An image-only rol
 
 **Security.**
 
-- Backup and service read endpoints no longer hand credentials to read-only users. Before, a user who could only view a service could read its backups' destination encryption keys and rclone flags, and the backup, volume backup and backup policy detail views and the user backup list could expose destination credentials and API keys. Now backup details, volume backup details and backup context require the restore permission on every service involved, the service detail views (compose, Postgres, MySQL, MariaDB, MongoDB, libSQL) no longer return a destination's encryption keys or rclone flags, backup metadata in the compose detail is redacted for users who cannot update backups, removing a backup returns only its id, and the user backup list no longer loads API keys (#628).
+- Backup and service read endpoints no longer hand credentials to read-only users. Before, a user who could only view a service could read its backups' destination encryption keys and rclone flags, and the database credentials stored in a compose backup. Now:
+  - backup and volume backup details hide those fields unless the user may update the backup;
+  - the restore dialog's backup context returns stored credentials only to users with the restore permission on every service the backup belongs to;
+  - the service detail views (compose, Postgres, MySQL, MariaDB, MongoDB, libSQL) and the backup policy detail return a destination's name and location only;
+  - removing a backup returns only its id, and the web-server backup list no longer loads API keys (#628).
 
 **Fixed.**
 
