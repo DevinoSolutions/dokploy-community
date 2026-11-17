@@ -2,6 +2,13 @@
 # (pnpm audit at high). That reusable workflow lives in a private repo and
 # cannot be called from this public one. Check 2 (stale override floors) is
 # not included.
+#
+# Ignored advisories live in package.json (pnpm.auditConfig.ignoreGhsas):
+# - GHSA-fc5q-39xc-vjpf (picomatch ReDoS, high), added 2026-11-17: no patched
+#   release exists (every version up to 4.0.7 is affected). It reaches the tree
+#   through vite and micromatch, which glob paths this repo chooses, not user
+#   input. Remove the ignore and raise picomatch once a fixed release is out;
+#   re-check by 2026-12-17.
 name: Security audit
 
 on:
