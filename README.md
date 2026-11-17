@@ -123,7 +123,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 ## What's new in v0.31.0-community.5
 
-- Security: backup and service read endpoints no longer return credentials to read-only users. Backup destination encryption keys and rclone flags are gone from service reads, and backup details now need restore permission.
+- Security: backup and service read endpoints no longer return credentials to read-only users. Backup destination encryption keys and rclone flags are gone from service reads, and stored backup credentials go only to users who may update or restore the backup.
 - Two flaky tests are fixed and the OpenAPI document is regenerated.
 - No database migration, and an image-only rollback to v0.31.0-community.4 keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
