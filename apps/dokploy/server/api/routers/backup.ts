@@ -36,7 +36,10 @@ import {
 	isInstanceBackup,
 	validateBackupServiceBinding,
 } from "@dokploy/server/services/backup";
-import { toBackupReadView } from "@dokploy/server/services/backup-read-view";
+import {
+	redactBackupMetadata,
+	toBackupReadView,
+} from "@dokploy/server/services/backup-read-view";
 import {
 	findDestinationById,
 	findDestinationByIdForOrganization,
@@ -400,7 +403,8 @@ export const backupRouter = createTRPCRouter({
 					resourceType: "backup",
 					resourceId: input.backupId,
 				});
-				return value;
+				// Not the deleted row: its metadata holds database credentials.
+				return { backupId: input.backupId };
 			} catch (error) {
 				const message =
 					error instanceof Error ? error.message : "Error deleting this Backup";
@@ -753,7 +757,13 @@ export const backupRouter = createTRPCRouter({
 						? (backup.libsql?.appName ?? null)
 						: null,
 				serverId,
-				metadata: backup.metadata ?? null,
+				// The restore dialog sends these back to the restore subscription, which
+				// requires `backup: ["restore"]` on the service, so that permission (the
+				// `canRestore` above) is what lets a caller read the credentials in them.
+				metadata:
+					(canRestore
+						? backup.metadata
+						: redactBackupMetadata(backup.metadata)) ?? null,
 				canRestore,
 			};
 		}),
