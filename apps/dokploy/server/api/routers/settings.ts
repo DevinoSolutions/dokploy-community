@@ -149,7 +149,11 @@ import {
 	projects,
 	server,
 } from "@/server/db/schema";
-import { cleanAllDeploymentQueue } from "@/server/queues/queueSetup";
+import { cleanAllDeploymentQueue, myQueue } from "@/server/queues/queueSetup";
+import {
+	closeIntakeForRestart,
+	DEPLOY_INTAKE_SWAP_HOLD_MS,
+} from "@/server/queues/restart-guard";
 import { applyDockerCleanupSchedule } from "@/server/utils/docker-cleanup";
 import packageInfo from "../../../package.json";
 import { appRouter } from "../root";
@@ -407,7 +411,14 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}
 		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
-		await reloadDockerResource("dokploy", undefined, packageInfo.version);
+		// Same race as an update: a deploy that starts now dies in the restart.
+		const hold = await closeIntakeForRestart(myQueue, "reload");
+		try {
+			await reloadDockerResource("dokploy", undefined, packageInfo.version);
+		} catch (error) {
+			hold.release();
+			throw error;
+		}
 		await audit(ctx, {
 			action: "reload",
 			resourceType: "settings",
@@ -1299,14 +1310,28 @@ export const settingsRouter = createTRPCRouter({
 				startedAt: new Date().toISOString(),
 				status: "pulling",
 			};
+			// From here until this process is replaced no deploy may start: the pull
+			// below takes a while, and a deploy that began in it would be killed by
+			// the swap. Deploys that arrive meanwhile are journaled and run after the
+			// restart as first runs. Refuses (and reopens) when something is running.
+			// Taken after the slow GitHub and registry calls above, so the intake
+			// stays shut only for the update itself.
+			const hold = await closeIntakeForRestart(myQueue, "update");
 			// The check and the write are one step under a lock: of two requests
 			// that got this far together (the GitHub and registry calls above take
 			// seconds), only one claims, and the other never reaches the job.
-			const claim = await claimDokployUpdateAttempt(attempt, {
-				runningVersion: packageInfo.version,
-				force: input?.force,
-			});
+			let claim: Awaited<ReturnType<typeof claimDokployUpdateAttempt>>;
+			try {
+				claim = await claimDokployUpdateAttempt(attempt, {
+					runningVersion: packageInfo.version,
+					force: input?.force,
+				});
+			} catch (error) {
+				hold.release();
+				throw error;
+			}
 			if (!claim.claimed) {
+				hold.release();
 				throw new TRPCError({
 					code: "CONFLICT",
 					message:
@@ -1344,8 +1369,13 @@ export const settingsRouter = createTRPCRouter({
 						console.error(
 							`settings.updateServer: attempt ${attempt.attemptId} is no longer this job's record (replaced by a newer attempt, or the record stayed locked); not updating the service.`,
 						);
+						// No swap from this job: the newer attempt holds its own intake.
+						hold.release();
 						return;
 					}
+					// The swap is next: a fresh, shorter limit instead of what is left of
+					// the one the pull may have used up.
+					hold.extend(DEPLOY_INTAKE_SWAP_HOLD_MS);
 					phase = "update";
 					await recordDokployRollbackPoint(packageInfo.version, {
 						installing,
@@ -1355,6 +1385,10 @@ export const settingsRouter = createTRPCRouter({
 						"service",
 						"update",
 						"--force",
+						// One process at a time: deploys parked in this one are restored
+						// by the next, which must not start while this one holds them.
+						"--update-order",
+						"stop-first",
 						"--image",
 						image,
 						"dokploy",
@@ -1364,6 +1398,10 @@ export const settingsRouter = createTRPCRouter({
 						finishedAt: new Date().toISOString(),
 					});
 				} catch (error) {
+					// The service was not replaced, so this process keeps running and
+					// has to take deploys again. After a successful swap the hold stays:
+					// this process is about to be stopped.
+					hold.release();
 					// Only the category is recorded; the raw docker output (which can
 					// carry credentials) reaches the server log through the rethrow.
 					await transitionDokployUpdateAttempt(attempt.attemptId, {

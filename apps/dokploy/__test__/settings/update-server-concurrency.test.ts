@@ -11,6 +11,7 @@ import packageInfo from "../../package.json";
  */
 
 const state = vi.hoisted(() => ({
+	queue: undefined as unknown,
 	file: "",
 	// What the process running the guard reads about its own image.
 	readRunning: undefined as
@@ -76,8 +77,13 @@ vi.mock("@/server/api/utils/audit", () => ({
 	audit: mocks.audit,
 }));
 
+// A real queue (a fresh one per test): the hold the router takes is what the
+// tests below look at.
 vi.mock("@/server/queues/queueSetup", () => ({
 	cleanAllDeploymentQueue: vi.fn(),
+	get myQueue() {
+		return state.queue;
+	},
 }));
 
 vi.mock("@/server/utils/backup", () => ({
@@ -89,6 +95,8 @@ const { settingsRouter } = await import("@/server/api/routers/settings");
 const { readDokployUpdateAttempt, UPDATE_PROCESS_ID } = await import(
 	"@dokploy/server/services/settings"
 );
+
+const { InMemoryQueue } = await import("@/server/queues/in-memory-queue");
 
 const caller = settingsRouter.createCaller({
 	session: { activeOrganizationId: "org-a" },
@@ -119,6 +127,7 @@ beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "update-concurrency-"));
 	state.file = join(dir, "dokploy-update-last-attempt.json");
 	state.readRunning = undefined;
+	state.queue = new InMemoryQueue({ resolveConcurrency: () => 1 });
 	jobs = [];
 	failures = [];
 	spawns = [];
@@ -357,5 +366,167 @@ describe("a reinstall of the running version", () => {
 		swap.resolve();
 		await Promise.all(jobs);
 		expect(failures).toEqual([]);
+	});
+});
+
+describe("the deploy intake while an update is in flight", () => {
+	const queueOf = () => state.queue as InstanceType<typeof InMemoryQueue>;
+	const job = (applicationId: string) => ({
+		applicationId,
+		titleLog: `deploy ${applicationId}`,
+		descriptionLog: "",
+		type: "deploy" as const,
+		applicationType: "application" as const,
+	});
+	const watch = (queue: InstanceType<typeof InMemoryQueue>) => {
+		const started: string[] = [];
+		queue.process(async (queued) => {
+			started.push((queued.data as { applicationId: string }).applicationId);
+		});
+		return started;
+	};
+	const failOn = (what: "pull" | "service") => {
+		mocks.spawnAsync.mockImplementation(
+			async (command: string, args: string[]) => {
+				spawns.push([command, ...args]);
+				if (what === "pull" && args[0] === "pull") {
+					throw new Error("pull failed");
+				}
+				if (what === "service" && args[0] === "service") {
+					throw new Error("swap failed");
+				}
+				return Buffer.from("");
+			},
+		);
+	};
+
+	it("is closed from acceptance through the swap, and a deploy that arrives meanwhile is parked", async () => {
+		const queue = queueOf();
+		const started = watch(queue);
+		const swap = deferred();
+		mocks.spawnAsync.mockImplementation(
+			async (command: string, args: string[]) => {
+				spawns.push([command, ...args]);
+				if (args[0] === "service") await swap.promise;
+				return Buffer.from("");
+			},
+		);
+
+		await expect(caller.updateServer()).resolves.toBe(true);
+		await vi.waitFor(() => expect(serviceUpdates()).toHaveLength(1));
+		await queue.add(job("landing"));
+		await new Promise((r) => setTimeout(r, 0));
+
+		expect(queue.intakeClosed()).toBe(true);
+		expect(started).toEqual([]);
+		expect(await queue.getJobs(["waiting"])).toHaveLength(1);
+
+		swap.resolve();
+		await Promise.all(jobs);
+		// The swap went through: this process is about to be stopped, so the
+		// intake stays closed instead of reopening for the seconds before that.
+		expect(queue.intakeClosed()).toBe(true);
+		expect(failures).toEqual([]);
+	});
+
+	it("refuses while a deploy runs, reopens, and records no attempt", async () => {
+		const queue = queueOf();
+		queue.process(() => new Promise<void>(() => {}));
+		await queue.add(job("running"));
+		await new Promise((r) => setTimeout(r, 0));
+
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			code: "CONFLICT",
+			message: expect.stringContaining("would interrupt"),
+		});
+
+		expect(queue.intakeClosed()).toBe(false);
+		expect(serviceUpdates()).toEqual([]);
+		expect(await readDokployUpdateAttempt(state.file)).toBeNull();
+	});
+
+	it("lets a waiting deploy through: it is parked, not in the way", async () => {
+		const queue = queueOf();
+		queue.pause();
+		queue.process(async () => {});
+		await queue.add(job("waiting"));
+
+		await expect(caller.updateServer()).resolves.toBe(true);
+		await Promise.all(jobs);
+		expect(queue.intakeClosed()).toBe(true);
+	});
+
+	it("reopens when the image pull fails", async () => {
+		const queue = queueOf();
+		const started = watch(queue);
+		failOn("pull");
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(failures).toHaveLength(1);
+		expect(queue.intakeClosed()).toBe(false);
+		await queue.add(job("after"));
+		await new Promise((r) => setTimeout(r, 0));
+		expect(started).toEqual(["after"]);
+	});
+
+	it("reopens when the service update fails", async () => {
+		const queue = queueOf();
+		failOn("service");
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(failures).toHaveLength(1);
+		expect(queue.intakeClosed()).toBe(false);
+	});
+
+	it("a refused second request does not reopen the first one's intake", async () => {
+		const queue = queueOf();
+		const swap = deferred();
+		mocks.spawnAsync.mockImplementation(
+			async (command: string, args: string[]) => {
+				spawns.push([command, ...args]);
+				if (args[0] === "service") await swap.promise;
+				return Buffer.from("");
+			},
+		);
+		await caller.updateServer();
+		await vi.waitFor(() => expect(serviceUpdates()).toHaveLength(1));
+
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+
+		expect(queue.intakeClosed()).toBe(true);
+		swap.resolve();
+		await Promise.all(jobs);
+	});
+
+	it("reopens when its attempt was replaced before the swap (the pull outlasted it)", async () => {
+		const queue = queueOf();
+		const pull = deferred();
+		mocks.spawnAsync.mockImplementation(
+			async (command: string, args: string[]) => {
+				spawns.push([command, ...args]);
+				if (args[0] === "pull") await pull.promise;
+				return Buffer.from("");
+			},
+		);
+		await caller.updateServer();
+		await vi.waitFor(() =>
+			expect(spawns.some(([, action]) => action === "pull")).toBe(true),
+		);
+		// A forced update replaces the record; the first job must not swap.
+		await caller.updateServer({ force: true });
+		pull.resolve();
+		await Promise.all(jobs);
+
+		expect(serviceUpdates()).toHaveLength(1);
+		// The forced one still holds its own intake until its swap is done.
+		expect(queue.intakeClosed()).toBe(true);
 	});
 });

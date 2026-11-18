@@ -1135,7 +1135,9 @@ const restartDockerResource = async (
 				imageTag = currentImageTag;
 			}
 
-			command = `docker service update --force --image ghcr.io/devinosolutions/dokploy-community:${imageTag} ${resourceName}`;
+			// stop-first: the old process (which holds parked deploys in memory) is
+			// gone before the new one restores them from the journal.
+			command = `docker service update --force --update-order stop-first --image ghcr.io/devinosolutions/dokploy-community:${imageTag} ${resourceName}`;
 		} else {
 			command = `docker service update --force ${resourceName}`;
 		}

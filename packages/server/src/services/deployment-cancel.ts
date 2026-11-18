@@ -675,7 +675,7 @@ const signalReleaseStep = async (
  * `remote-build-cancel.ts`). Never throws: a build server that cannot be
  * reached comes back as `UNREACHABLE` with a warning.
  */
-const stopBuildOnBuildServer = async (
+export const stopBuildOnBuildServer = async (
 	buildServerId: string,
 	deploymentId: string,
 ): Promise<{

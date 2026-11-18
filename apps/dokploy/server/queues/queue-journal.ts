@@ -186,6 +186,9 @@ export const createQueueJournal = (
 	const journal: QueueJournal = {
 		enqueued: ({ journalId, data }) => {
 			liveIds?.add(journalId);
+			// Whether the row was really written, for the queue while its intake is
+			// closed for a restart: a failed or timed out write resolves false.
+			let written = false;
 			return withTimeout(
 				run("enqueue", () => {
 					const insert = Promise.resolve().then(() =>
@@ -198,9 +201,11 @@ export const createQueueJournal = (
 						}
 					};
 					insert.then(done, done);
-					return insert;
+					return insert.then(() => {
+						written = true;
+					});
 				}),
-			);
+			).then(() => written);
 		},
 		started: (journalId) => {
 			void run("start", () => store.markActive(journalId));

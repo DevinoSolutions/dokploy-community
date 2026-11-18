@@ -148,6 +148,12 @@ export function ShowQueueTable(props: { embedded?: boolean }) {
 												<Badge variant={stateVariants[row.state] ?? "outline"}>
 													{row.state}
 												</Badge>
+												{row.heldReason === "intake-closed-for-update" && (
+													<div className="mt-1 text-xs text-muted-foreground">
+														Intake closed for an update. Starts after the
+														restart.
+													</div>
+												)}
 											</TableCell>
 											<TableCell className="text-muted-foreground text-xs">
 												{formatTs(row.timestamp)}

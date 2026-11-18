@@ -77,6 +77,10 @@ vi.mock("@/server/api/utils/cancel-audit", () => ({
 
 vi.mock("@/server/queues/queueSetup", () => ({
 	cleanAllDeploymentQueue: mocks.cleanAllDeploymentQueue,
+	myQueue: {
+		closeIntake: () => ({ release: () => {}, extend: () => {} }),
+		busy: () => ({ active: [], heldGroups: [] }),
+	},
 }));
 
 vi.mock("@/server/utils/backup", () => ({

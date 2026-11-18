@@ -12,6 +12,7 @@ import { updateApplicationStatus } from "./application";
 import { updateCompose } from "./compose";
 import { resolveDeploymentLogHost } from "./deployment-log-host";
 import { notWaitingForGithubRun } from "./live-build-claim";
+import { killOrphanedBuilds, type OrphanedBuild } from "./orphan-build-kill";
 import { updatePreviewDeployment } from "./preview-deployment";
 
 /**
@@ -213,6 +214,8 @@ export const markInterruptedQueueDeployments = async (
 ): Promise<number> => {
 	let closed = 0;
 	const notes: Array<Promise<unknown>> = [];
+	// Builds still running on a build server for deployments closed here (T-12684).
+	const orphans: OrphanedBuild[] = [];
 	for (const job of activeJobs) {
 		await resetServiceStatus(job.payload);
 		try {
@@ -227,12 +230,14 @@ export const markInterruptedQueueDeployments = async (
 				})
 				.where(where)
 				.returning({
+					deploymentId: deployments.deploymentId,
 					logPath: deployments.logPath,
 					serverId: deployments.serverId,
 					buildServerId: deployments.buildServerId,
 					previewDeploymentId: deployments.previewDeploymentId,
 				});
 			closed += rows.length;
+			orphans.push(...rows);
 			for (const row of rows) {
 				notes.push(
 					withDeadline(
@@ -258,7 +263,9 @@ export const markInterruptedQueueDeployments = async (
 			console.error("Could not mark an interrupted deployment", error);
 		}
 	}
-	await Promise.all(notes);
+	// Before the replay can start a second build of the same service. Bounded and
+	// never throwing: an unreachable build server must not hold the boot.
+	await Promise.all([...notes, killOrphanedBuilds(orphans)]);
 	return closed;
 };
 

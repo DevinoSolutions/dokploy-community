@@ -60,6 +60,11 @@ export type QueueJobRow = {
 	finishedOn?: number;
 	failedReason?: string;
 	state: string;
+	/**
+	 * Why a waiting job is not starting although a slot may be free: the deploy
+	 * intake is closed while Dokploy updates or reloads. It runs after the restart.
+	 */
+	heldReason?: "intake-closed-for-update";
 };
 
 export const fetchDeployApiJobs = async (

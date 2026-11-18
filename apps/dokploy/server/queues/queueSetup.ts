@@ -18,9 +18,11 @@ import {
 	type CoalesceWaitingOutcome,
 	type InMemoryJob,
 	InMemoryQueue,
+	type IntakeHold,
 	type KeepOldestOutcome,
 	type KeptWaitingJob,
 	type PriorityOutcome,
+	type QueueBusySnapshot,
 } from "./in-memory-queue";
 import { gateWorkerUntilRestored, registerShutdownHandler } from "./lifecycle";
 import {
@@ -91,6 +93,11 @@ interface DeploymentQueue {
 		predicate: (data: DeploymentJob) => boolean,
 	) => CoalesceWaitingOutcome;
 	clearWaiting: () => number;
+	/** Stop starting jobs while still accepting them (see InMemoryQueue.closeIntake). */
+	closeIntake: (ttlMs: number) => IntakeHold;
+	intakeClosed: () => boolean;
+	/** The work a restart right now would interrupt. */
+	busy: () => QueueBusySnapshot;
 	/** Re-enqueue the jobs the previous process left unfinished. Never throws. */
 	restore: () => Promise<RestoreResult>;
 	/** Stop taking jobs, give running ones `graceMs` to finish, flush the journal. */
@@ -113,6 +120,9 @@ const createNoopQueue = (): DeploymentQueue => ({
 	keepOldestWaiting: () => ({ kept: [], removed: [] }),
 	coalesceWaiting: () => ({ merged: null, removed: [], titles: [] }),
 	clearWaiting: () => 0,
+	closeIntake: () => ({ release: () => {}, extend: () => {} }),
+	intakeClosed: () => false,
+	busy: () => ({ active: [], heldGroups: [] }),
 	restore: () => Promise.resolve({ restored: 0, interrupted: 0, dropped: 0 }),
 	shutdown: () => Promise.resolve(),
 });
@@ -197,6 +207,9 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		coalesceWaiting: (incoming, predicate) =>
 			queue.coalesceWaiting(incoming, predicate),
 		clearWaiting: () => queue.clearWaiting(),
+		closeIntake: (ttlMs) => queue.closeIntake(ttlMs),
+		intakeClosed: () => queue.intakeClosed(),
+		busy: () => queue.busy(),
 		restore: async () => {
 			try {
 				const result = await durable.restore(queue);
@@ -453,5 +466,8 @@ export const killDockerBuild = async (
 		console.error(error);
 	}
 };
+
+/** True while an update or reload of Dokploy has closed the deploy intake. */
+export const isDeployIntakeClosed = () => myQueue.intakeClosed();
 
 export { myQueue };

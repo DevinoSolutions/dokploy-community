@@ -122,6 +122,37 @@ export type JobOutcome = "cancelled" | "failed";
 type Processor = (job: InMemoryJob) => Promise<unknown>;
 
 /**
+ * Thrown by `add` while the intake is closed for a restart and the job could
+ * not be written to the journal: accepting it would lose it at the restart, so
+ * the caller is told to try again (it is safe to: nothing was queued).
+ */
+export class DeployIntakeNotDurableError extends Error {
+	readonly retryable = true;
+	constructor() {
+		super(
+			"Dokploy is restarting for an update and could not record this deploy. Try again in a minute.",
+		);
+		this.name = "DeployIntakeNotDurableError";
+	}
+}
+
+/** A handle on a closed intake, returned by `closeIntake`. */
+export interface IntakeHold {
+	/** Reopen (idempotent). The intake opens once every hold is released. */
+	release: () => void;
+	/** Restart the hold's time limit from now. No-op once released. */
+	extend: (ttlMs: number) => void;
+}
+
+/** What is running right now, for the check before a restart. */
+export interface QueueBusySnapshot {
+	/** Running jobs (every partition), as the service they deploy. */
+	active: Array<{ group: string; data: DeploymentJob }>;
+	/** Services whose group lock is held outside a job (a compose Fetch). */
+	heldGroups: string[];
+}
+
+/**
  * Why a priority request did not put a job ahead:
  * - nothing-waiting: no other job waits in the lane, so there is nothing to pass.
  * - first-in-line: nothing ahead of it could start before it (the jobs ahead are
@@ -219,11 +250,17 @@ interface Partition {
  * (except `enqueued`) and ignores whatever they throw.
  */
 export interface QueueJournal {
-	/** The job was accepted. Awaited by `add`, so its ack means "durable". */
+	/**
+	 * The job was accepted. Awaited by `add`, so its ack means "durable".
+	 * Resolving `false` says the write was NOT confirmed (it failed or timed out);
+	 * `add` only acts on that while the intake is closed (see `closeIntake`).
+	 * Anything else, including no value, counts as written.
+	 */
 	enqueued(job: {
 		journalId: string;
 		data: DeploymentJob;
-	}): Promise<void> | void;
+		// biome-ignore lint/suspicious/noConfusingVoidType: existing journals return nothing
+	}): Promise<boolean | void> | boolean | void;
 	/** The worker picked the job up. */
 	started(journalId: string): void;
 	/** The job completed, failed or was removed from the queue. */
@@ -271,6 +308,14 @@ export class InMemoryQueue {
 	private processor: Processor | null = null;
 	private running = false;
 	private paused = false;
+	/**
+	 * Intake closed for a restart: the live holds. While any exists, jobs are
+	 * still accepted and journaled (they wait, and run as ordinary first runs
+	 * after the restart) but none starts. Separate from `paused`, which belongs
+	 * to the boot gate, so neither can reopen the other. Process memory only: it
+	 * dies with the process it was taken for.
+	 */
+	private holds = new Set<symbol>();
 	private seq = 0;
 	private idleWaiters: Array<() => void> = [];
 	private readonly resolveConcurrency: InMemoryQueueOptions["resolveConcurrency"];
@@ -348,16 +393,30 @@ export class InMemoryQueue {
 				? withoutPriority(requested)
 				: requested;
 		const job = this.createJob(data, randomUUID(), this.now());
+		// A job accepted while the intake is closed has to survive the restart the
+		// hold is for, so its journal write must be confirmed.
+		const needsDurable = this.intakeClosed();
 		// In memory first and synchronously: FIFO order is the call order even
 		// when the journal write below is slow.
 		partition.waiting.push(job);
 		this.schedule();
 		const journal = this.journal;
 		if (journal) {
+			let written = true;
 			try {
-				await journal.enqueued({ journalId: job.journalId, data });
+				written =
+					(await journal.enqueued({ journalId: job.journalId, data })) !==
+					false;
 			} catch {
 				// Never block a deploy on the journal; it reports its own failures.
+				written = false;
+			}
+			if (needsDurable && !written) {
+				// Not queued after all. If its row lands late the settle removes it.
+				const stillWaiting = partition.waiting.includes(job);
+				partition.waiting = partition.waiting.filter((j) => j !== job);
+				if (stillWaiting) this.settle([job]);
+				throw new DeployIntakeNotDurableError();
 			}
 		}
 		return priority ? { id: job.id, priority } : { id: job.id };
@@ -410,7 +469,8 @@ export class InMemoryQueue {
 	 * going ahead of anything.
 	 */
 	private freeSlots(partition: Partition): number {
-		if (!this.running || this.paused || !this.processor) return 0;
+		if (!this.running || this.paused || this.intakeClosed() || !this.processor)
+			return 0;
 		return Math.max(0, (partition.concurrency ?? 1) - partition.active.length);
 	}
 
@@ -905,6 +965,63 @@ export class InMemoryQueue {
 	}
 
 	/**
+	 * Close the intake: from now on no job starts, whatever its partition or
+	 * priority, but `add` keeps accepting and journaling jobs. They wait, and a
+	 * restart restores them as ordinary first runs (a waiting journal row is not
+	 * an interrupted one). Used by the Dokploy update/reload, so nothing begins in
+	 * the stretch between "the queue is idle" and the process being replaced.
+	 *
+	 * Taking the hold and reading `busy()` right after is one synchronous step,
+	 * so a job cannot start in between. The hold reopens when released, and on its
+	 * own after `ttlMs` (an update that never replaced this process must not
+	 * leave deploys stuck); `extend` restarts that clock.
+	 */
+	closeIntake(ttlMs: number): IntakeHold {
+		const token = Symbol("intake-hold");
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const release = () => {
+			clearTimeout(timer);
+			if (!this.holds.delete(token)) return;
+			if (this.holds.size === 0) this.schedule();
+		};
+		const arm = (ms: number) => {
+			clearTimeout(timer);
+			timer = setTimeout(() => {
+				if (!this.holds.has(token)) return;
+				console.error(
+					`Deployment queue: intake was closed for ${Math.round(ms / 1000)}s without the process being replaced, reopening`,
+				);
+				release();
+			}, ms);
+			timer.unref?.();
+		};
+		this.holds.add(token);
+		arm(ttlMs);
+		return {
+			release,
+			extend: (ms) => {
+				if (this.holds.has(token)) arm(ms);
+			},
+		};
+	}
+
+	/** True while a restart has closed the intake (jobs wait, none starts). */
+	intakeClosed(): boolean {
+		return this.holds.size > 0;
+	}
+
+	/** The work that a restart right now would interrupt. */
+	busy(): QueueBusySnapshot {
+		const active: QueueBusySnapshot["active"] = [];
+		for (const partition of this.partitions.values()) {
+			for (const job of partition.active) {
+				active.push({ group: job.group, data: job.data });
+			}
+		}
+		return { active, heldGroups: [...this.heldGroups] };
+	}
+
+	/**
 	 * Resolve `true` once no job is running, or `false` after `timeoutMs`. Used
 	 * by the graceful shutdown: after `close()` nothing new starts, so this only
 	 * waits for the jobs already in flight.
@@ -933,7 +1050,8 @@ export class InMemoryQueue {
 	}
 
 	private schedule() {
-		if (!this.running || this.paused || !this.processor) return;
+		if (!this.running || this.paused || this.intakeClosed() || !this.processor)
+			return;
 		for (const key of this.partitions.keys()) {
 			void this.drainPartition(key);
 		}
@@ -947,9 +1065,13 @@ export class InMemoryQueue {
 		partition.concurrency = concurrency;
 
 		// A shutdown can land while the concurrency was being resolved.
+		// The intake check is here, after the await above, so a drain that was
+		// already in flight when the intake closed cannot start one more job: from
+		// the moment `closeIntake` returns, the running count can only fall.
 		while (
 			this.running &&
 			!this.paused &&
+			!this.intakeClosed() &&
 			partition.active.length < concurrency
 		) {
 			const pick = this.pickNext(partition);
