@@ -233,9 +233,10 @@ describe("listing watches", () => {
 
 describe("the ghcr credentials", () => {
 	it("name the watch and its owner, which scope the login", async () => {
-		// findGithubWatch, then the connection row
+		// findGithubWatch, the access check's connection row (shared, so served), then the connection row
 		mocks.selectQueue = [
 			[existing()],
+			[{ createdByUserId: "u1", sharedWithOrganization: true }],
 			[
 				{
 					githubLogin: "amin",
@@ -257,6 +258,7 @@ describe("the ghcr credentials", () => {
 	it("are null for a connection without read:packages, so prod holds no GHCR token", async () => {
 		mocks.selectQueue = [
 			[existing()],
+			[{ createdByUserId: "u1", sharedWithOrganization: true }],
 			[
 				{
 					githubLogin: "amin",

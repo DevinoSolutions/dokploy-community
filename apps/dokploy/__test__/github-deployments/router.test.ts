@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
 	findRecentOtherGithubDeployer: vi.fn(),
 	listGithubConnectionRecords: vi.fn(),
 	setGithubConnectionShared: vi.fn(),
+	countWatchesPausedByUnshare: vi.fn(),
+	setGithubWatchesCreator: vi.fn(),
 	listGithubWatchesForConnection: vi.fn(),
 	listGithubWatchesForOrganization: vi.fn(),
 	progressGithubConnect: vi.fn(),
@@ -115,6 +117,8 @@ vi.mock("@dokploy/server", async () => ({
 	findRecentOtherGithubDeployer: mocks.findRecentOtherGithubDeployer,
 	listGithubConnectionRecords: mocks.listGithubConnectionRecords,
 	setGithubConnectionShared: mocks.setGithubConnectionShared,
+	countWatchesPausedByUnshare: mocks.countWatchesPausedByUnshare,
+	setGithubWatchesCreator: mocks.setGithubWatchesCreator,
 	listGithubWatchesForConnection: mocks.listGithubWatchesForConnection,
 	listGithubWatchesForOrganization: mocks.listGithubWatchesForOrganization,
 	presentGithubWatch: (row: unknown) => row,
@@ -194,6 +198,10 @@ beforeEach(() => {
 	);
 	mocks.findRecentOtherGithubDeployer.mockResolvedValue(null);
 	mocks.setGithubConnectionShared.mockResolvedValue({ connectionId: "conn-1" });
+	mocks.countWatchesPausedByUnshare.mockResolvedValue(0);
+	mocks.setGithubWatchesCreator.mockImplementation(
+		async (ids: string[]) => ids.length,
+	);
 	mocks.listGithubConnectionRecords.mockResolvedValue([]);
 	mocks.upsertGithubWatch.mockImplementation(async (input) =>
 		watchRow({ ...input }),
@@ -241,6 +249,9 @@ describe("watchSet and watchRemove need to be allowed to manage git providers AN
 				expect.objectContaining({
 					organizationId: "org-a",
 					postLogUrl: false,
+					// The creator is recorded (T-13796); user-1 owns conn-1, so this save claims it.
+					createdByUserId: "user-1",
+					claim: true,
 				}),
 			);
 		},
@@ -813,5 +824,129 @@ describe("disconnect refuses an account that services follow GitHub Actions thro
 			"conn-1",
 			"org-a",
 		);
+	});
+});
+
+describe("unsharing and taking watches over (T-13796)", () => {
+	it("watchSet by a member who does not own the connection records them as creator but does not claim an existing watch", async () => {
+		mocks.findGithubConnectionInOrganization.mockResolvedValue(
+			connection({ createdByUserId: "owner-1", sharedWithOrganization: true }),
+		);
+		await callerFor("admin", "org-a", "admin-2").watchSet(setInput);
+		expect(mocks.upsertGithubWatch).toHaveBeenCalledWith(
+			expect.objectContaining({ createdByUserId: "admin-2", claim: false }),
+		);
+	});
+
+	it("watchSet cannot be handed a creator by the caller", async () => {
+		await callerFor("admin", "org-a", "admin-2")
+			.watchSet({
+				...setInput,
+				createdByUserId: "someone-else",
+				claim: true,
+			} as never)
+			.catch(() => undefined);
+		const saved = mocks.upsertGithubWatch.mock.calls[0]?.[0];
+		expect(saved?.createdByUserId).toBe("admin-2");
+	});
+
+	it("toggleShare to unshared reports how many watches stop being served", async () => {
+		mocks.memberGitProviderActions = ["create"];
+		mocks.countWatchesPausedByUnshare.mockResolvedValue(3);
+		const result = await callerFor("member", "org-a", "user-1").toggleShare({
+			connectionId: "conn-1",
+			sharedWithOrganization: false,
+		});
+		expect(mocks.countWatchesPausedByUnshare).toHaveBeenCalledWith(
+			"conn-1",
+			"org-a",
+		);
+		expect(result).toMatchObject({ pausedWatches: 3 });
+	});
+
+	it("toggleShare to shared pauses nothing and does not count", async () => {
+		mocks.memberGitProviderActions = ["create"];
+		const result = await callerFor("member", "org-a", "user-1").toggleShare({
+			connectionId: "conn-1",
+			sharedWithOrganization: true,
+		});
+		expect(mocks.countWatchesPausedByUnshare).not.toHaveBeenCalled();
+		expect(result).toMatchObject({ pausedWatches: 0 });
+	});
+
+	describe("takeOver", () => {
+		beforeEach(() => {
+			mocks.memberGitProviderActions = ["create"];
+			mocks.listGithubWatchesForConnection.mockResolvedValue([
+				watchRow({
+					watchId: "w-null",
+					serviceId: "app-1",
+					createdByUserId: null,
+				}),
+				watchRow({
+					watchId: "w-other",
+					serviceId: "app-2",
+					createdByUserId: "member-2",
+				}),
+				watchRow({
+					watchId: "w-mine",
+					serviceId: "app-3",
+					createdByUserId: "user-1",
+				}),
+				watchRow({
+					watchId: "w-nosuch",
+					serviceId: "app-4",
+					createdByUserId: null,
+				}),
+			]);
+		});
+
+		it("makes the owner the creator of the watches on services they can deploy, GitHub Actions ones included, and counts the rest", async () => {
+			mocks.checkServicePermissionAndAccess.mockImplementation(
+				async (_ctx: unknown, serviceId: string) => {
+					if (serviceId === "app-4") {
+						throw new TRPCError({ code: "UNAUTHORIZED", message: "no" });
+					}
+				},
+			);
+			const result = await callerFor("member", "org-a", "user-1").takeOver({
+				connectionId: "conn-1",
+			});
+			expect(result).toEqual({ claimed: 2, skipped: 1 });
+			expect(mocks.setGithubWatchesCreator).toHaveBeenCalledWith(
+				["w-null", "w-other"],
+				"org-a",
+				"user-1",
+			);
+			expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledWith(
+				expect.anything(),
+				"app-1",
+				{ service: ["create"], deployment: ["create"] },
+			);
+		});
+
+		it.each([
+			["another member", "member", "member-2"],
+			["an admin", "admin", "user-admin"],
+			["the organization owner", "owner", "user-owner"],
+		] as const)(
+			"is refused for %s: only the connection's owner takes watches over",
+			async (_label, role, userId) => {
+				await expect(
+					callerFor(role, "org-a", userId).takeOver({ connectionId: "conn-1" }),
+				).rejects.toMatchObject({ code: "FORBIDDEN" });
+				expect(mocks.setGithubWatchesCreator).not.toHaveBeenCalled();
+			},
+		);
+
+		it("does not find a connection of another organization", async () => {
+			mocks.findGithubConnectionInOrganization.mockResolvedValue(null);
+			await expect(
+				callerFor("member", "org-b", "user-1").takeOver({
+					connectionId: "conn-1",
+				}),
+			).rejects.toMatchObject({ code: "NOT_FOUND" });
+			expect(mocks.setGithubWatchesCreator).not.toHaveBeenCalled();
+		});
 	});
 });

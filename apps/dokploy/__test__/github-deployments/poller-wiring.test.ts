@@ -194,7 +194,11 @@ const stack = (overrides: Record<string, unknown> = {}) => ({
 	...overrides,
 });
 
-const deps = () => poller.createGithubDeploymentsPollDeps();
+// The access rule (T-13796) has its own tests; here every watch is served.
+const deps = () => ({
+	...poller.createGithubDeploymentsPollDeps(),
+	checkWatchAccess: async () => ({ allowed: true as const }),
+});
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -696,6 +700,34 @@ describe("the tick", () => {
 		expect(mocks.deleteGithubWatch).toHaveBeenCalled();
 	});
 
+	it("hands the watch's saver to the access rule and polls nothing for a watch it refuses (T-13796)", async () => {
+		mocks.listEnabledGithubWatches.mockResolvedValue([
+			record({ createdByUserId: "member-2" }),
+		]);
+		mocks.appFindFirst.mockResolvedValue({ applicationId: "app-1" });
+		const checkWatchAccess = vi.fn(async () => ({
+			allowed: false as const,
+			reason: "not-shared" as const,
+			message: "Paused: not shared",
+		}));
+		const patchWatch = vi.fn(async () => {});
+		const { fetch, calls } = scriptedFetch([{ status: 200, json: [] }]);
+		await poller.runGithubDeploymentsTick({
+			...deps(),
+			fetch,
+			checkWatchAccess,
+			patchWatch,
+		});
+		expect(checkWatchAccess).toHaveBeenCalledWith(
+			expect.objectContaining({ watchId: "w1", createdByUserId: "member-2" }),
+		);
+		expect(calls).toHaveLength(0);
+		expect(patchWatch).toHaveBeenCalledWith(
+			"w1",
+			expect.objectContaining({ lastError: "Paused: not shared" }),
+		);
+	});
+
 	it("one watch failing does not end the tick for the watches after it", async () => {
 		mocks.listEnabledGithubWatches.mockResolvedValue([
 			record(),
@@ -758,5 +790,36 @@ describe("the poller's stop handle", () => {
 		expect(mocks.listEnabledGithubWatches).toHaveBeenCalledTimes(3);
 		// Stopping twice is harmless.
 		expect(() => stop()).not.toThrow();
+	});
+});
+
+describe("the poller's real dependencies (T-13796)", () => {
+	it("wire the connection access check, so a dropped line turns CI red", async () => {
+		const store = await import(
+			"@dokploy/server/services/github-deployments/store"
+		);
+		const real = poller.createGithubDeploymentsPollDeps();
+		expect(real.checkWatchAccess).toBe(store.checkGithubWatchAccess);
+	});
+
+	it("block a watch when the access check is missing, instead of serving it", async () => {
+		mocks.listEnabledGithubWatches.mockResolvedValue([
+			watchRow({ watchId: "w-no-check" }),
+		]);
+		mocks.appFindFirst.mockResolvedValue({ applicationId: "app-1" });
+		const { fetch, calls } = scriptedFetch([{ status: 200, json: [] }]);
+		const patchWatch = vi.fn(async () => {});
+		const { checkWatchAccess: _dropped, ...real } =
+			poller.createGithubDeploymentsPollDeps();
+		await poller.runGithubDeploymentsTick({
+			...real,
+			fetch,
+			patchWatch,
+		} as unknown as ReturnType<typeof poller.createGithubDeploymentsPollDeps>);
+		expect(calls).toHaveLength(0);
+		expect(patchWatch).toHaveBeenCalledWith(
+			"w-no-check",
+			expect.objectContaining({ lastError: expect.stringContaining("Paused") }),
+		);
 	});
 });

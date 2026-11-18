@@ -1,8 +1,11 @@
 import {
 	canRemoveGithubConnection,
 	canUseGithubConnection,
+	evaluateWatchAccess,
 	ownsGithubConnection,
 	visibleGithubConnections,
+	WATCH_BLOCKED_CREATOR_UNKNOWN,
+	WATCH_BLOCKED_NOT_SHARED,
 } from "@dokploy/server/services/github-deployments/connection-access";
 import { describe, expect, it } from "vitest";
 
@@ -75,5 +78,94 @@ describe("visibleGithubConnections", () => {
 		for (const seen of visibleGithubConnections(all, admin)) {
 			expect(seen).not.toHaveProperty("createdByUserId");
 		}
+	});
+});
+
+describe("whether a connection's token may serve a watch (T-13796)", () => {
+	const noAdmin = async () => false;
+	const isAdmin = async () => true;
+
+	it("serves every watch while the connection is shared", async () => {
+		expect(
+			await evaluateWatchAccess(
+				conn("u1", true),
+				{ createdByUserId: "u2" },
+				noAdmin,
+			),
+		).toEqual({ allowed: true });
+		expect(
+			await evaluateWatchAccess(
+				conn("u1", true),
+				{ createdByUserId: null },
+				noAdmin,
+			),
+		).toEqual({ allowed: true });
+	});
+
+	it("serves a watch its owner saved, shared or not", async () => {
+		expect(
+			await evaluateWatchAccess(conn("u1"), { createdByUserId: "u1" }, noAdmin),
+		).toEqual({ allowed: true });
+	});
+
+	it("stops serving another member's watch once the connection is not shared", async () => {
+		const access = await evaluateWatchAccess(
+			conn("u1", false),
+			{ createdByUserId: "u2" },
+			noAdmin,
+		);
+		expect(access).toEqual({
+			allowed: false,
+			reason: "not-shared",
+			message: WATCH_BLOCKED_NOT_SHARED,
+		});
+	});
+
+	it("keeps serving a watch an organization owner or admin saved, who may use any connection", async () => {
+		expect(
+			await evaluateWatchAccess(conn("u1"), { createdByUserId: "a1" }, isAdmin),
+		).toEqual({ allowed: true });
+	});
+
+	it("fails closed for a watch with no known saver on an unshared connection", async () => {
+		let asked = false;
+		const access = await evaluateWatchAccess(
+			conn("u1"),
+			{ createdByUserId: null },
+			async () => {
+				asked = true;
+				return true;
+			},
+		);
+		expect(access).toEqual({
+			allowed: false,
+			reason: "creator-unknown",
+			message: WATCH_BLOCKED_CREATOR_UNKNOWN,
+		});
+		expect(asked).toBe(false);
+	});
+
+	it("never matches a watch to a connection whose owner is unknown", async () => {
+		const access = await evaluateWatchAccess(
+			conn(null),
+			{ createdByUserId: null },
+			noAdmin,
+		);
+		expect(access.allowed).toBe(false);
+	});
+
+	it("does not look the saver's role up unless it has to", async () => {
+		let asked = 0;
+		const count = async () => {
+			asked += 1;
+			return false;
+		};
+		await evaluateWatchAccess(
+			conn("u1", true),
+			{ createdByUserId: "u2" },
+			count,
+		);
+		await evaluateWatchAccess(conn("u1"), { createdByUserId: "u1" }, count);
+		expect(asked).toBe(0);
 	});
 });

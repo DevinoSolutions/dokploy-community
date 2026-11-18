@@ -1,5 +1,7 @@
+import type { WatchAccess } from "@dokploy/server/services/github-deployments/connection-access";
 import {
 	describeError,
+	guardWatchAccess,
 	INFLIGHT_ROW_GRACE_MS,
 	INFLIGHT_TIMEOUT_MS,
 	type InflightState,
@@ -13,6 +15,7 @@ import {
 	STATUS_TEXT,
 	type StartOutcome,
 	selectNewDeployments,
+	WATCH_BLOCKED_NO_ACCESS_CHECK,
 	type WatchPatch,
 	type WatchRow,
 } from "@dokploy/server/services/github-deployments/poll-core";
@@ -64,6 +67,8 @@ const harness = (
 		token?: string | null;
 		/** The cursor was reset elsewhere: every compare-and-set patch is refused. */
 		cursorMoved?: boolean;
+		/** T-13796: the answer of the connection access rule (absent = no rule). */
+		access?: WatchAccess;
 	} = {},
 ) => {
 	const { fetch, calls } = scriptedFetch(fetchReplies);
@@ -80,6 +85,8 @@ const harness = (
 		markRevoked: async (id) => {
 			revoked.push(id);
 		},
+		checkWatchAccess: async () =>
+			options.access ?? ({ allowed: true } as WatchAccess),
 		blockedUntil: (key) => blocks.get(key),
 		block: (key, until) => {
 			blocks.set(key, until);
@@ -676,5 +683,126 @@ describe("reporting the end of a Dokploy deployment", () => {
 			expect(call.url).not.toContain("gho_secret");
 		}
 		expect(JSON.stringify(log.mock.calls)).not.toContain("gho_secret");
+	});
+});
+
+describe("a watch whose connection stopped serving it (T-13796)", () => {
+	const blocked: WatchAccess = {
+		allowed: false,
+		reason: "not-shared",
+		message: "Paused: the connection is no longer shared.",
+	};
+
+	it("does not touch GitHub or the token, says why in lastError, and backs off", async () => {
+		const loadToken = vi.fn(async () => "gho_secret");
+		const h = harness([{ status: 200, json: [] }], { access: blocked });
+		h.deps.loadToken = loadToken;
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(loadToken).not.toHaveBeenCalled();
+		expect(h.calls).toHaveLength(0);
+		expect(h.started).toEqual([]);
+		expect(h.revoked).toEqual([]);
+		expect(h.patches).toEqual([
+			{ lastError: blocked.message, lastCheckedAt: new Date(NOW) },
+		]);
+		expect(h.blocks.get("access:w1")).toBeGreaterThan(NOW);
+	});
+
+	it("does not report an in-flight deployment to GitHub with the owner's token", async () => {
+		const h = harness([{ status: 201, json: {} }], {
+			access: blocked,
+			inflight: { state: "done" },
+		});
+		await pollWatch(
+			baseWatch({
+				createdByUserId: "u2",
+				inflightDeploymentId: 12,
+				inflightStartedAt: new Date(NOW - 1000),
+			}),
+			h.deps,
+		);
+		expect(h.calls).toHaveLength(0);
+	});
+
+	it("works as before when access is allowed", async () => {
+		const h = harness([{ status: 304 }], { access: { allowed: true } });
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(h.calls).toHaveLength(1);
+		expect(h.patches[0]).not.toHaveProperty("lastError", blocked.message);
+	});
+
+	it("resumes by itself after the back-off once access is back, without a new watch", async () => {
+		let access: WatchAccess = blocked;
+		const h = harness([{ status: 304 }]);
+		h.deps.checkWatchAccess = async () => access;
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(h.calls).toHaveLength(0);
+		// Still inside the back-off: nothing, even if the connection is shared again.
+		access = { allowed: true };
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(h.calls).toHaveLength(0);
+		h.blocks.clear();
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(h.calls).toHaveLength(1);
+	});
+
+	it("does not tell GitHub the service is gone with a token the watch may not use", async () => {
+		const h = harness([{ status: 201, json: {} }], { access: blocked });
+		await reportServiceGone(
+			baseWatch({ createdByUserId: "u2", inflightDeploymentId: 12 }),
+			h.deps,
+		);
+		expect(h.calls).toHaveLength(0);
+	});
+});
+
+describe("the access guard fails closed and touches a blocked watch once per back-off (T-13796)", () => {
+	const blocked: WatchAccess = {
+		allowed: false,
+		reason: "not-shared",
+		message: "Paused: not shared.",
+	};
+
+	it("blocks a watch when no access check is wired, and says so", async () => {
+		const h = harness([{ status: 200, json: [] }]);
+		const { checkWatchAccess: _dropped, ...withoutCheck } = h.deps;
+		await pollWatch(baseWatch(), withoutCheck as unknown as PollDeps);
+		expect(h.calls).toHaveLength(0);
+		expect(h.patches).toEqual([
+			{
+				lastError: WATCH_BLOCKED_NO_ACCESS_CHECK,
+				lastCheckedAt: new Date(NOW),
+			},
+		]);
+	});
+
+	it("does not report a gone service with a token when no access check is wired", async () => {
+		const h = harness([{ status: 201, json: {} }]);
+		const { checkWatchAccess: _dropped, ...withoutCheck } = h.deps;
+		await reportServiceGone(
+			baseWatch({ inflightDeploymentId: 12 }),
+			withoutCheck as unknown as PollDeps,
+		);
+		expect(h.calls).toHaveLength(0);
+	});
+
+	it("reads the connection and writes the watch once per back-off, however often it is polled", async () => {
+		const check = vi.fn(async () => blocked);
+		const h = harness([{ status: 304 }]);
+		h.deps.checkWatchAccess = check;
+		for (let i = 0; i < 5; i++) {
+			expect(await guardWatchAccess(baseWatch(), h.deps)).toBe(false);
+		}
+		expect(check).toHaveBeenCalledTimes(1);
+		expect(h.patches).toHaveLength(1);
+	});
+
+	it("looks again at once when woken (Check now)", async () => {
+		const check = vi.fn(async () => blocked);
+		const h = harness([{ status: 304 }]);
+		h.deps.checkWatchAccess = check;
+		await guardWatchAccess(baseWatch(), h.deps);
+		await guardWatchAccess(baseWatch(), h.deps, { woken: true });
+		expect(check).toHaveBeenCalledTimes(2);
 	});
 });

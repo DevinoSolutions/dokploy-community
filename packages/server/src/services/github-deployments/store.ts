@@ -1,4 +1,5 @@
 import { db } from "@dokploy/server/db";
+import { member } from "@dokploy/server/db/schema/account";
 import { deployments } from "@dokploy/server/db/schema/deployment";
 import {
 	type GithubWatchServiceType,
@@ -17,6 +18,7 @@ import {
 	not,
 	or,
 } from "drizzle-orm";
+import { evaluateWatchAccess, type WatchAccess } from "./connection-access";
 
 /**
  * Database access for the GitHub Deployments pull flow.
@@ -118,6 +120,65 @@ export const setGithubConnectionShared = async (
 		)
 		.returning();
 	return row ? presentGithubConnection(row) : null;
+};
+
+/**
+ * How many watches stop being served if this connection is unshared now: the
+ * ones whose creator is unknown, or is neither the connection's owner nor a
+ * current owner or admin of the organization. The router reports it to the
+ * owner who is unsharing.
+ */
+export const countWatchesPausedByUnshare = async (
+	connectionId: string,
+	organizationId: string,
+): Promise<number> => {
+	const [connection] = await db
+		.select({
+			createdByUserId: githubDeploymentConnection.createdByUserId,
+		})
+		.from(githubDeploymentConnection)
+		.where(
+			and(
+				eq(githubDeploymentConnection.connectionId, connectionId),
+				eq(githubDeploymentConnection.organizationId, organizationId),
+			),
+		);
+	if (!connection) return 0;
+	const watches = await listGithubWatchesForConnection(
+		connectionId,
+		organizationId,
+	);
+	let paused = 0;
+	for (const watch of watches) {
+		const access = await checkGithubWatchAccess({
+			organizationId,
+			connectionId,
+			createdByUserId: watch.createdByUserId,
+			assumeShared: false,
+		});
+		if (!access.allowed) paused += 1;
+	}
+	return paused;
+};
+
+/** Record the member who now answers for these watches (the owner taking them over). */
+export const setGithubWatchesCreator = async (
+	watchIds: string[],
+	organizationId: string,
+	userId: string,
+) => {
+	if (watchIds.length === 0) return 0;
+	const rows = await db
+		.update(githubDeploymentWatch)
+		.set({ createdByUserId: userId })
+		.where(
+			and(
+				inArray(githubDeploymentWatch.watchId, watchIds),
+				eq(githubDeploymentWatch.organizationId, organizationId),
+			),
+		)
+		.returning({ watchId: githubDeploymentWatch.watchId });
+	return rows.length;
 };
 
 export const upsertGithubConnection = async (input: {
@@ -259,17 +320,34 @@ export const listEnabledGithubWatches = async () =>
  * cursor, so the next poll baselines again at the then-newest deployment and
  * the backlog that piled up meanwhile never runs.
  */
-export const upsertGithubWatch = async (input: {
-	organizationId: string;
-	serviceType: GithubWatchServiceType;
-	serviceId: string;
-	connectionId: string;
-	owner: string;
-	repo: string;
-	environment: string;
-	enabled: boolean;
-	postLogUrl?: boolean;
-}, executor: WatchExecutor = db) => {
+export const upsertGithubWatch = async (
+	input: {
+		organizationId: string;
+		serviceType: GithubWatchServiceType;
+		serviceId: string;
+		connectionId: string;
+		owner: string;
+		repo: string;
+		environment: string;
+		enabled: boolean;
+		postLogUrl?: boolean;
+		/**
+		 * The Dokploy user creating the watch (T-13796): the poller uses the
+		 * connection's token for it only while the connection is shared or this user
+		 * owns it (or is an owner or admin). Set on CREATE and when the watch is
+		 * pointed at another connection; a later save by someone else leaves it
+		 * alone. Omit to leave it as it is (the poller turning a watch on).
+		 */
+		createdByUserId?: string | null;
+		/**
+		 * The saver owns the connection: this save takes the watch over, whoever
+		 * created it before. Only the connection's owner (or the take-over action)
+		 * ever overwrites an existing creator.
+		 */
+		claim?: boolean;
+	},
+	executor: WatchExecutor = db,
+) => {
 	const existing = await findGithubWatch(
 		input.serviceType,
 		input.serviceId,
@@ -290,9 +368,15 @@ export const upsertGithubWatch = async (input: {
 				inflightStartedAt: null,
 			}
 		: {};
+	const { claim, ...watchInput } = input;
+	const writeCreator =
+		input.createdByUserId !== undefined &&
+		(claim === true ||
+			!existing ||
+			existing.connectionId !== input.connectionId);
 	const [row] = await executor
 		.insert(githubDeploymentWatch)
-		.values({ ...input, lastError: null })
+		.values({ ...watchInput, lastError: null })
 		.onConflictDoUpdate({
 			target: [
 				githubDeploymentWatch.serviceType,
@@ -304,6 +388,7 @@ export const upsertGithubWatch = async (input: {
 				repo: input.repo,
 				environment: input.environment,
 				enabled: input.enabled,
+				...(writeCreator ? { createdByUserId: input.createdByUserId } : {}),
 				...(input.postLogUrl === undefined
 					? {}
 					: { postLogUrl: input.postLogUrl }),
@@ -394,6 +479,66 @@ export const patchGithubWatch = async (
 	return true;
 };
 
+/**
+ * Whether the connection's token may be used for this watch right now (the
+ * rule is `evaluateWatchAccess`). Read on every tick and every pull, never
+ * cached, so unsharing takes effect at the next one. A connection that no
+ * longer exists is "allowed" here: the token lookup fails on its own, with its
+ * own message.
+ */
+export const checkGithubWatchAccess = async (watch: {
+	organizationId: string;
+	connectionId: string;
+	createdByUserId?: string | null;
+	/** Evaluate as if the connection were NOT shared (what unsharing would do). */
+	assumeShared?: false;
+}): Promise<WatchAccess> => {
+	const [connection] = await db
+		.select({
+			createdByUserId: githubDeploymentConnection.createdByUserId,
+			sharedWithOrganization: githubDeploymentConnection.sharedWithOrganization,
+		})
+		.from(githubDeploymentConnection)
+		.where(eq(githubDeploymentConnection.connectionId, watch.connectionId));
+	if (!connection) return { allowed: true };
+	const creator = watch.createdByUserId ?? null;
+	const evaluated =
+		watch.assumeShared === false
+			? { ...connection, sharedWithOrganization: false }
+			: connection;
+	return evaluateWatchAccess(
+		evaluated,
+		{ createdByUserId: creator },
+		async () => {
+			if (creator === null) return false;
+			// The saver's role as it is NOW: a demoted admin stops being served.
+			const [row] = await db
+				.select({ role: member.role })
+				.from(member)
+				.where(
+					and(
+						eq(member.userId, creator),
+						eq(member.organizationId, watch.organizationId),
+					),
+				);
+			return row?.role === "owner" || row?.role === "admin";
+		},
+	);
+};
+
+const warnedPausedWatch = new Set<string>();
+/**
+ * Once per watch and process: a private GHCR pull that follows has no login and
+ * will fail with Docker's own pull error, which does not say why.
+ */
+const warnPausedWatch = (watchId: string, reason: string) => {
+	if (warnedPausedWatch.has(watchId)) return;
+	warnedPausedWatch.add(watchId);
+	console.warn(
+		`GitHub deployments: no ghcr.io login for watch ${watchId}, so a private package fails to pull. ${reason}`,
+	);
+};
+
 const warnedNoPackagesScope = new Set<string>();
 /** Once per watch and process: a private GHCR pull that follows will fail, and this says why. */
 const warnNoPackagesScope = (watchId: string) => {
@@ -416,6 +561,12 @@ export const loadGhcrCredentials = async (
 ) => {
 	const watch = await findGithubWatch(serviceType, serviceId);
 	if (!watch || !watch.enabled) return null;
+	// An unshared connection does not serve another member's watch (T-13796).
+	const access = await checkGithubWatchAccess(watch);
+	if (!access.allowed) {
+		warnPausedWatch(watch.watchId, access.message);
+		return null;
+	}
 	const [row] = await db
 		.select({
 			githubLogin: githubDeploymentConnection.githubLogin,

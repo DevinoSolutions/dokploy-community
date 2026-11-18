@@ -117,6 +117,14 @@ export const githubDeploymentWatch = pgTable(
 		/** applicationId or composeId; polymorphic, so no foreign key. */
 		serviceId: text("serviceId").notNull(),
 		connectionId: text("connectionId").notNull(),
+		/**
+		 * Dokploy user who last saved the watch (T-13796). The poller uses the
+		 * connection's token for this watch only while the connection is shared
+		 * with the organization, or this user owns it (or is an owner or admin of
+		 * the organization). Null = unknown (a watch saved before this column);
+		 * on a connection that is not shared that fails closed. No foreign key.
+		 */
+		createdByUserId: text("createdByUserId"),
 		owner: text("owner").notNull(),
 		repo: text("repo").notNull(),
 		environment: text("environment").notNull().default("production"),
