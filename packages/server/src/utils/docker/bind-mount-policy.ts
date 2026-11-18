@@ -4,8 +4,10 @@ import { paths } from "@dokploy/server/constants";
 // A bind mount hands a path of the Docker host to a container, and its
 // uid/gid/mode make Dokploy run a recursive chown/chmod on that path as the
 // Dokploy process. Both reach the whole host, so they are a capability of the
-// owner and the admins, and the permission change never runs on a path the
-// host cannot afford to have rewritten.
+// owner and the admins (a member's container could plant a symlink in its own
+// service directory and bind that, so a member gets no bind mount at all), and
+// the permission change never runs on a path the host cannot afford to have
+// rewritten.
 //
 // Every decision is made on the normalized path (`//`, `/./`, `/../` and a
 // trailing slash resolved), and a path that cannot be normalized to an
@@ -137,8 +139,7 @@ type BindMountRequest = {
 
 const NOT_ABSOLUTE = "The host path of a bind mount must be an absolute path.";
 
-const MEMBER_REFUSAL =
-	"Only an owner or admin can bind mount a host path outside this service's own directories.";
+const MEMBER_REFUSAL = "Only an owner or admin can create bind mounts.";
 
 const HOST_REFUSAL =
 	"Only the organization that owns this Dokploy instance can bind mount paths of its host.";
@@ -151,11 +152,11 @@ export const evaluateBindMountHostPath = (
 	if (hostPath === null) {
 		return { ok: false, message: NOT_ABSOLUTE };
 	}
-	if (isServiceOwnHostPath(hostPath, request.appName, request.serverId)) {
-		return { ok: true, hostPath };
-	}
 	if (!request.privilegedRole) {
 		return { ok: false, message: MEMBER_REFUSAL };
+	}
+	if (isServiceOwnHostPath(hostPath, request.appName, request.serverId)) {
+		return { ok: true, hostPath };
 	}
 	if (!request.hostReach) {
 		return { ok: false, message: HOST_REFUSAL };
@@ -165,7 +166,7 @@ export const evaluateBindMountHostPath = (
 
 // Whether the uid/gid/mode of a bind mount may be applied to the host path.
 // Dangerous paths are refused for everyone; beyond that the caller needs the
-// same reach over the path as for binding it.
+// same standing as for binding the path.
 export const evaluateBindMountPermissions = (
 	request: BindMountRequest,
 ): BindMountDecision => {

@@ -103,9 +103,10 @@ const samePermissionSettings = (a: PermissionSettings, b: PermissionSettings) =>
 	(a.mode || null) === (b.mode || null);
 
 // A bind mount hands a host path to the container, and its uid/gid/mode make
-// Dokploy run chown/chmod -R on that path. Members only get the service's own
-// directories; the rest of the host is for owners and admins (of the
-// organization that owns the host, when the service runs on it).
+// Dokploy run chown/chmod -R on that path. Members get no bind mounts, not
+// even inside the service's own directories (a container can plant a symlink
+// there); the host is for owners and admins (of the organization that owns the
+// host, when the service runs on it).
 async function assertBindMountAllowed(
 	ctx: {
 		user: { role?: string | null };

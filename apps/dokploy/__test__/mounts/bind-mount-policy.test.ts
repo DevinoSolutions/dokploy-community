@@ -215,12 +215,17 @@ const base = {
 };
 
 describe("evaluateBindMountHostPath", () => {
-	it("lets a member bind only inside the service's own directories", () => {
-		const own = `${remote.APPLICATIONS_PATH}/app-1/files/data`;
-		expect(evaluateBindMountHostPath({ ...base, hostPath: own })).toEqual({
-			ok: true,
-			hostPath: own,
-		});
+	it("lets a member bind nothing, not even the service's own directories", () => {
+		for (const hostPath of [
+			`${remote.APPLICATIONS_PATH}/app-1`,
+			`${remote.APPLICATIONS_PATH}/app-1/files/data`,
+			`${remote.COMPOSE_PATH}/app-1/code`,
+		]) {
+			expect(evaluateBindMountHostPath({ ...base, hostPath })).toEqual({
+				ok: false,
+				message: expect.stringMatching(/owner or admin/i),
+			});
+		}
 	});
 
 	it.each([
@@ -326,13 +331,13 @@ describe("evaluateBindMountPermissions", () => {
 		).toEqual({ ok: true, hostPath: "/srv/data" });
 	});
 
-	it("limits a member to the service's own directories", () => {
+	it("lets a member change no permissions on a bind mount", () => {
 		expect(
 			evaluateBindMountPermissions({
 				...base,
 				hostPath: `${remote.APPLICATIONS_PATH}/app-1/files`,
 			}).ok,
-		).toBe(true);
+		).toBe(false);
 		const outside = evaluateBindMountPermissions({
 			...base,
 			hostPath: "/srv/data",

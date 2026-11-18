@@ -2,8 +2,8 @@ import { paths } from "@dokploy/server/constants";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // A bind mount hands a host path to a container and its uid/gid/mode make
-// Dokploy run chown/chmod -R on it (T-8806). Members get the service's own
-// directories only; owners and admins keep the host. The policy is real here,
+// Dokploy run chown/chmod -R on it (T-8806). Members get no bind
+// mounts; owners and admins keep the host. The policy is real here,
 // only the service lookups and the permission checks are scripted.
 const mocks = vi.hoisted(() => ({
 	createMount: vi.fn(),
@@ -167,18 +167,20 @@ describe("creating a bind mount as a member", () => {
 		}
 	});
 
-	it("keeps a bind inside the service's own directories working, permissions included", async () => {
-		await as("member").create(
-			createInput({ hostPath: `${ownDir}/files/data` }),
-		);
-		await as("member").create(
-			createInput({
-				hostPath: `${ownDir}/files/data/`,
-				uid: 1000,
-				mode: "750",
-			}),
-		);
-		expect(mocks.createMount).toHaveBeenCalledTimes(2);
+	it("refuses a bind inside the service's own directories too, permissions included", async () => {
+		await expect(
+			as("member").create(createInput({ hostPath: `${ownDir}/files/data` })),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		await expect(
+			as("member").create(
+				createInput({
+					hostPath: `${ownDir}/files/data/`,
+					uid: 1000,
+					mode: "750",
+				}),
+			),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(mocks.createMount).not.toHaveBeenCalled();
 	});
 
 	it("refuses permissions on a host path of the owners", async () => {
@@ -315,17 +317,29 @@ describe("updating a bind mount as a member", () => {
 		expect(mocks.updateMount).not.toHaveBeenCalled();
 	});
 
-	it("lets it move a bind inside its own directories and set permissions there", async () => {
+	it("refuses to move a bind inside its own directories or set permissions there", async () => {
 		mocks.findMountById.mockResolvedValue(
 			storedBind({ hostPath: `${ownDir}/files` }),
 		);
-		await as("member").update({
-			mountId: "mount-1",
-			hostPath: `${ownDir}/files/more`,
-			uid: 1000,
-		});
-		await as("member").update({ mountId: "mount-1", mode: "750" });
-		expect(mocks.updateMount).toHaveBeenCalledTimes(2);
+		await expect(
+			as("member").update({
+				mountId: "mount-1",
+				hostPath: `${ownDir}/files/more`,
+				uid: 1000,
+			}),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		await expect(
+			as("member").update({ mountId: "mount-1", mode: "750" }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(mocks.updateMount).not.toHaveBeenCalled();
+	});
+
+	it("keeps a bind of its own directories saved earlier editable for other fields", async () => {
+		mocks.findMountById.mockResolvedValue(
+			storedBind({ hostPath: `${ownDir}/files`, uid: 1000 }),
+		);
+		await as("member").update({ mountId: "mount-1", mountPath: "/other" });
+		expect(mocks.updateMount).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps a bind saved earlier editable when the host path and permissions stay", async () => {
