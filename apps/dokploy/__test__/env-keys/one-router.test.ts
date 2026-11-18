@@ -12,6 +12,7 @@ const state = vi.hoisted(() => ({
 	compose: null as unknown,
 	postgres: null as unknown,
 	checkServiceAccess: vi.fn(async () => undefined),
+	hasPermission: vi.fn(async () => false),
 }));
 
 vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
@@ -19,7 +20,11 @@ vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
 		await importOriginal<
 			typeof import("@dokploy/server/services/permission")
 		>();
-	return { ...actual, checkServiceAccess: state.checkServiceAccess };
+	return {
+		...actual,
+		checkServiceAccess: state.checkServiceAccess,
+		hasPermission: state.hasPermission,
+	};
 });
 
 vi.mock("@dokploy/server/index", async (importOriginal) => {
@@ -57,6 +62,8 @@ beforeEach(() => {
 	state.compose = secretComposeRow();
 	state.postgres = secretPostgresRow();
 	state.checkServiceAccess.mockClear();
+	state.hasPermission.mockReset();
+	state.hasPermission.mockResolvedValue(false);
 });
 
 describe("application.one", () => {
@@ -70,6 +77,42 @@ describe("application.one", () => {
 		).toContain(SECRET_MARK);
 		expect(result).not.toHaveProperty("secretsRedacted");
 		expect(result.hasGitProviderAccess).toBe(true);
+	});
+
+	it("never returns an AWS secret access key of a linked registry", async () => {
+		const result = await caller.application.one({ applicationId: "app-1" });
+		for (const relation of [
+			result.registry,
+			result.buildRegistry,
+			result.rollbackRegistry,
+		]) {
+			expect(relation?.awsSecretAccessKey).toBe("");
+		}
+		expect(JSON.stringify(result)).not.toContain("SECRET-aws-secret");
+		expect(JSON.stringify(result)).not.toContain("SECRET-aws-build-secret");
+		expect(JSON.stringify(result)).not.toContain("SECRET-aws-rollback-secret");
+	});
+
+	it("withholds the AWS access key id from a caller who cannot edit the service", async () => {
+		const result = await caller.application.one({ applicationId: "app-1" });
+		expect(result.registry?.awsAccessKeyId).toBe("");
+		expect(result.buildRegistry?.awsAccessKeyId).toBe("");
+		expect(result.rollbackRegistry?.awsAccessKeyId).toBe("");
+		// What the registry shows without a secret stays.
+		expect(result.registry?.awsRegion).toBe("us-east-1");
+		expect(result.registry?.registryId).toBe("reg-1");
+		expect(result.rollbackRegistry?.awsRegion).toBeNull();
+	});
+
+	it("keeps the AWS access key id for a caller who can edit the service, but not the secret", async () => {
+		// The first permission check of application.one is service.create (canEdit).
+		state.hasPermission.mockResolvedValueOnce(true);
+		const result = await caller.application.one({ applicationId: "app-1" });
+		expect(result.registry?.awsAccessKeyId).toBe("AKIA-ID-REGISTRY");
+		expect(result.buildRegistry?.awsAccessKeyId).toBe("AKIA-ID-BUILD");
+		expect(result.registry?.awsSecretAccessKey).toBe("");
+		expect(result.buildRegistry?.awsSecretAccessKey).toBe("");
+		expect(result.rollbackRegistry?.awsSecretAccessKey).toBe("");
 	});
 
 	it("keeps values when includeEnv is true", async () => {
@@ -87,6 +130,10 @@ describe("application.one", () => {
 		});
 		expect(leaks(result)).toBe(false);
 		expect(result.env).toBe("");
+		// The access key id is no SECRET- value: check the registries by name.
+		expect(result.registry?.awsAccessKeyId).toBe("");
+		expect(result.buildRegistry?.awsAccessKeyId).toBe("");
+		expect(result.rollbackRegistry?.awsAccessKeyId).toBe("");
 		expect(result).toMatchObject({
 			secretsRedacted: true,
 			applicationId: "app-1",

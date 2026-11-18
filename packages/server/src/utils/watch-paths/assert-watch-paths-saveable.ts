@@ -58,3 +58,17 @@ export const assertWatchPathsSaveable = async (
 		throw new TRPCError({ code: "BAD_REQUEST", message: problems.join(" ") });
 	}
 };
+
+/**
+ * `assertWatchPathsSaveable` for one kind of unit: bind it to the finder that
+ * loads the stored row (`findApplicationById`, `findComposeById`) and call the
+ * result with the unit's id and the list being saved. Every `save*Provider`
+ * route and `update` of a unit calls it, so the rule has one definition.
+ */
+export const watchPathsSaveGuard =
+	(findCurrent: (id: string) => Promise<{ watchPaths: Paths }>) =>
+	(id: string, next: Paths): Promise<void> =>
+		assertWatchPathsSaveable(
+			next,
+			async () => (await findCurrent(id)).watchPaths,
+		);

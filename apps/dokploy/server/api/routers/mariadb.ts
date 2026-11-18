@@ -34,7 +34,9 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
+	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
@@ -184,7 +186,7 @@ export const mariadbRouter = createTRPCRouter({
 				resourceId: service.mariadbId,
 				resourceName: service.appName,
 			});
-			return service;
+			return serviceStatusResult(service, "mariadbId", "done");
 		}),
 	stop: protectedProcedure
 		.input(apiFindOneMariaDB)
@@ -209,7 +211,7 @@ export const mariadbRouter = createTRPCRouter({
 				resourceId: mariadb.mariadbId,
 				resourceName: mariadb.appName,
 			});
-			return mariadb;
+			return serviceStatusResult(mariadb, "mariadbId", "idle");
 		}),
 	saveExternalPort: protectedProcedure
 		.input(apiSaveExternalPortMariaDB)
@@ -297,7 +299,7 @@ export const mariadbRouter = createTRPCRouter({
 				resourceId: mongo.mariadbId,
 				resourceName: mongo.appName,
 			});
-			return mongo;
+			return serviceStatusResult(mongo, "mariadbId", input.applicationStatus);
 		}),
 	remove: protectedProcedure
 		.input(apiFindOneMariaDB)
@@ -334,7 +336,7 @@ export const mariadbRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return mongo;
+			return deletedServiceResult(mongo, "mariadbId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesMariaDB)

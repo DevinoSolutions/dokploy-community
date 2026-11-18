@@ -35,7 +35,9 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
+	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
@@ -194,7 +196,7 @@ export const postgresRouter = createTRPCRouter({
 				resourceId: service.postgresId,
 				resourceName: service.appName,
 			});
-			return service;
+			return serviceStatusResult(service, "postgresId", "done");
 		}),
 	stop: protectedProcedure
 		.input(apiFindOnePostgres)
@@ -218,7 +220,7 @@ export const postgresRouter = createTRPCRouter({
 				resourceId: postgres.postgresId,
 				resourceName: postgres.appName,
 			});
-			return postgres;
+			return serviceStatusResult(postgres, "postgresId", "idle");
 		}),
 	saveExternalPort: protectedProcedure
 		.input(apiSaveExternalPortPostgres)
@@ -324,7 +326,7 @@ export const postgresRouter = createTRPCRouter({
 				resourceId: postgres.postgresId,
 				resourceName: postgres.appName,
 			});
-			return postgres;
+			return serviceStatusResult(postgres, "postgresId", input.applicationStatus);
 		}),
 	remove: protectedProcedure
 		.input(apiFindOnePostgres)
@@ -362,7 +364,7 @@ export const postgresRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return postgres;
+			return deletedServiceResult(postgres, "postgresId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesPostgres)

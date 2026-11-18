@@ -25,7 +25,7 @@ export const listEnvKeys = (source: string | null | undefined): string[] =>
 const BLANK = "";
 
 /** Columns on a service row whose value is a secret (or a credential to one). */
-const SECRET_ROW_FIELDS = [
+export const SECRET_ROW_FIELDS = [
 	"env",
 	"buildArgs",
 	"buildSecrets",
@@ -41,7 +41,7 @@ const SECRET_ROW_FIELDS = [
 ] as const;
 
 /** Credential columns that a nested provider/registry/destination row can carry. */
-const NESTED_SECRET_FIELDS = [
+export const NESTED_SECRET_FIELDS = [
 	"password",
 	"secret",
 	"accessToken",
@@ -52,11 +52,32 @@ const NESTED_SECRET_FIELDS = [
 	"githubClientSecret",
 	"githubPrivateKey",
 	"githubWebhookSecret",
+	// GitLab's webhook secret (`gitlab.webhookSecret`).
+	"webhookSecret",
 	"accessKey",
 	"secretAccessKey",
 	"encryptionKey",
 	"encryptionPassword2",
 	"privateKey",
+	// AWS ECR registry credentials (`registry`, `buildRegistry`, `rollbackRegistry`).
+	"awsAccessKeyId",
+	"awsSecretAccessKey",
+	// Raw rclone flags of a backup destination; they can carry a header or a token.
+	"additionalFlags",
+] as const;
+
+/**
+ * Nested columns that name an account rather than prove access to it. A caller
+ * who may edit the service keeps them on the dashboard read (the registry form
+ * shows the access key id); everybody else gets them blank.
+ */
+const NESTED_IDENTIFIER_FIELDS: readonly string[] = ["awsAccessKeyId"];
+
+/** The three registries a service row can link; each can be an AWS ECR one. */
+const SERVICE_REGISTRY_RELATIONS = [
+	"registry",
+	"buildRegistry",
+	"rollbackRegistry",
 ] as const;
 
 type AnyRecord = Record<string, unknown>;
@@ -69,6 +90,8 @@ const blankFields = (row: unknown, fields: readonly string[]): unknown => {
 	const next: AnyRecord = { ...row };
 	for (const field of fields) {
 		if (typeof next[field] === "string") next[field] = BLANK;
+		// A list column (a destination's `additionalFlags`): emptied, not removed.
+		else if (Array.isArray(next[field])) next[field] = [];
 	}
 	return next;
 };
@@ -133,6 +156,76 @@ const redactEnvironment = (environment: unknown): unknown => {
 	};
 };
 
+/**
+ * The row with the credentials of its linked registries blanked (every column
+ * of `NESTED_SECRET_FIELDS`), for the dashboard read of `application.one`,
+ * which otherwise keeps its values. The finder has to load
+ * `awsSecretAccessKey`: the ECR login on the deploy path reads it from the
+ * relation. A client never needs it, and the registry router withholds it from
+ * everybody, so it is blanked here for every caller. The access key id names
+ * the account rather than proving access to it, and stays for a caller who may
+ * edit the service (`keepAccessKeyId`). Strings become `""`, null stays null.
+ */
+export const redactRegistryAwsKeys = <T extends object>(
+	row: T,
+	options: { keepAccessKeyId: boolean },
+): T => {
+	const record = row as AnyRecord;
+	const fields = options.keepAccessKeyId
+		? NESTED_SECRET_FIELDS.filter(
+				(field) => !NESTED_IDENTIFIER_FIELDS.includes(field),
+			)
+		: NESTED_SECRET_FIELDS;
+	let next: AnyRecord | null = null;
+	for (const relation of SERVICE_REGISTRY_RELATIONS) {
+		if (!(relation in record)) continue;
+		next ??= { ...record };
+		next[relation] = blankFields(record[relation], fields);
+	}
+	return (next ?? row) as T;
+};
+
+/**
+ * What a start, stop or status mutation answers: the service id and the status
+ * it was just set to. Not the row `find*ById` loaded: it holds `env`, the
+ * webhook `refreshToken`, passwords and the linked registries' credentials,
+ * and the `deployment.create` permission these routes need does not include
+ * reading them (`application.one` withholds some of them from such callers).
+ */
+export const serviceStatusResult = <K extends string, S extends string>(
+	row: Record<K, string>,
+	idKey: K,
+	applicationStatus: S,
+) => ({ [idKey]: row[idKey], applicationStatus }) as Record<K, string> & {
+	applicationStatus: S;
+};
+
+/**
+ * What a delete mutation answers: the id of the service and the project and
+ * environment it lived in, which the dashboard needs to go back to the
+ * environment page. Not the row: `find*ById` loads `env`, the webhook
+ * `refreshToken`, database passwords and a compose service's backup metadata,
+ * and the `delete` permission does not include reading any of them.
+ */
+export const deletedServiceResult = <
+	K extends string,
+	R extends Record<K, string> & {
+		environment: { environmentId: string; projectId: string };
+	},
+>(
+	row: R,
+	idKey: K,
+) =>
+	({
+		[idKey]: row[idKey],
+		environment: {
+			environmentId: row.environment.environmentId,
+			projectId: row.environment.projectId,
+		},
+	}) as Record<K, string> & {
+		environment: { environmentId: string; projectId: string };
+	};
+
 /** Marker added to a redacted row so a reader can tell blank from unset. */
 export interface SecretsRedacted {
 	secretsRedacted: true;
@@ -169,9 +262,7 @@ export const redactServiceSecrets = <T extends AnyRecord>(
 		"gitlab",
 		"bitbucket",
 		"gitea",
-		"registry",
-		"buildRegistry",
-		"rollbackRegistry",
+		...SERVICE_REGISTRY_RELATIONS,
 		"customGitSSHKey",
 	]) {
 		if (relation in next) {
@@ -510,7 +601,10 @@ export const scrubCommandFields = (node: unknown): unknown => {
 	for (const [key, value] of Object.entries(node)) {
 		const lower = key.toLowerCase();
 		let next: unknown;
-		if ((lower === "command" || lower === "args") && typeof value === "string") {
+		if (
+			(lower === "command" || lower === "args") &&
+			typeof value === "string"
+		) {
 			next = scrubCommandText(value);
 		} else if (
 			(lower === "command" || lower === "args") &&

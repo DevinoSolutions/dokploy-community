@@ -34,7 +34,9 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
+	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
@@ -188,7 +190,7 @@ export const mongoRouter = createTRPCRouter({
 				resourceId: service.mongoId,
 				resourceName: service.appName,
 			});
-			return service;
+			return serviceStatusResult(service, "mongoId", "done");
 		}),
 	stop: protectedProcedure
 		.input(apiFindOneMongo)
@@ -213,7 +215,7 @@ export const mongoRouter = createTRPCRouter({
 				resourceId: mongo.mongoId,
 				resourceName: mongo.appName,
 			});
-			return mongo;
+			return serviceStatusResult(mongo, "mongoId", "idle");
 		}),
 	saveExternalPort: protectedProcedure
 		.input(apiSaveExternalPortMongo)
@@ -317,7 +319,7 @@ export const mongoRouter = createTRPCRouter({
 				resourceId: mongo.mongoId,
 				resourceName: mongo.appName,
 			});
-			return mongo;
+			return serviceStatusResult(mongo, "mongoId", input.applicationStatus);
 		}),
 	reload: protectedProcedure
 		.input(apiResetMongo)
@@ -387,7 +389,7 @@ export const mongoRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return mongo;
+			return deletedServiceResult(mongo, "mongoId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesMongo)

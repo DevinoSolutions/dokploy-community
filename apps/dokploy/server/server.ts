@@ -17,6 +17,7 @@ import {
 	isMcpDisabled,
 	isNotSwarmManagerError,
 	logRootOrganization,
+	logUnitsWithRefusedWatchPaths,
 	queueTraefikRecreate,
 	repairCredentialAccountIds,
 	restoreInterruptedTraefik,
@@ -125,6 +126,9 @@ void app
 			});
 			await repairCredentialAccountIds().catch((error) => {
 				console.error("Failed to repair credential accounts:", error);
+			});
+			await logUnitsWithRefusedWatchPaths().catch((error) => {
+				console.error("Failed to list refused watch paths:", error);
 			});
 
 			if (process.env.NODE_ENV === "production" && !IS_CLOUD) {

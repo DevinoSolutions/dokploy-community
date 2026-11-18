@@ -4,10 +4,11 @@ import type { z } from "zod";
 import { db } from "../db";
 import {
 	type createVolumeBackupSchema,
-	type updateVolumeBackupSchema,
 	mounts,
+	type updateVolumeBackupSchema,
 	volumeBackups,
 } from "../db/schema";
+import { DESTINATION_READ_COLUMNS } from "./backup-read-view";
 import { findComposeById } from "./compose";
 
 export const findVolumeBackupById = async (volumeBackupId: string) => {
@@ -101,12 +102,9 @@ export const findVolumeBackupById = async (volumeBackupId: string) => {
 					},
 				},
 			},
-			destination: {
-				columns: {
-					accessKey: false,
-					secretAccessKey: false,
-				},
-			},
+			// An allowlist: the runners load the destination they use themselves, and
+			// nothing that reads this row needs its credentials.
+			destination: { columns: DESTINATION_READ_COLUMNS },
 		},
 	});
 
