@@ -18,6 +18,7 @@ Upgrade notes: no database migration and nothing to configure. An image-only rol
 
 - A service whose stored watch paths contain a pattern that is no longer allowed deploys on every push, as before, but this is now visible: the warning is logged at most once an hour per list instead of on every webhook delivery, and the server names every affected application and compose stack in its log when it starts.
 - The check that refuses new unsafe watch paths when a Git source is saved is one shared helper instead of seven copies.
+- A heavily loaded build server no longer fails a deploy with "SSH connection error: Keepalive timeout". The remote command, file write and Docker API connections gave up after 30 seconds of silence (a ping every 10 s, 3 misses), which a busy server can exceed while the build is fine. Every SSH connection now uses one setting, a ping every 15 s and a drop after 8 misses (about two minutes). The setup, validation and audit checks, the terminals, the log viewers and the SFTP upload had no keepalive and now have it too.
 
 ### New in v0.31.0-community.6
 

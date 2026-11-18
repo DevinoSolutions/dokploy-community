@@ -1,5 +1,6 @@
 import { Client } from "ssh2";
 import { findServerById } from "../services/server";
+import { SSH_KEEPALIVE } from "../utils/process/ssh-keepalive";
 
 export const validateDocker = () => `
   if command_exists docker; then
@@ -206,6 +207,7 @@ export const serverValidate = async (serverId: string) => {
 				port: server.port,
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
+				...SSH_KEEPALIVE,
 			});
 	});
 };
