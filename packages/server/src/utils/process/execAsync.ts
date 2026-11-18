@@ -15,9 +15,7 @@ import {
 } from "./ExecError";
 import { assertServerHasSshKey } from "./MissingSshKeyError";
 import { registerRemoteBuild } from "./remote-build-registry";
-
-// ~2 min without replies before a silent host is treated as dead.
-export const sshKeepalive = { keepaliveInterval: 15_000, keepaliveCountMax: 8 };
+import { SSH_KEEPALIVE } from "./ssh-keepalive";
 
 export class WriteFileRemoteError extends Error {
 	constructor(
@@ -43,14 +41,14 @@ export {
 const execAsyncBase = util.promisify(exec);
 
 // A command can print nothing for as long as a build runs, and a link that goes
-// half-open then never closes the channel. The client pings, so ssh2 drops the
-// connection (an "error", then "close") about 40 seconds after the last reply.
-// Shared with the remote Docker API client (servers/remote-docker.ts), whose
-// ssh2 connection would otherwise hang on a host that died mid-update.
-export const SSH_KEEPALIVE = {
-	keepaliveInterval: 10_000,
-	keepaliveCountMax: 3,
-};
+// half-open then never closes the channel. The client pings (SSH_KEEPALIVE: every
+// 15 s, dropped after 8 misses), so ssh2 drops the connection (an "error", then
+// "close") about two minutes after the last reply. One setting for every ssh2
+// connection of the fork, including the remote Docker API client
+// (servers/remote-docker.ts), whose connection would otherwise hang on a host
+// that died mid-update. Defined in ssh-keepalive.ts, re-exported here.
+export { SSH_KEEPALIVE };
+
 
 // Node embeds the full command in error.message; it may carry secrets. A
 // command wrapped by `shSingleQuote` (execAsyncCancelable) appears there with

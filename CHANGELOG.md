@@ -13,6 +13,10 @@ Upgrade notes: no database migration and nothing to configure. Mounts that are a
 - Setting an owner, group or mode on a bind mount no longer runs a recursive `chown`/`chmod` on a system or Dokploy directory (`/`, `/etc`, `/usr`, `/root`, `/home`, `/var/run`, `/var/log`, `/var/lib/docker`, `/var/lib/containerd`, the Dokploy base directories and the like), on any `.ssh` directory, or on a socket, for anyone including owners. The path has to be written in its canonical form (no `//`, `/./`, `/../` or trailing slash) and be absolute, a relative path is refused as a bad request, and the command never follows a symbolic link: it skips a path that is a link or goes through one, and does not traverse links inside it.
 - Fixed: editing a mount of a database or compose service through the API without naming its service type was refused as "the service of a mount cannot be changed"; the stored service type is used now. Mounts that were already saved on a path above are not checked again when you edit their other fields.
 
+**Fixed.**
+
+- A heavily loaded build server no longer fails a deploy with "SSH connection error: Keepalive timeout". The remote command, file write and Docker API connections gave up after 30 seconds of silence (a ping every 10 s, 3 misses), which a busy server can exceed while the build is fine. Every SSH connection now uses one setting, a ping every 15 s and a drop after 8 misses (about two minutes). The setup, validation and audit checks, the terminals, the log viewers and the SFTP upload had no keepalive and now have it too.
+
 ### New in v0.31.0-community.6
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.5 keeps working. This release includes everything in v0.31.0-community.5.

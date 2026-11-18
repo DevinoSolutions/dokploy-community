@@ -1,5 +1,6 @@
 import type http from "node:http";
 import { findServerById, IS_CLOUD, validateRequest } from "@dokploy/server";
+import { SSH_KEEPALIVE } from "@dokploy/server/utils/process/ssh-keepalive";
 import { spawn } from "node-pty";
 import { Client } from "ssh2";
 import { WebSocketServer } from "ws";
@@ -187,6 +188,7 @@ export const setupDockerContainerTerminalWebSocketServer = (
 						port: server.port,
 						username: server.username,
 						privateKey: server.sshKey?.privateKey,
+						...SSH_KEEPALIVE,
 					});
 			} else {
 				const ptyProcess = spawn(
