@@ -1,5 +1,6 @@
 import { Client } from "ssh2";
 import { findServerById } from "../services/server";
+import { SSH_KEEPALIVE } from "../utils/process/ssh-keepalive";
 
 // Thanks for the idea to https://github.com/healthyhost/audit-vps-script/tree/main
 const validateUfw = () => `
@@ -146,6 +147,7 @@ export const serverAudit = async (serverId: string) => {
 				port: server.port,
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
+				...SSH_KEEPALIVE,
 			});
 	});
 };

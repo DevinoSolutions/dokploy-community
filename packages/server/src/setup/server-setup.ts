@@ -24,6 +24,7 @@ import {
 import slug from "slugify";
 import { Client } from "ssh2";
 import { recreateDirectory } from "../utils/filesystem/directory";
+import { SSH_KEEPALIVE } from "../utils/process/ssh-keepalive";
 import { setupMonitoring } from "./monitoring-setup";
 
 const generateToken = () => {
@@ -581,6 +582,7 @@ const installRequirements = async (
 				port: server.port,
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
+				...SSH_KEEPALIVE,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
