@@ -28,13 +28,16 @@ export const ExportProject = ({ projectId, projectName, children }: Props) => {
 	const [includeSecrets, setIncludeSecrets] = useState(false);
 	const [isExporting, setIsExporting] = useState(false);
 	const utils = api.useUtils();
+	// Secrets go only to callers who may edit services (the server refuses others).
+	const { data: permissions } = api.user.getPermissions.useQuery();
+	const canExportSecrets = permissions?.service.create ?? false;
 
 	const onExport = async () => {
 		setIsExporting(true);
 		try {
 			const data = await utils.project.export.fetch({
 				projectId,
-				includeSecrets,
+				includeSecrets: includeSecrets && canExportSecrets,
 			});
 			const blob = new Blob([JSON.stringify(data, null, 2)], {
 				type: "application/json",
@@ -84,7 +87,8 @@ export const ExportProject = ({ projectId, projectName, children }: Props) => {
 					<div className="flex items-center gap-3">
 						<Checkbox
 							id="include-secrets"
-							checked={includeSecrets}
+							checked={includeSecrets && canExportSecrets}
+							disabled={!canExportSecrets}
 							onCheckedChange={(checked) => setIncludeSecrets(checked === true)}
 						/>
 						<label

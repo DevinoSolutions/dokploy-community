@@ -36,6 +36,7 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	movedServiceResult,
 	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -533,7 +534,7 @@ export const mariadbRouter = createTRPCRouter({
 				resourceId: updatedMariadb.mariadbId,
 				resourceName: updatedMariadb.appName,
 			});
-			return updatedMariadb;
+			return movedServiceResult(updatedMariadb, "mariadbId");
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildMariadb)

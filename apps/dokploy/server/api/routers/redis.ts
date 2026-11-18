@@ -35,6 +35,7 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	movedServiceResult,
 	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -535,7 +536,7 @@ export const redisRouter = createTRPCRouter({
 				resourceId: updatedRedis.redisId,
 				resourceName: updatedRedis.appName,
 			});
-			return updatedRedis;
+			return movedServiceResult(updatedRedis, "redisId");
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildRedis)

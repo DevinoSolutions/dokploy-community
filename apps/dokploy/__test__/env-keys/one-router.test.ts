@@ -12,7 +12,7 @@ const state = vi.hoisted(() => ({
 	compose: null as unknown,
 	postgres: null as unknown,
 	checkServiceAccess: vi.fn(async () => undefined),
-	hasPermission: vi.fn(async () => false),
+	hasPermission: vi.fn(async (_ctx?: unknown, _request?: unknown) => false),
 }));
 
 vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
@@ -139,6 +139,42 @@ describe("application.one", () => {
 			applicationId: "app-1",
 			hasGitProviderAccess: true,
 		});
+	});
+});
+
+describe("application.one basic-auth users (T-19588)", () => {
+	const permit = (granted: Record<string, string[]>) =>
+		state.hasPermission.mockImplementation(
+			async (_ctx: unknown, request: unknown) =>
+				Object.entries(request as Record<string, string[]>).every(
+					([resource, actions]) =>
+						actions.every((action) => granted[resource]?.includes(action)),
+				),
+		);
+
+	it("blanks the basic-auth passwords for a caller who cannot edit the service", async () => {
+		permit({ deployment: ["create"] });
+		const result = await caller.application.one({ applicationId: "app-1" });
+		expect(result.security).toEqual([
+			{ securityId: "sec-1", username: "admin", password: "" },
+		]);
+		expect(JSON.stringify(result)).not.toContain("SECRET-basic");
+	});
+
+	it("returns the passwords to a caller who can edit the service, for the edit form", async () => {
+		permit({ service: ["create"] });
+		const result = await caller.application.one({ applicationId: "app-1" });
+		expect(result.security[0]?.password).toBe("SECRET-basic");
+		expect(result.security[0]?.username).toBe("admin");
+	});
+
+	it("keeps an MCP read (includeEnv false) blanked even for an editor", async () => {
+		permit({ service: ["create"] });
+		const result = await caller.application.one({
+			applicationId: "app-1",
+			includeEnv: false,
+		});
+		expect(result.security[0]?.password).toBe("");
 	});
 });
 

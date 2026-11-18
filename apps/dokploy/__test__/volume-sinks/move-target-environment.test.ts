@@ -136,5 +136,44 @@ describe.each(SERVICES)(
 				environmentId: "env-of-org-a",
 			});
 		});
+
+		// `service:create` is all a move needs. The row it updates holds env,
+		// build args, the deploy webhook token and database passwords, none of
+		// which the move needs to hand back (T-19588); the dashboard reads no field
+		// of the result.
+		it("answers with the service id and its environment, not the stored row", async () => {
+			mocks.returning.mockResolvedValue([
+				{
+					[idKey]: "svc-1",
+					appName: "app-x",
+					name: "x",
+					environmentId: "env-of-org-a",
+					env: "API_KEY=SECRET-env",
+					buildArgs: "A=SECRET-build",
+					buildSecrets: "B=SECRET-build-secret",
+					refreshToken: "SECRET-refresh",
+					password: "SECRET-registry",
+					databasePassword: "SECRET-db",
+					databaseRootPassword: "SECRET-db-root",
+				},
+			]);
+			const caller = (await loadRouter(router)).createCaller(ctx);
+
+			const result = await caller.move({
+				[idKey]: "svc-1",
+				targetEnvironmentId: "env-of-org-a",
+			});
+
+			expect(result).toEqual({
+				[idKey]: "svc-1",
+				environmentId: "env-of-org-a",
+			});
+			expect(JSON.stringify(result)).not.toContain("SECRET");
+			// The audit entry still names the service.
+			expect(mocks.audit).toHaveBeenCalledWith(
+				ctx,
+				expect.objectContaining({ resourceId: "svc-1" }),
+			);
+		});
 	},
 );

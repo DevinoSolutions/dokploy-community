@@ -73,6 +73,9 @@ export const NESTED_SECRET_FIELDS = [
  */
 const NESTED_IDENTIFIER_FIELDS: readonly string[] = ["awsAccessKeyId"];
 
+/** Credential columns of a basic-auth user (`security` table). */
+const BASIC_AUTH_SECRET_FIELDS: readonly string[] = ["password"];
+
 /** The three registries a service row can link; each can be an AWS ECR one. */
 const SERVICE_REGISTRY_RELATIONS = [
 	"registry",
@@ -184,6 +187,57 @@ export const redactRegistryAwsKeys = <T extends object>(
 	}
 	return (next ?? row) as T;
 };
+
+/**
+ * The basic-auth users of an application (`security[]`, the "Security" tab)
+ * with their passwords blanked, for the dashboard read of `application.one`.
+ * The finder loads the password (the tab's edit form and the Traefik middleware
+ * read it), and the read permission does not include seeing it: it goes only to
+ * a caller who may edit the service (`keepPasswords`), as the registry password
+ * does. The user names stay. Strings become `""`, so a blanked value that comes
+ * back in a save fails the form's "required" rule instead of replacing the
+ * stored password.
+ */
+export const redactBasicAuthPasswords = <T extends object>(
+	row: T,
+	options: { keepPasswords: boolean },
+): T => {
+	if (options.keepPasswords || !("security" in row)) return row;
+	return {
+		...row,
+		security: mapRows(row.security, (entry) =>
+			blankFields(entry, BASIC_AUTH_SECRET_FIELDS),
+		),
+	};
+};
+
+/** One basic-auth user read on its own (`security.one`), same rule as above. */
+export const redactBasicAuthEntry = <T extends object>(
+	entry: T,
+	options: { keepPasswords: boolean },
+): T =>
+	options.keepPasswords
+		? entry
+		: (blankFields(entry, BASIC_AUTH_SECRET_FIELDS) as T);
+
+/**
+ * What a move mutation answers: the id of the service and the environment it
+ * now lives in. Not the updated row: it holds `env`, build args, the deploy
+ * webhook `refreshToken`, the registry password and database passwords, and the
+ * `service:create` permission a move needs does not include reading them. The
+ * dashboard reads nothing from the result.
+ */
+export const movedServiceResult = <
+	K extends string,
+	R extends Record<K, string> & { environmentId: string },
+>(
+	row: R,
+	idKey: K,
+) =>
+	({
+		[idKey]: row[idKey],
+		environmentId: row.environmentId,
+	}) as Record<K, string> & { environmentId: string };
 
 /**
  * What a start, stop or status mutation answers: the service id and the status

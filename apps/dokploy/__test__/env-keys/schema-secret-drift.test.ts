@@ -2,6 +2,7 @@ import * as schema from "@dokploy/server/db/schema";
 import {
 	isSecretKey,
 	NESTED_SECRET_FIELDS,
+	redactBasicAuthPasswords,
 	redactRegistryAwsKeys,
 	SECRET_ROW_FIELDS,
 } from "@dokploy/server/services/service-secrets";
@@ -47,6 +48,8 @@ type FindArgs = {
 const finderState = vi.hoisted(() => ({
 	columnsOf: {} as Record<string, string[]>,
 	tableOf: {} as Record<string, string>,
+	// relations that are `many(...)`: drizzle returns a list of rows
+	manyOf: new Set<string>(),
 }));
 
 vi.mock("@dokploy/server/db", () => {
@@ -64,9 +67,12 @@ vi.mock("@dokploy/server/db", () => {
 				wanted.length > 0
 					? wanted.map(([name]) => name)
 					: all.filter((name) => !columns || columns[name] !== false);
-			row[relation] = Object.fromEntries(
+			const loadedRow = Object.fromEntries(
 				loaded.map((name) => [name, `SECRET-${relation}.${name}`]),
 			);
+			row[relation] = finderState.manyOf.has(relation)
+				? [loadedRow]
+				: loadedRow;
 		}
 		return row;
 	};
@@ -252,6 +258,7 @@ describe("the real finders against NESTED_SECRET_FIELDS", {
 		gitlab: "gitlab",
 		bitbucket: "bitbucket",
 		gitea: "gitea",
+		security: "security",
 	} as const;
 
 	type Row = Record<string, Record<string, unknown> | undefined>;
@@ -262,6 +269,7 @@ describe("the real finders against NESTED_SECRET_FIELDS", {
 		);
 
 	const load = async (finder: "application" | "compose"): Promise<Row> => {
+		finderState.manyOf.add("security");
 		for (const [relation, table] of Object.entries(RELATION_TABLE)) {
 			finderState.tableOf[relation] = table;
 			finderState.columnsOf[table] = Object.keys(
@@ -345,5 +353,40 @@ describe("the real finders against NESTED_SECRET_FIELDS", {
 			}
 		}
 		expect([...kept]).toEqual(["awsAccessKeyId"]);
+	});
+
+	// `security` is a table of NESTED_TABLES, so its password is a list entry
+	// above; this is the assertion that the dashboard path really blanks it
+	// (application.one used to return it to every reader, T-19588).
+	describe("basic-auth users of the application finder", () => {
+		const securityOf = (row: unknown) =>
+			(row as { security: Record<string, unknown>[] }).security;
+
+		it("loads the password the Security tab needs, so the check is not vacuous", async () => {
+			const row = await load("application");
+			expect(securityOf(row)).toHaveLength(1);
+			expect(nestedColumns("security")).toEqual(["password"]);
+			expect(securityOf(row)[0]).toHaveProperty("password");
+		});
+
+		it("blanks every listed column for a caller who cannot edit the service", async () => {
+			const row = await load("application");
+			const redacted = redactBasicAuthPasswords(row, {
+				keepPasswords: false,
+			});
+			const unblanked = nestedColumns("security").filter(
+				(column) =>
+					column in (securityOf(row)[0] ?? {}) &&
+					securityOf(redacted)[0]?.[column] !== "",
+			);
+			expect(unblanked).toEqual([]);
+			// what names the user stays, so the list still renders
+			expect(securityOf(redacted)[0]).toHaveProperty("securityId");
+		});
+
+		it("leaves the row as it is for a caller who may edit the service", async () => {
+			const row = await load("application");
+			expect(redactBasicAuthPasswords(row, { keepPasswords: true })).toBe(row);
+		});
 	});
 });

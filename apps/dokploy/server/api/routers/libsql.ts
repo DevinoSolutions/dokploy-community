@@ -30,6 +30,7 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	movedServiceResult,
 	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -497,7 +498,7 @@ export const libsqlRouter = createTRPCRouter({
 				resourceId: updatedLibsql.libsqlId,
 				resourceName: updatedLibsql.appName,
 			});
-			return updatedLibsql;
+			return movedServiceResult(updatedLibsql, "libsqlId");
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildLibsql)

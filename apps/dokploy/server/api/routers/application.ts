@@ -66,6 +66,8 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	movedServiceResult,
+	redactBasicAuthPasswords,
 	redactRegistryAwsKeys,
 	serviceStatusResult,
 	shapeServiceRead,
@@ -408,7 +410,12 @@ export const applicationRouter = createTRPCRouter({
 			return {
 				// The AWS ECR keys of a linked registry are never part of a read
 				// (the finder loads them for the deploy path only).
-				...redactRegistryAwsKeys(shaped, { keepAccessKeyId: canEdit }),
+				// The basic-auth passwords of the Security tab go only to a caller who
+				// may edit the service (its edit form reads them back).
+				...redactBasicAuthPasswords(
+					redactRegistryAwsKeys(shaped, { keepAccessKeyId: canEdit }),
+					{ keepPasswords: canEdit },
+				),
 				// The registry password and the deploy webhook token go only to
 				// the roles that can edit or deploy the service. Read from the
 				// shaped row so an MCP redaction (includeEnv: false) stays blanked.
@@ -1745,7 +1752,7 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: updatedApplication.applicationId,
 				resourceName: updatedApplication.appName,
 			});
-			return updatedApplication;
+			return movedServiceResult(updatedApplication, "applicationId");
 		}),
 
 	cancelDeployment: protectedProcedure

@@ -86,6 +86,7 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	movedServiceResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import {
@@ -1688,7 +1689,7 @@ export const composeRouter = createTRPCRouter({
 				resourceId: input.composeId,
 				resourceName: updatedCompose.name,
 			});
-			return updatedCompose;
+			return movedServiceResult(updatedCompose, "composeId");
 		}),
 
 	processTemplate: protectedProcedure
