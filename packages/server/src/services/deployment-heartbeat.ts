@@ -46,8 +46,9 @@ import { quote } from "shell-quote";
  * the step runs over one SSH connection to the build server and the mark goes
  * over another one to the serving host, so the mark says nothing about the
  * build server connection. A step whose connection died is caught by the SSH
- * keepalive (execAsync.ts, `SSH_KEEPALIVE`: a ping every 10 s, dropped after 3
- * misses), which fails the step; it is not the mark that detects it.
+ * keepalive (ssh-keepalive.ts, `SSH_KEEPALIVE`: a ping every 15 s, dropped
+ * after 8 misses, about two minutes of silence), which fails the step; it is
+ * not the mark that detects it.
  *
  * A mark is not written once the deployment is no longer `running` (for
  * example after the watchdog failed it), and the step's end waits up to a few

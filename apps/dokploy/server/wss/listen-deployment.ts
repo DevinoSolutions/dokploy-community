@@ -8,6 +8,7 @@ import {
 } from "@dokploy/server";
 import { assertDeploymentAccess } from "@dokploy/server/services/deployment-access";
 import { encodeBase64 } from "@dokploy/server/utils/docker/utils";
+import { SSH_KEEPALIVE } from "@dokploy/server/utils/process/ssh-keepalive";
 import { readValidDirectory } from "@dokploy/server/wss/utils";
 import { Client } from "ssh2";
 import { WebSocketServer } from "ws";
@@ -166,6 +167,7 @@ export const setupDeploymentLogsWebSocketServer = (
 						port: server.port,
 						username: server.username,
 						privateKey: server.sshKey?.privateKey,
+						...SSH_KEEPALIVE,
 					});
 
 				ws.on("close", () => {

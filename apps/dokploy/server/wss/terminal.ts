@@ -5,6 +5,7 @@ import {
 	IS_CLOUD,
 	validateRequest,
 } from "@dokploy/server";
+import { SSH_KEEPALIVE } from "@dokploy/server/utils/process/ssh-keepalive";
 import { publicIpv4, publicIpv6 } from "public-ip";
 import { Client, type ConnectConfig } from "ssh2";
 import { WebSocketServer } from "ws";
@@ -268,6 +269,6 @@ export const setupTerminalWebSocketServer = (
 				}
 				conn.end();
 			})
-			.connect(connectionDetails);
+			.connect({ ...connectionDetails, ...SSH_KEEPALIVE });
 	});
 };

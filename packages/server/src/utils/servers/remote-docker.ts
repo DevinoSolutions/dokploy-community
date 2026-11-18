@@ -1,7 +1,7 @@
 import { docker } from "@dokploy/server/constants";
 import { findServerById } from "@dokploy/server/services/server";
 import Dockerode from "dockerode";
-import { SSH_KEEPALIVE } from "../process/execAsync";
+import { SSH_KEEPALIVE } from "../process/ssh-keepalive";
 
 export const getRemoteDocker = async (serverId?: string | null) => {
 	if (!serverId) return docker;
