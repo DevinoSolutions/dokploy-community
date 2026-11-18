@@ -2,12 +2,17 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
-### Unreleased
+### New in v0.31.0-community.7
 
-Upgrade notes: one additive database migration (0236, a nullable column on the GitHub Deployments watch table), nothing to configure. An image-only rollback keeps working. Mounts that are already saved keep deploying as they are.
+Upgrade notes: one additive database migration (0236, a nullable column on the GitHub Deployments watch table), nothing to configure. Migration 0236 is additive, so an image-only rollback to v0.31.0-community.6 keeps working. This release includes everything in v0.31.0-community.6. Mounts that are already saved keep deploying as they are.
+
+Behaviour change: members can no longer create or repoint bind mounts, and admins of an organization that does not own the Dokploy instance can no longer bind paths of the Dokploy host. Owners and admins of the instance's organization keep bind mounts, and every organization keeps binding paths on its own remote servers.
+
+Behaviour change: watch paths with extglob, brace or parenthesis patterns (and a few other shapes that can make matching very slow) are refused when you save them. Plain globs such as `src/**`, `*.ts` and `!docs/**` work as before.
 
 **Security.**
 
+- Watch paths are now validated, and extglob and brace matching is turned off when a push is matched against them (picomatch ReDoS, GHSA-fc5q-39xc-vjpf, #633). A member with edit rights on a service could store a pattern such as `+(*)` that blocks the server while it matches a push webhook. A pattern with an extglob opener, a brace, a parenthesis, `]+`, more than 2 `*` runs in one path segment, more than 2 `**` runs, more than 3 `*` runs in total or more than 256 characters is refused when you save a Git source, and a list holds at most 100 patterns. A pattern that is already stored on a service is still accepted when you save that service again, so existing forms keep saving. This limits the exposure; picomatch itself is still not patched upstream.
 - A service that uses an AWS ECR registry no longer hands that registry's secret access key to everyone who can read the service. Before, `application.one` returned the secret access key and the access key id of the registry, build registry and rollback registry in plain text to any user with read access to the application (the registry settings page never returned the secret). Now the secret access key is never returned, and the access key id only to users who may edit the service. Deploys are unchanged: they read the keys on the server.
 - Deleting a service (application, compose stack, Postgres, MySQL, MariaDB, MongoDB, Redis, libSQL) now answers with the service id and its project and environment ids instead of the whole row. The row held environment variables, the deploy webhook token, database passwords and a compose stack's backup credentials, and the delete permission does not include reading them.
 - Reading a backup or volume backup internally no longer loads the destination's encryption keys and rclone flags; the backup and restore jobs load the destination they use themselves, as before.
