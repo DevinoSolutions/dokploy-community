@@ -24,6 +24,8 @@ export const UPDATE_ERROR_MESSAGES = {
 		"Docker could not be reached from the Dokploy server. See the Dokploy server logs for details.",
 	registry_unreachable: "The registry could not be reached.",
 	timeout: "The operation timed out.",
+	deploys_running:
+		"A deployment started while the image was being pulled, so Dokploy was not restarted. Try again when deployments have finished.",
 	pull_failed:
 		"Pulling the image failed. See the Dokploy server logs for details.",
 	service_update_failed:

@@ -153,6 +153,7 @@ import { cleanAllDeploymentQueue, myQueue } from "@/server/queues/queueSetup";
 import {
 	closeIntakeForRestart,
 	DEPLOY_INTAKE_SWAP_HOLD_MS,
+	UPDATE_PULL_TIMEOUT_MS,
 } from "@/server/queues/restart-guard";
 import { applyDockerCleanupSchedule } from "@/server/utils/docker-cleanup";
 import packageInfo from "../../../package.json";
@@ -1316,7 +1317,7 @@ export const settingsRouter = createTRPCRouter({
 			// restart as first runs. Refuses (and reopens) when something is running.
 			// Taken after the slow GitHub and registry calls above, so the intake
 			// stays shut only for the update itself.
-			const hold = await closeIntakeForRestart(myQueue, "update");
+			let hold = await closeIntakeForRestart(myQueue, "update");
 			// The check and the write are one step under a lock: of two requests
 			// that got this far together (the GitHub and registry calls above take
 			// seconds), only one claims, and the other never reaches the job.
@@ -1344,11 +1345,26 @@ export const settingsRouter = createTRPCRouter({
 			// the update goes on as it did before the record existed.
 			const recorded = claim.recorded;
 			void runBackgroundJob("settings.updateServer background", async () => {
-				let phase: "pull" | "update" = "pull";
+				let phase: "pull" | "recheck" | "update" = "pull";
+				// Set once the swap command has succeeded: from then on this process is
+				// about to be stopped, and the intake must stay closed.
+				let swapped = false;
 				try {
 					// The image is pulled first: if that fails, the running service and
 					// the rollback point of the last update are both kept.
-					await spawnAsync("docker", ["pull", image]);
+					// Bounded below the intake hold: a pull that never ends must not
+					// outlive the hold it runs under.
+					const pullStarted = Date.now();
+					try {
+						await spawnAsync("docker", ["pull", image], undefined, {
+							timeout: UPDATE_PULL_TIMEOUT_MS,
+						});
+					} catch (error) {
+						if (Date.now() - pullStarted >= UPDATE_PULL_TIMEOUT_MS) {
+							throw new Error("docker pull timed out");
+						}
+						throw error;
+					}
 					// Still this job's attempt? A pull that outlasted the 15 minute
 					// cutoff may have been replaced by a newer attempt (or a forced
 					// one). Stop here, before the rollback point and the swap: the
@@ -1374,8 +1390,17 @@ export const settingsRouter = createTRPCRouter({
 						return;
 					}
 					// The swap is next: a fresh, shorter limit instead of what is left of
-					// the one the pull may have used up.
-					hold.extend(DEPLOY_INTAKE_SWAP_HOLD_MS);
+					// the one the pull may have used up. If the hold is already gone (it
+					// expired during a slow pull) jobs may have started since: take it
+					// again and look at what runs before the swap kills it.
+					if (!hold.extend(DEPLOY_INTAKE_SWAP_HOLD_MS)) {
+						phase = "recheck";
+						console.error(
+							`settings.updateServer: the deploy intake reopened during the pull of attempt ${attempt.attemptId}; checking what runs before the swap.`,
+						);
+						hold = await closeIntakeForRestart(myQueue, "update");
+						hold.extend(DEPLOY_INTAKE_SWAP_HOLD_MS);
+					}
 					phase = "update";
 					await recordDokployRollbackPoint(packageInfo.version, {
 						installing,
@@ -1393,21 +1418,25 @@ export const settingsRouter = createTRPCRouter({
 						image,
 						"dokploy",
 					]);
+					swapped = true;
 					await transitionDokployUpdateAttempt(attempt.attemptId, {
 						status: "submitted",
 						finishedAt: new Date().toISOString(),
 					});
 				} catch (error) {
 					// The service was not replaced, so this process keeps running and
-					// has to take deploys again. After a successful swap the hold stays:
-					// this process is about to be stopped.
-					hold.release();
+					// has to take deploys again. After a successful swap the hold stays,
+					// even if recording it failed: this process is about to be stopped.
+					if (!swapped) hold.release();
 					// Only the category is recorded; the raw docker output (which can
 					// carry credentials) reaches the server log through the rethrow.
 					await transitionDokployUpdateAttempt(attempt.attemptId, {
 						status: "failed",
 						finishedAt: new Date().toISOString(),
-						errorCode: classifyUpdateError(error, phase),
+						errorCode:
+							phase === "recheck"
+								? "deploys_running"
+								: classifyUpdateError(error, phase),
 					});
 					throw error;
 				}

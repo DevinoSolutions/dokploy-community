@@ -7,9 +7,12 @@ vi.mock("@dokploy/server/services/deployment-cancel", () => ({
 import {
 	killOrphanedBuilds,
 	ORPHAN_KILL_BUDGET_MS,
+	resetOrphanKillBoot,
+	whenOrphanKillsSettled,
 } from "@dokploy/server/services/orphan-build-kill";
 
 beforeEach(() => {
+	resetOrphanKillBoot();
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -129,5 +132,73 @@ describe("killOrphanedBuilds", () => {
 		expect(text).toContain("b1");
 		expect(text).toContain("KILLED");
 		expect(text).not.toMatch(/kill -s|setsid|\.pid/);
+	});
+});
+
+describe("one boot budget for every phase", () => {
+	it("a second call gets only what the first left, so the two together stay within the budget", async () => {
+		vi.useFakeTimers();
+		const stop = vi.fn(() => new Promise<never>(() => {}));
+
+		const first = killOrphanedBuilds(
+			[{ deploymentId: "d1", buildServerId: "b1" }],
+			{ stop },
+		);
+		await vi.advanceTimersByTimeAsync(20_000);
+		const second = killOrphanedBuilds(
+			[{ deploymentId: "d2", buildServerId: "b1" }],
+			{ stop },
+		);
+		let secondDone = false;
+		void second.then(() => {
+			secondDone = true;
+		});
+
+		await vi.advanceTimersByTimeAsync(4_900);
+		expect(secondDone).toBe(false);
+		await vi.advanceTimersByTimeAsync(200);
+
+		// 20 s + 5 s: the 25 s of the first call, not 25 s more.
+		expect(secondDone).toBe(true);
+		await expect(first).resolves.toMatchObject({ unconfirmed: 1 });
+	});
+
+	it("whenOrphanKillsSettled waits for the kills and resolves at once when there are none", async () => {
+		await expect(whenOrphanKillsSettled()).resolves.toBeUndefined();
+
+		let release!: () => void;
+		const stop = vi.fn(
+			() =>
+				new Promise<{ result: "KILLED" }>((resolve) => {
+					release = () => resolve({ result: "KILLED" });
+				}),
+		);
+		void killOrphanedBuilds([{ deploymentId: "d1", buildServerId: "b1" }], {
+			stop,
+		});
+		let settled = false;
+		void whenOrphanKillsSettled().then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		release();
+		await vi.waitFor(() => expect(settled).toBe(true));
+	});
+
+	it("whenOrphanKillsSettled ends when the budget runs out on a hung build server", async () => {
+		vi.useFakeTimers();
+		void killOrphanedBuilds([{ deploymentId: "d1", buildServerId: "b1" }], {
+			stop: () => new Promise<never>(() => {}),
+		});
+		let settled = false;
+		void whenOrphanKillsSettled().then(() => {
+			settled = true;
+		});
+
+		await vi.advanceTimersByTimeAsync(ORPHAN_KILL_BUDGET_MS + 1);
+
+		expect(settled).toBe(true);
 	});
 });

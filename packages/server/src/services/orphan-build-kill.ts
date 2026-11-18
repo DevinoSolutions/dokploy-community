@@ -22,6 +22,44 @@ import { stopBuildOnBuildServer } from "./deployment-cancel";
  */
 export const ORPHAN_KILL_BUDGET_MS = 25_000;
 
+/**
+ * The boot has one budget for every orphan-kill phase, not one per call: the
+ * deadline starts with the first call that has something to stop, and a later
+ * call only gets what is left of it. Kept on globalThis because this module can
+ * be loaded twice (server bundle and Next chunks).
+ */
+const DEADLINE_SLOT = Symbol.for("dokploy.orphanKillDeadline");
+const PENDING_SLOT = Symbol.for("dokploy.orphanKillPending");
+type Slots = Record<symbol, unknown>;
+
+/** Test hook: forget the shared deadline and the pending kills. */
+export const resetOrphanKillBoot = () => {
+	const registry = globalThis as unknown as Slots;
+	registry[DEADLINE_SLOT] = undefined;
+	registry[PENDING_SLOT] = undefined;
+};
+
+const remainingBudget = (budgetMs: number): number => {
+	const registry = globalThis as unknown as Slots;
+	const deadline = registry[DEADLINE_SLOT];
+	if (typeof deadline !== "number") {
+		registry[DEADLINE_SLOT] = Date.now() + budgetMs;
+		return budgetMs;
+	}
+	return Math.max(0, deadline - Date.now());
+};
+
+/**
+ * Resolves once every orphan kill started so far has finished or run out of
+ * budget. Never rejects. The queue holds its worker on this, so a replayed
+ * job of a build server cannot start next to the build it replaces, while the
+ * restore itself (and the rest of the boot) does not wait for the kill.
+ */
+export const whenOrphanKillsSettled = (): Promise<void> => {
+	const pending = (globalThis as unknown as Slots)[PENDING_SLOT];
+	return pending instanceof Promise ? pending : Promise.resolve();
+};
+
 export interface OrphanedBuild {
 	deploymentId: string;
 	/** The build server the deployment built on; null when it built elsewhere. */
@@ -58,6 +96,24 @@ export const killOrphanedBuilds = async (
 		budgetMs = ORPHAN_KILL_BUDGET_MS,
 	}: { stop?: StopBuild; budgetMs?: number } = {},
 ): Promise<OrphanKillSummary> => {
+	const run = killWithinBudget(builds, stop, budgetMs);
+	if (builds.some((build) => build.buildServerId)) {
+		const registry = globalThis as unknown as Slots;
+		const before = registry[PENDING_SLOT];
+		const mine = run.then(() => undefined);
+		registry[PENDING_SLOT] =
+			before instanceof Promise
+				? Promise.all([before, mine]).then(() => undefined)
+				: mine;
+	}
+	return run;
+};
+
+const killWithinBudget = async (
+	builds: OrphanedBuild[],
+	stop: StopBuild,
+	budgetMs: number,
+): Promise<OrphanKillSummary> => {
 	const targets = new Map<string, { deploymentId: string; serverId: string }>();
 	for (const build of builds) {
 		if (build.buildServerId && !targets.has(build.deploymentId)) {
@@ -74,6 +130,7 @@ export const killOrphanedBuilds = async (
 	};
 	if (targets.size === 0) return summary;
 
+	const remaining = remainingBudget(budgetMs);
 	const settled = new Set<string>();
 	const work = Promise.all(
 		[...targets.values()].map(async ({ deploymentId, serverId }) => {
@@ -104,7 +161,7 @@ export const killOrphanedBuilds = async (
 	const timedOut = await Promise.race([
 		work.then(() => false),
 		new Promise<boolean>((resolve) => {
-			timer = setTimeout(() => resolve(true), budgetMs);
+			timer = setTimeout(() => resolve(true), remaining);
 		}),
 	]);
 	clearTimeout(timer);
@@ -112,7 +169,7 @@ export const killOrphanedBuilds = async (
 		const pending = [...targets.keys()].filter((id) => !settled.has(id));
 		summary.unconfirmed += pending.length;
 		console.error(
-			`Stopping orphaned builds did not finish within ${budgetMs / 1000}s; continuing the boot (still pending: ${pending.join(", ")})`,
+			`Stopping orphaned builds did not finish within the ${budgetMs / 1000}s boot budget; continuing the boot (still pending: ${pending.join(", ")})`,
 		);
 	}
 	return summary;

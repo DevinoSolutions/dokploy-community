@@ -263,9 +263,12 @@ export const markInterruptedQueueDeployments = async (
 			console.error("Could not mark an interrupted deployment", error);
 		}
 	}
-	// Before the replay can start a second build of the same service. Bounded and
-	// never throwing: an unreachable build server must not hold the boot.
-	await Promise.all([...notes, killOrphanedBuilds(orphans)]);
+	// Not awaited: the boot and the restore go on while the build servers are
+	// reached. The queue holds its worker until these kills have finished or run
+	// out of their shared boot budget (whenOrphanKillsSettled), so the replay
+	// cannot start a second build next to an orphan. Never throws.
+	void killOrphanedBuilds(orphans);
+	await Promise.all(notes);
 	return closed;
 };
 

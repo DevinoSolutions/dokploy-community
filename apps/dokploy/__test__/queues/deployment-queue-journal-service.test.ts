@@ -76,9 +76,14 @@ import {
 	markQueueJobActive,
 	requeueInterruptedQueueJobs,
 } from "@dokploy/server/services/deployment-queue-journal";
+import {
+	resetOrphanKillBoot,
+	whenOrphanKillsSettled,
+} from "@dokploy/server/services/orphan-build-kill";
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	resetOrphanKillBoot();
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	mocks.updateApplicationStatus.mockReset().mockResolvedValue(undefined);
@@ -332,7 +337,7 @@ describe("markInterruptedQueueDeployments stops the orphaned remote build (T-126
 			String(command).includes(".build-pids/"),
 		);
 
-	it("runs the build-server kill for the closed deployment, keyed by its id, before returning", async () => {
+	it("runs the build-server kill for the closed deployment, keyed by its id, without holding the marking up", async () => {
 		mocks.updateReturning.mockResolvedValue([
 			{
 				deploymentId: "dep-1",
@@ -353,6 +358,7 @@ describe("markInterruptedQueueDeployments stops the orphaned remote build (T-126
 				active({ applicationType: "application", applicationId: "a" }),
 			]),
 		).resolves.toBe(1);
+		await whenOrphanKillsSettled();
 
 		const calls = killCalls();
 		expect(calls).toHaveLength(1);
@@ -378,7 +384,7 @@ describe("markInterruptedQueueDeployments stops the orphaned remote build (T-126
 		expect(killCalls()).toHaveLength(0);
 	});
 
-	it("an unreachable build server does not fail the marking or hold the boot past the budget", async () => {
+	it("an unreachable build server neither delays the marking nor outlasts the budget for the queue worker", async () => {
 		vi.useFakeTimers();
 		try {
 			mocks.updateReturning.mockResolvedValue([
@@ -394,9 +400,19 @@ describe("markInterruptedQueueDeployments stops the orphaned remote build (T-126
 			const done = markInterruptedQueueDeployments([
 				active({ applicationType: "application", applicationId: "a" }),
 			]);
-			await vi.advanceTimersByTimeAsync(60_000);
-
+			// The marking only waits for its own bounded log note (4 s), not the kill.
+			await vi.advanceTimersByTimeAsync(LOG_NOTE_TIMEOUT_MS + 100);
 			await expect(done).resolves.toBe(1);
+			let settled = false;
+			void whenOrphanKillsSettled().then(() => {
+				settled = true;
+			});
+			await vi.advanceTimersByTimeAsync(5_000);
+			expect(settled).toBe(false);
+
+			// The queue worker is released when the budget ends.
+			await vi.advanceTimersByTimeAsync(20_000);
+			expect(settled).toBe(true);
 			expect(killCalls().length).toBeGreaterThan(0);
 		} finally {
 			vi.useRealTimers();

@@ -54,7 +54,8 @@ export const initCancelDeployments = async () => {
 
 		// A running row nothing replays is cancelled here; a build it started on a
 		// build server is still running there and has to be stopped too (T-12684).
-		await killOrphanedBuilds(result);
+		// Not awaited, like the journal path: the queue worker waits for it.
+		void killOrphanedBuilds(result);
 
 		const applicationIds = [
 			...new Set(

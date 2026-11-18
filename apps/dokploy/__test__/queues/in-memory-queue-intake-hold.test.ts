@@ -297,3 +297,115 @@ describe("accepting a job while the intake is closed", () => {
 		expect(await queue.getJobs(["waiting"])).toHaveLength(1);
 	});
 });
+
+describe("a hold that is already gone", () => {
+	it("extend says so, for a released hold and for one whose time limit passed", async () => {
+		vi.useFakeTimers();
+		const { queue } = makeQueue();
+		const released = queue.closeIntake(1_000);
+		released.release();
+		expect(released.extend(1_000)).toBe(false);
+
+		const expired = queue.closeIntake(1_000);
+		expect(expired.extend(1_000)).toBe(true);
+		await vi.advanceTimersByTimeAsync(1_001);
+		expect(expired.extend(1_000)).toBe(false);
+		expect(queue.intakeClosed()).toBe(false);
+	});
+});
+
+describe("a parked job whose journal write is not confirmed yet", () => {
+	/** A journal whose enqueue answers only when the test says so. */
+	const slowJournal = () => {
+		const pending: Array<(written: boolean) => void> = [];
+		const journal: QueueJournal = {
+			enqueued: () =>
+				new Promise<boolean>((resolve) => {
+					pending.push(resolve);
+				}),
+			started: vi.fn(),
+			settled: vi.fn(),
+			updated: vi.fn(),
+		};
+		return {
+			journal,
+			answer: (index: number, ok: boolean) => pending[index]?.(ok),
+		};
+	};
+
+	it("takes no later push: the second push is not folded into it, so it gets its own answer when the write fails", async () => {
+		const { journal, answer } = slowJournal();
+		const { queue, started } = makeQueue({ journal });
+		queue.closeIntake(60_000);
+
+		const first = queue.add(appJob("svc"));
+		const outcome = queue.coalesceWaiting(appJob("svc"), () => true);
+
+		// Not merged: the caller of the second push must enqueue it itself.
+		expect(outcome.merged).toBeNull();
+		expect(outcome.removed).toEqual([]);
+
+		const second = queue.add(appJob("svc"));
+		answer(0, false);
+		await expect(first).rejects.toBeInstanceOf(DeployIntakeNotDurableError);
+		answer(1, true);
+		await expect(second).resolves.toBeDefined();
+
+		// The second push survived the first one's drop.
+		expect(await queue.getJobs(["waiting"])).toHaveLength(1);
+		expect(started).toEqual([]);
+	});
+
+	it("is left alone by keep-oldest and by priority until it is confirmed", async () => {
+		const { journal, answer } = slowJournal();
+		const { queue } = makeQueue({ journal });
+		queue.closeIntake(60_000);
+		const first = queue.add(appJob("svc"));
+		const second = queue.add(appJob("svc"));
+		const [one] = await queue.getJobs(["waiting"]);
+
+		expect(queue.keepOldestWaiting(() => true)).toEqual({
+			kept: [],
+			removed: [],
+		});
+		expect(queue.prioritize(one?.id ?? "")).toBeNull();
+
+		answer(0, true);
+		answer(1, true);
+		await Promise.all([first, second]);
+
+		// Once confirmed they are ordinary waiting jobs again.
+		expect(queue.keepOldestWaiting(() => true).removed).toHaveLength(1);
+	});
+
+	it("coalesces normally with a confirmed job", async () => {
+		const { queue } = makeQueue({
+			journal: {
+				enqueued: async () => true,
+				started: vi.fn(),
+				settled: vi.fn(),
+			},
+		});
+		queue.closeIntake(60_000);
+		await queue.add(appJob("svc"));
+
+		expect(
+			queue.coalesceWaiting(appJob("svc"), () => true).merged,
+		).not.toBeNull();
+	});
+
+	it("does not tell the caller to retry a job that already started when the hold was released meanwhile", async () => {
+		const { journal, answer } = slowJournal();
+		const { queue, started } = makeQueue({ journal });
+		const hold = queue.closeIntake(60_000);
+
+		const added = queue.add(appJob("svc"));
+		hold.release();
+		await flush();
+		expect(started).toEqual(["svc"]);
+		answer(0, false);
+
+		await expect(added).resolves.toMatchObject({ id: expect.any(String) });
+		expect(started).toEqual(["svc"]);
+	});
+});

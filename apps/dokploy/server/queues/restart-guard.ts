@@ -23,6 +23,11 @@ import type { IntakeHold, QueueBusySnapshot } from "./in-memory-queue";
 export const DEPLOY_INTAKE_HOLD_MS = 15 * 60_000;
 /** After the pull, before the swap: the restart is minutes away at most. */
 export const DEPLOY_INTAKE_SWAP_HOLD_MS = 5 * 60_000;
+/**
+ * Longest the image pull may take. Shorter than the hold, so the intake is
+ * still closed when a pull that never ends is given up on.
+ */
+export const UPDATE_PULL_TIMEOUT_MS = 10 * 60_000;
 
 /** How many services the refusal names before it says "and N more". */
 const NAMED_SERVICES = 5;
@@ -133,6 +138,6 @@ export const closeIntakeForRestart = async (
 	const them = count === 1 ? "it" : "them";
 	throw new TRPCError({
 		code: "CONFLICT",
-		message: `Not ${action === "update" ? "updating" : "reloading"}: ${text}. Restarting Dokploy now would interrupt ${them}. Wait for ${them} to finish, then try again.`,
+		message: `Not ${action === "update" ? "updating" : "reloading"}: ${text}. Restarting Dokploy now would interrupt ${them}. Wait for ${them} to finish, or cancel the deployment${count === 1 ? "" : "s"} named above (Kill Build on the service), then try again.`,
 	});
 };

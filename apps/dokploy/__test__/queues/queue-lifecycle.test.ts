@@ -146,3 +146,60 @@ describe("registerShutdownHandler", () => {
 		vi.restoreAllMocks();
 	});
 });
+
+describe("gateWorkerUntilRestored with a barrier (orphaned builds)", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("opens the worker only after the barrier, when the restore finished first", async () => {
+		const queue = { pause: vi.fn(), resume: vi.fn() };
+		let release!: () => void;
+		const barrier = () =>
+			new Promise<void>((resolve) => {
+				release = resolve;
+			});
+		const gate = gateWorkerUntilRestored(queue, 30_000, barrier);
+
+		gate.open();
+		await Promise.resolve();
+		expect(queue.resume).not.toHaveBeenCalled();
+
+		release();
+		await vi.waitFor(() => expect(queue.resume).toHaveBeenCalledTimes(1));
+	});
+
+	it("the 30 s timer waits for the barrier too", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const queue = { pause: vi.fn(), resume: vi.fn() };
+		let release!: () => void;
+		gateWorkerUntilRestored(
+			queue,
+			30_000,
+			() =>
+				new Promise<void>((resolve) => {
+					release = resolve;
+				}),
+		);
+
+		await vi.advanceTimersByTimeAsync(30_001);
+		expect(queue.resume).not.toHaveBeenCalled();
+
+		release();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(queue.resume).toHaveBeenCalledTimes(1);
+	});
+
+	it("starts anyway when the barrier rejects, and opens once", async () => {
+		const queue = { pause: vi.fn(), resume: vi.fn() };
+		const gate = gateWorkerUntilRestored(queue, 30_000, async () => {
+			throw new Error("x");
+		});
+
+		gate.open();
+		gate.open();
+
+		await vi.waitFor(() => expect(queue.resume).toHaveBeenCalledTimes(1));
+	});
+});

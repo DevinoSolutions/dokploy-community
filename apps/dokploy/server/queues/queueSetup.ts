@@ -8,6 +8,7 @@ import {
 } from "@dokploy/server";
 import { isCoalescableDeployJob } from "@dokploy/server/services/build-policy/coalesce";
 import { isCoalescingEnforcedForUnit } from "@dokploy/server/services/build-policy/webhook";
+import { whenOrphanKillsSettled } from "@dokploy/server/services/orphan-build-kill";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -120,7 +121,7 @@ const createNoopQueue = (): DeploymentQueue => ({
 	keepOldestWaiting: () => ({ kept: [], removed: [] }),
 	coalesceWaiting: () => ({ merged: null, removed: [], titles: [] }),
 	clearWaiting: () => 0,
-	closeIntake: () => ({ release: () => {}, extend: () => {} }),
+	closeIntake: () => ({ release: () => {}, extend: () => true }),
 	intakeClosed: () => false,
 	busy: () => ({ active: [], heldGroups: [] }),
 	restore: () => Promise.resolve({ restored: 0, interrupted: 0, dropped: 0 }),
@@ -184,7 +185,14 @@ const createInMemoryQueue = (): DeploymentQueue => {
 	});
 	// Held until the boot replay is done (or 30s pass), so a webhook arriving
 	// first cannot start ahead of the same job restored from the journal.
-	const gate = gateWorkerUntilRestored(queue);
+	// Also held until the builds a restart orphaned on a build server are
+	// stopped (or their boot budget ran out), so a replayed job cannot start
+	// a second build next to one. The restore itself does not wait for them.
+	const gate = gateWorkerUntilRestored(
+		queue,
+		undefined,
+		whenOrphanKillsSettled,
+	);
 	queue.process(processDeploymentJob);
 
 	let shuttingDown: Promise<void> | null = null;

@@ -11,7 +11,7 @@ import {
 const makeQueue = (
 	busy: ReturnType<RestartGuardQueue["busy"]> = { active: [], heldGroups: [] },
 ) => {
-	const hold = { release: vi.fn(), extend: vi.fn() };
+	const hold = { release: vi.fn(), extend: vi.fn(() => true) };
 	const queue: RestartGuardQueue = {
 		closeIntake: vi.fn(() => hold),
 		busy: vi.fn(() => busy),
@@ -60,7 +60,7 @@ describe("closeIntakeForRestart", () => {
 
 		expect(error).toMatchObject({ code: "CONFLICT" });
 		expect(error.message).toBe(
-			"Not updating: 2 services have a deployment running (Landing, billing-stack). Restarting Dokploy now would interrupt them. Wait for them to finish, then try again.",
+			"Not updating: 2 services have a deployment running (Landing, billing-stack). Restarting Dokploy now would interrupt them. Wait for them to finish, or cancel the deployments named above (Kill Build on the service), then try again.",
 		);
 		expect(error.message).not.toContain("abc");
 		expect(error.message).not.toContain("a1");

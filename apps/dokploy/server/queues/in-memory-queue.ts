@@ -140,8 +140,12 @@ export class DeployIntakeNotDurableError extends Error {
 export interface IntakeHold {
 	/** Reopen (idempotent). The intake opens once every hold is released. */
 	release: () => void;
-	/** Restart the hold's time limit from now. No-op once released. */
-	extend: (ttlMs: number) => void;
+	/**
+	 * Restart the hold's time limit from now. Returns false when the hold is
+	 * already gone (released, or its time limit passed and the intake reopened):
+	 * the caller can no longer rely on nothing having started since.
+	 */
+	extend: (ttlMs: number) => boolean;
 }
 
 /** What is running right now, for the check before a restart. */
@@ -228,6 +232,12 @@ interface InternalJob {
 	 * is dropped when the processor really returns.
 	 */
 	groupLockKept: boolean;
+	/**
+	 * Accepted behind a closed intake and not yet confirmed written to the
+	 * journal. It may still be dropped (the write fails), so it is invisible to
+	 * coalescing, keep-oldest and priority until the write is confirmed.
+	 */
+	unconfirmed: boolean;
 }
 
 interface Partition {
@@ -398,6 +408,9 @@ export class InMemoryQueue {
 		const needsDurable = this.intakeClosed();
 		// In memory first and synchronously: FIFO order is the call order even
 		// when the journal write below is slow.
+		// Until the journal confirms it, a job parked behind a closed intake may
+		// still be dropped (see below), so nothing may fold another push into it.
+		job.unconfirmed = needsDurable && !!this.journal;
 		partition.waiting.push(job);
 		this.schedule();
 		const journal = this.journal;
@@ -411,11 +424,19 @@ export class InMemoryQueue {
 				// Never block a deploy on the journal; it reports its own failures.
 				written = false;
 			}
-			if (needsDurable && !written) {
+			job.unconfirmed = false;
+			// Only a job that still waits behind a closed intake is refused. One that
+			// started because the hold was released meanwhile is running: telling the
+			// caller to retry would run it twice.
+			if (
+				needsDurable &&
+				!written &&
+				this.intakeClosed() &&
+				partition.waiting.includes(job)
+			) {
 				// Not queued after all. If its row lands late the settle removes it.
-				const stillWaiting = partition.waiting.includes(job);
 				partition.waiting = partition.waiting.filter((j) => j !== job);
-				if (stillWaiting) this.settle([job]);
+				this.settle([job]);
 				throw new DeployIntakeNotDurableError();
 			}
 		}
@@ -432,6 +453,8 @@ export class InMemoryQueue {
 			const index = partition.waiting.findIndex((job) => job.id === id);
 			if (index === -1) continue;
 			const job = partition.waiting[index] as InternalJob;
+			// Not recorded yet and may be dropped: report it as not waiting.
+			if (job.unconfirmed) return null;
 			const outcome = this.assessPriority(
 				partition,
 				index,
@@ -578,6 +601,7 @@ export class InMemoryQueue {
 			wentAheadOf: 0,
 			released: false,
 			groupLockKept: false,
+			unconfirmed: false,
 		};
 	}
 
@@ -805,7 +829,7 @@ export class InMemoryQueue {
 			const survivors: InternalJob[] = [];
 			const gone = new Set<InternalJob>();
 			for (const job of partition.waiting) {
-				if (!predicate(job.data)) continue;
+				if (job.unconfirmed || !predicate(job.data)) continue;
 				const twin = survivors.find((kept) =>
 					sameJobProfile(kept.data, job.data, { pinnedImage: true }),
 				);
@@ -853,7 +877,7 @@ export class InMemoryQueue {
 		for (const [key, partition] of ordered) {
 			const gone = new Set<InternalJob>();
 			for (const job of partition.waiting) {
-				if (!predicate(job.data)) continue;
+				if (job.unconfirmed || !predicate(job.data)) continue;
 				if (!sameJobProfile(job.data, incoming, { pinnedImage: false })) {
 					continue;
 				}
@@ -1000,7 +1024,9 @@ export class InMemoryQueue {
 		return {
 			release,
 			extend: (ms) => {
-				if (this.holds.has(token)) arm(ms);
+				if (!this.holds.has(token)) return false;
+				arm(ms);
+				return true;
 			},
 		};
 	}
