@@ -182,7 +182,8 @@ jobs:
             elif echo "$INSPECT" | grep -qiE 'not found|manifest unknown|no such manifest'; then
               docker buildx imagetools create -t ${IMAGE_NAME}:${VERSION} "$AMD64" "$ARM64"
             else
-              echo "::warning::Could not check whether ${IMAGE_NAME}:${VERSION} exists; not publishing it."
+              echo "::error::Could not check whether ${IMAGE_NAME}:${VERSION} exists; not publishing it. Re-run this workflow."
               echo "$INSPECT" | tail -3
+              exit 1
             fi
           fi
