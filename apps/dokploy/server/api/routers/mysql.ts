@@ -34,7 +34,9 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
+	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
@@ -187,7 +189,7 @@ export const mysqlRouter = createTRPCRouter({
 				resourceId: service.mysqlId,
 				resourceName: service.appName,
 			});
-			return service;
+			return serviceStatusResult(service, "mysqlId", "done");
 		}),
 	stop: protectedProcedure
 		.input(apiFindOneMySql)
@@ -211,7 +213,7 @@ export const mysqlRouter = createTRPCRouter({
 				resourceId: mongo.mysqlId,
 				resourceName: mongo.appName,
 			});
-			return mongo;
+			return serviceStatusResult(mongo, "mysqlId", "idle");
 		}),
 	saveExternalPort: protectedProcedure
 		.input(apiSaveExternalPortMySql)
@@ -315,7 +317,7 @@ export const mysqlRouter = createTRPCRouter({
 				resourceId: mongo.mysqlId,
 				resourceName: mongo.appName,
 			});
-			return mongo;
+			return serviceStatusResult(mongo, "mysqlId", input.applicationStatus);
 		}),
 	reload: protectedProcedure
 		.input(apiResetMysql)
@@ -382,7 +384,7 @@ export const mysqlRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return mongo;
+			return deletedServiceResult(mongo, "mysqlId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesMySql)

@@ -161,7 +161,12 @@ export const findApplicationById = async (applicationId: string) => {
 			security: true,
 			ports: true,
 			gitlab: {
-				columns: { secret: false, accessToken: false, refreshToken: false },
+				columns: {
+					secret: false,
+					accessToken: false,
+					refreshToken: false,
+					webhookSecret: false,
+				},
 			},
 			github: {
 				columns: {

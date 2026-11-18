@@ -68,6 +68,8 @@ export const gitlabRouter = createTRPCRouter({
 					secret: null,
 					accessToken: null,
 					refreshToken: null,
+					// Authenticates /api/deploy/gitlab: whoever holds it can trigger deploys.
+					webhookSecret: null,
 				};
 			}
 

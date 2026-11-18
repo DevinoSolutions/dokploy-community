@@ -33,7 +33,9 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
+	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
@@ -179,7 +181,7 @@ export const redisRouter = createTRPCRouter({
 				resourceId: redis.redisId,
 				resourceName: redis.appName,
 			});
-			return redis;
+			return serviceStatusResult(redis, "redisId", "done");
 		}),
 	reload: protectedProcedure
 		.input(apiResetRedis)
@@ -236,7 +238,7 @@ export const redisRouter = createTRPCRouter({
 				resourceId: redis.redisId,
 				resourceName: redis.appName,
 			});
-			return redis;
+			return serviceStatusResult(redis, "redisId", "idle");
 		}),
 	saveExternalPort: protectedProcedure
 		.input(apiSaveExternalPortRedis)
@@ -339,7 +341,7 @@ export const redisRouter = createTRPCRouter({
 				resourceId: mongo.redisId,
 				resourceName: mongo.appName,
 			});
-			return mongo;
+			return serviceStatusResult(mongo, "redisId", input.applicationStatus);
 		}),
 	remove: protectedProcedure
 		.input(apiFindOneRedis)
@@ -374,7 +376,7 @@ export const redisRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return redis;
+			return deletedServiceResult(redis, "redisId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesRedis)

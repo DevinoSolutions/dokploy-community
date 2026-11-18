@@ -1,4 +1,5 @@
 import {
+	redactRegistryAwsKeys,
 	redactServiceSecrets,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -45,10 +46,17 @@ describe("redactServiceSecrets", () => {
 		expect(redacted.gitlab.secret).toBe("");
 		expect(redacted.gitlab.accessToken).toBe("");
 		expect(redacted.gitlab.refreshToken).toBe("");
+		expect(redacted.gitlab.webhookSecret).toBe("");
 		expect(redacted.bitbucket.appPassword).toBe("");
 		expect(redacted.bitbucket.apiToken).toBe("");
 		expect(redacted.gitea.clientSecret).toBe("");
 		expect(redacted.registry.password).toBe("");
+		expect(redacted.registry.awsSecretAccessKey).toBe("");
+		expect(redacted.registry.awsAccessKeyId).toBe("");
+		expect(redacted.buildRegistry.awsSecretAccessKey).toBe("");
+		expect(redacted.rollbackRegistry.awsSecretAccessKey).toBe("");
+		// What identifies the registry stays readable.
+		expect(redacted.registry.awsRegion).toBe("us-east-1");
 		expect(redacted.buildRegistry.password).toBe("");
 		expect(redacted.rollbackRegistry.password).toBe("");
 		expect(redacted.customGitSSHKey.privateKey).toBe("");
@@ -80,6 +88,9 @@ describe("redactServiceSecrets", () => {
 		const backup = redacted.backups[0];
 		expect(backup?.destination.encryptionKey).toBe("");
 		expect(backup?.destination.encryptionPassword2).toBe("");
+		// Raw rclone flags can carry a header or a token: emptied, still a list.
+		expect(backup?.destination.additionalFlags).toEqual([]);
+		expect(JSON.stringify(redacted)).not.toContain("FLAGVALUE");
 		expect(backup?.destination.bucket).toBe("backups");
 		expect(backup?.metadata.mariadb.databaseUser).toBe("u");
 		expect(backup?.metadata.mariadb.databasePassword).toBe("");
@@ -126,5 +137,49 @@ describe("shapeServiceRead", () => {
 
 	it("redacts only when includeEnv is false", () => {
 		expect(leaks(shapeServiceRead(secretApplicationRow(), false))).toBe(false);
+	});
+});
+
+describe("redactRegistryAwsKeys", () => {
+	it("blanks the secret key and, unless kept, the access key id of all three registries", () => {
+		const row = secretApplicationRow();
+		const withoutId = redactRegistryAwsKeys(row, { keepAccessKeyId: false });
+		const withId = redactRegistryAwsKeys(row, { keepAccessKeyId: true });
+		for (const relation of [
+			"registry",
+			"buildRegistry",
+			"rollbackRegistry",
+		] as const) {
+			expect(withoutId[relation].awsSecretAccessKey, relation).toBe("");
+			expect(withoutId[relation].awsAccessKeyId, relation).toBe("");
+			expect(withId[relation].awsSecretAccessKey, relation).toBe("");
+			expect(withId[relation].awsAccessKeyId, relation).toBe(
+				row[relation].awsAccessKeyId,
+			);
+		}
+	});
+
+	it("leaves the rest of the registry and of the row alone and does not mutate it", () => {
+		const row = secretApplicationRow();
+		const result = redactRegistryAwsKeys(row, { keepAccessKeyId: false });
+		expect(result.registry.registryId).toBe("reg-1");
+		expect(result.registry.awsRegion).toBe("us-east-1");
+		expect(result.env).toBe(row.env);
+		expect(result.github).toBe(row.github);
+		expect(row.registry.awsSecretAccessKey).toBe("SECRET-aws-secret");
+	});
+
+	it("tolerates a missing, null or key-less registry", () => {
+		const bare = { applicationId: "a" };
+		expect(redactRegistryAwsKeys(bare, { keepAccessKeyId: false })).toBe(bare);
+		const nulls = redactRegistryAwsKeys(
+			{
+				registry: null,
+				buildRegistry: { registryId: "r", awsSecretAccessKey: null },
+			},
+			{ keepAccessKeyId: false },
+		);
+		expect(nulls.registry).toBeNull();
+		expect(nulls.buildRegistry.awsSecretAccessKey).toBeNull();
 	});
 });

@@ -64,12 +64,15 @@ import {
 	hasPermission,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
+	redactRegistryAwsKeys,
+	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import { checkoutPathSchema } from "@dokploy/server/utils/compose-path";
 import { assertGitUrlSaveable } from "@dokploy/server/utils/providers/git-url";
-import { assertWatchPathsSaveable } from "@dokploy/server/utils/watch-paths/assert-watch-paths-saveable";
+import { watchPathsSaveGuard } from "@dokploy/server/utils/watch-paths/assert-watch-paths-saveable";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -162,6 +165,12 @@ function resolveDockerProviderFields(
 		registryUrl: input.registryUrl,
 	};
 }
+
+// picomatch GHSA-fc5q-39xc-vjpf: a pattern the validator refuses is saveable
+// only when it is already stored on the unit being saved.
+const assertApplicationWatchPaths = watchPathsSaveGuard((id) =>
+	findApplicationById(id),
+);
 
 export const applicationRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -397,7 +406,9 @@ export const applicationRouter = createTRPCRouter({
 			const canDeploy = await hasPermission(ctx, { deployment: ["create"] });
 			const shaped = shapeServiceRead(application, input.includeEnv);
 			return {
-				...shaped,
+				// The AWS ECR keys of a linked registry are never part of a read
+				// (the finder loads them for the deploy path only).
+				...redactRegistryAwsKeys(shaped, { keepAccessKeyId: canEdit }),
 				// The registry password and the deploy webhook token go only to
 				// the roles that can edit or deploy the service. Read from the
 				// shaped row so an MCP redaction (includeEnv: false) stays blanked.
@@ -543,7 +554,7 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: application.applicationId,
 				resourceName: application.appName,
 			});
-			return application;
+			return deletedServiceResult(application, "applicationId");
 		}),
 
 	stop: protectedProcedure
@@ -565,7 +576,7 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: service.applicationId,
 				resourceName: service.appName,
 			});
-			return service;
+			return serviceStatusResult(service, "applicationId", "idle");
 		}),
 
 	start: protectedProcedure
@@ -587,7 +598,7 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: service.applicationId,
 				resourceName: service.appName,
 			});
-			return service;
+			return serviceStatusResult(service, "applicationId", "done");
 		}),
 
 	redeploy: protectedProcedure
@@ -782,10 +793,7 @@ export const applicationRouter = createTRPCRouter({
 			);
 			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
 			// when it is already stored on this application.
-			await assertWatchPathsSaveable(
-				input.watchPaths,
-				async () => (await findApplicationById(input.applicationId)).watchPaths,
-			);
+			await assertApplicationWatchPaths(input.applicationId, input.watchPaths);
 			await updateApplication(input.applicationId, {
 				repository: input.repository,
 				branch: input.branch,
@@ -839,10 +847,7 @@ export const applicationRouter = createTRPCRouter({
 			);
 			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
 			// when it is already stored on this application.
-			await assertWatchPathsSaveable(
-				input.watchPaths,
-				async () => (await findApplicationById(input.applicationId)).watchPaths,
-			);
+			await assertApplicationWatchPaths(input.applicationId, input.watchPaths);
 			await updateApplication(input.applicationId, {
 				gitlabRepository: input.gitlabRepository,
 				gitlabOwner: input.gitlabOwner,
@@ -897,10 +902,7 @@ export const applicationRouter = createTRPCRouter({
 			);
 			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
 			// when it is already stored on this application.
-			await assertWatchPathsSaveable(
-				input.watchPaths,
-				async () => (await findApplicationById(input.applicationId)).watchPaths,
-			);
+			await assertApplicationWatchPaths(input.applicationId, input.watchPaths);
 			await updateApplication(input.applicationId, {
 				bitbucketRepository: input.bitbucketRepository,
 				bitbucketRepositorySlug: input.bitbucketRepositorySlug,
@@ -953,10 +955,7 @@ export const applicationRouter = createTRPCRouter({
 			);
 			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
 			// when it is already stored on this application.
-			await assertWatchPathsSaveable(
-				input.watchPaths,
-				async () => (await findApplicationById(input.applicationId)).watchPaths,
-			);
+			await assertApplicationWatchPaths(input.applicationId, input.watchPaths);
 			await updateApplication(input.applicationId, {
 				giteaRepository: input.giteaRepository,
 				giteaOwner: input.giteaOwner,
@@ -1029,10 +1028,7 @@ export const applicationRouter = createTRPCRouter({
 			);
 			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
 			// when it is already stored on this application.
-			await assertWatchPathsSaveable(
-				input.watchPaths,
-				async () => (await findApplicationById(input.applicationId)).watchPaths,
-			);
+			await assertApplicationWatchPaths(input.applicationId, input.watchPaths);
 			await updateApplication(input.applicationId, {
 				customGitBranch: input.customGitBranch,
 				customGitBuildPath: input.customGitBuildPath,
@@ -1170,10 +1166,7 @@ export const applicationRouter = createTRPCRouter({
 			}
 			// Same rule for watch paths (picomatch GHSA-fc5q-39xc-vjpf): a pattern
 			// the validator refuses is saveable only when it is already stored.
-			await assertWatchPathsSaveable(
-				input.watchPaths,
-				async () => (await findApplicationById(applicationId)).watchPaths,
-			);
+			await assertApplicationWatchPaths(applicationId, input.watchPaths);
 
 			// >>> build-policy hook: refuse a required check the unit can never
 			// satisfy, here rather than on every deploy for ever after. Reading a

@@ -1,6 +1,8 @@
 import { shouldDeploy } from "@dokploy/server";
 import {
 	MAX_CHANGED_FILE_LENGTH,
+	REFUSED_LIST_WARN_INTERVAL_MS,
+	resetRefusedWatchPathWarnings,
 	WATCH_PATH_MATCH_OPTIONS,
 } from "@dokploy/server/utils/watch-paths/should-deploy";
 import micromatch from "micromatch";
@@ -148,11 +150,63 @@ describe("shouldDeploy with hostile watch paths", () => {
 
 	it("keeps literal + and @ in plain globs working", () => {
 		expect(
-			shouldDeploy(["src/routes/**/+page.svelte"], ["src/routes/a/+page.svelte"]),
+			shouldDeploy(
+				["src/routes/**/+page.svelte"],
+				["src/routes/a/+page.svelte"],
+			),
 		).toBe(true);
 		expect(shouldDeploy(["c++/**"], ["c++/main.cpp"])).toBe(true);
 		expect(shouldDeploy(["packages/@scope/**"], ["packages/@scope/x.ts"])).toBe(
 			true,
 		);
+	});
+});
+
+describe("the warning for a stored list the validator refuses", () => {
+	const refusedList = ["apps/{api,web}/**"];
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		resetRefusedWatchPathWarnings();
+	});
+
+	it("still deploys on every delivery, and says so once, naming the pattern", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		for (let delivery = 0; delivery < 25; delivery++) {
+			expect(shouldDeploy(refusedList, ["docs/readme.md"])).toBe(true);
+		}
+		expect(warn).toHaveBeenCalledTimes(1);
+		const message = String(warn.mock.calls[0]?.[0]);
+		expect(message).toMatch(/deploying on every push/);
+		expect(message).toContain("apps/{api,web}/**");
+		expect(message).toMatch(/once an hour/);
+	});
+
+	it("warns again for the same list after an hour", () => {
+		vi.useFakeTimers();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		shouldDeploy(refusedList, ["a"]);
+		vi.advanceTimersByTime(REFUSED_LIST_WARN_INTERVAL_MS - 1);
+		shouldDeploy(refusedList, ["a"]);
+		expect(warn).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(1);
+		shouldDeploy(refusedList, ["a"]);
+		expect(warn).toHaveBeenCalledTimes(2);
+	});
+
+	it("warns separately for each distinct list", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		shouldDeploy(["+(*)"], ["a"]);
+		shouldDeploy(["*(a|aa)"], ["a"]);
+		shouldDeploy(["+(*)"], ["a"]);
+		expect(warn).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not warn for a valid list or none", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		shouldDeploy(["src/**"], ["docs/readme.md"]);
+		shouldDeploy(null, ["docs/readme.md"]);
+		expect(warn).not.toHaveBeenCalled();
 	});
 });

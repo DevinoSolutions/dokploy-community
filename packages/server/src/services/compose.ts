@@ -765,7 +765,12 @@ export const findComposeById = async (composeId: string) => {
 				},
 			},
 			gitlab: {
-				columns: { secret: false, accessToken: false, refreshToken: false },
+				columns: {
+					secret: false,
+					accessToken: false,
+					refreshToken: false,
+					webhookSecret: false,
+				},
 			},
 			bitbucket: { columns: { appPassword: false, apiToken: false } },
 			gitea: {

@@ -61,6 +61,7 @@ export const secretApplicationRow = () => ({
 		secret: "SECRET-gl-secret",
 		accessToken: "SECRET-gl-access",
 		refreshToken: "SECRET-gl-refresh",
+		webhookSecret: "SECRET-gl-webhook",
 	},
 	bitbucket: {
 		bitbucketId: "bb-1",
@@ -77,9 +78,25 @@ export const secretApplicationRow = () => ({
 		registryId: "reg-1",
 		registryUrl: "r.example.com",
 		password: "SECRET-reg",
+		registryType: "awsEcr",
+		awsAccessKeyId: "AKIA-ID-REGISTRY",
+		awsSecretAccessKey: "SECRET-aws-secret",
+		awsRegion: "us-east-1",
 	},
-	buildRegistry: { registryId: "reg-2", password: "SECRET-build-reg" },
-	rollbackRegistry: { registryId: "reg-3", password: "SECRET-rollback-reg" },
+	buildRegistry: {
+		registryId: "reg-2",
+		password: "SECRET-build-reg",
+		awsAccessKeyId: "AKIA-ID-BUILD",
+		awsSecretAccessKey: "SECRET-aws-build-secret",
+		awsRegion: "eu-west-1",
+	},
+	rollbackRegistry: {
+		registryId: "reg-3",
+		password: "SECRET-rollback-reg",
+		awsAccessKeyId: "AKIA-ID-ROLLBACK",
+		awsSecretAccessKey: "SECRET-aws-rollback-secret",
+		awsRegion: null,
+	},
 	domains: [{ domainId: "d-1", host: "web.example.com" }],
 	ports: [{ portId: "p-1", publishedPort: 8080 }],
 });
@@ -114,6 +131,7 @@ export const secretComposeRow = () => ({
 				encryptionEnabled: true,
 				encryptionKey: "SECRET-crypt-key",
 				encryptionPassword2: "SECRET-crypt-salt",
+				additionalFlags: ["--header=X-Token: FLAGVALUE"],
 			},
 			metadata: {
 				mariadb: { databaseUser: "u", databasePassword: "SECRET-meta-pass" },
