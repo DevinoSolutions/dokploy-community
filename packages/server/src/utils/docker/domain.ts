@@ -454,7 +454,7 @@ type ComposeWithMetadata = Compose & {
  * One indexed lookup per deploy; a partially loaded compose (no project)
  * resolves to false without touching the database.
  */
-export const composeUsesTelemetryLabels = async (
+const composeUsesTelemetryLabels = async (
 	compose: ComposeWithMetadata,
 ): Promise<boolean> => {
 	const organizationId = compose.environment?.project?.organizationId;

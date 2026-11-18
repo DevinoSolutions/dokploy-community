@@ -34,10 +34,11 @@ const composeRow = {
 	environment: { project: { organizationId: "org-1" } },
 };
 
-vi.mock("@dokploy/server", () => {
-	const stubs: Record<string | symbol, unknown> = {};
-	const named: Record<string, unknown> = {
-		IS_CLOUD: false,
+vi.mock("@dokploy/server", async () => {
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock({
 		findComposeById: mocks.findComposeById,
 		loadServices: mocks.loadServices,
 		cloneCompose: mocks.cloneCompose,
@@ -45,15 +46,6 @@ vi.mock("@dokploy/server", () => {
 			mocks.randomizeIsolatedDeploymentComposeFile,
 		execAsync: mocks.execAsync,
 		execAsyncRemote: mocks.execAsyncRemote,
-	};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") return undefined;
-			if (typeof key === "string" && key in named) return named[key];
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
 	});
 });
 

@@ -80,7 +80,7 @@ export const describeRegistryRetry = (
 		: `Image not readable at the registry yet; retrying now (${retry.attempt}/${MAX_REGISTRY_RETRIES})`;
 };
 
-export type RegistryRetryDecision =
+type RegistryRetryDecision =
 	/** Not a registry access error: settle as failed, as before. */
 	| { kind: "settle" }
 	/** A registry access error with no retry left: settle as failed and say why. */

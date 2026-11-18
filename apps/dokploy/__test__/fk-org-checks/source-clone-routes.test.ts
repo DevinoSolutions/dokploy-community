@@ -46,9 +46,10 @@ vi.mock("@dokploy/server", async () => {
 	const { GithubHostError } = await import(
 		"@dokploy/server/utils/providers/github-host"
 	);
-	const stubs: Record<string | symbol, unknown> = {};
-	const named: Record<string, unknown> = {
-		IS_CLOUD: false,
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock({
 		GithubHostError,
 		GitUrlRefusedError,
 		assertDeployReferencesInOrganization:
@@ -59,19 +60,6 @@ vi.mock("@dokploy/server", async () => {
 		execAsyncRemote: mocks.execAsyncRemote,
 		loadServices: mocks.loadServices,
 		findComposeById: vi.fn(async () => composeRow),
-	};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (typeof key === "string" && key in named) {
-				return named[key];
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
 	});
 });
 

@@ -27,10 +27,11 @@ const baseRow = {
 	environment: { project: { organizationId: "org-b" } },
 };
 
-vi.mock("@dokploy/server", () => {
-	const stubs: Record<string | symbol, unknown> = {};
-	const named: Record<string, unknown> = {
-		IS_CLOUD: false,
+vi.mock("@dokploy/server", async () => {
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock({
 		assertDeployReferencesInOrganization: vi.fn(),
 		cloneGithubRepository: mocks.cloneGithubRepository,
 		cloneGitRepository: mocks.cloneGitRepository,
@@ -40,19 +41,6 @@ vi.mock("@dokploy/server", () => {
 		getWebServerSettings: vi.fn(async () => ({ serverIp: "203.0.113.7" })),
 		paths: () => ({ COMPOSE_PATH: "/etc/dokploy/compose" }),
 		processTemplate: mocks.processTemplate,
-	};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (typeof key === "string" && key in named) {
-				return named[key];
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
 	});
 });
 

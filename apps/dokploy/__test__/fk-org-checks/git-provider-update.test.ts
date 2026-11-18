@@ -34,9 +34,10 @@ vi.mock("@dokploy/server", async () => {
 	const realGithub = await vi.importActual<
 		typeof import("@dokploy/server/utils/providers/github")
 	>("@dokploy/server/utils/providers/github");
-	const stubs: Record<string | symbol, unknown> = {};
-	const named: Record<string, unknown> = {
-		IS_CLOUD: false,
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock({
 		assertCanUpdateGitProvider: real.assertCanUpdateGitProvider,
 		// the real URL rule github.update applies to a changed app URL
 		parseGithubAppUrl: realGithub.parseGithubAppUrl,
@@ -50,19 +51,6 @@ vi.mock("@dokploy/server", async () => {
 		updateGitea: mocks.updateGitea,
 		updateBitbucket: mocks.updateBitbucket,
 		updateGitProvider: mocks.updateGitProvider,
-	};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (typeof key === "string" && key in named) {
-				return named[key];
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
 	});
 });
 

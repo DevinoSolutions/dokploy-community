@@ -32,34 +32,28 @@ const DAY_MS = 86_400_000;
 /**
  * @param {unknown} pkg parsed root package.json
  * @param {string} today YYYY-MM-DD (UTC)
- * @returns {{ problems: string[], warnings: string[] }}
+ * @returns {{ problems: string[] }}
  */
 export function auditIgnoreProblems(pkg, today) {
 	/** @type {string[]} */
 	const problems = [];
-	/** @type {string[]} */
-	const warnings = [];
 	const root = /** @type {Record<string, any>} */ (pkg ?? {});
 	/** @type {unknown} */
 	const ignored = root.pnpm?.auditConfig?.ignoreGhsas ?? [];
 	/** @type {unknown} */
 	const table = root.auditIgnoreExpiry ?? {};
 	if (!Array.isArray(ignored)) {
-		return {
-			problems: ["pnpm.auditConfig.ignoreGhsas must be an array"],
-			warnings,
-		};
+		return { problems: ["pnpm.auditConfig.ignoreGhsas must be an array"] };
 	}
 	if (typeof table !== "object" || table === null || Array.isArray(table)) {
 		return {
 			problems: ["auditIgnoreExpiry must be an object of GHSA -> expiry"],
-			warnings,
 		};
 	}
 	const dated = /** @type {Record<string, unknown>} */ (table);
 	const todayMs = Date.parse(`${today}T00:00:00Z`);
 	if (Number.isNaN(todayMs)) {
-		return { problems: [`today (${today}) is not a date`], warnings };
+		return { problems: [`today (${today}) is not a date`] };
 	}
 
 	for (const ghsa of ignored) {
@@ -108,7 +102,7 @@ export function auditIgnoreProblems(pkg, today) {
 			);
 		}
 	}
-	return { problems, warnings };
+	return { problems };
 }
 
 const isMain =
@@ -126,8 +120,7 @@ if (isMain) {
 		"package.json",
 	);
 	const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-	const { problems, warnings } = auditIgnoreProblems(pkg, today);
-	for (const warning of warnings) console.log(`::warning::${warning}`);
+	const { problems } = auditIgnoreProblems(pkg, today);
 	for (const problem of problems) console.log(`::error::${problem}`);
 	if (problems.length > 0) {
 		console.log(

@@ -65,9 +65,10 @@ vi.mock("@dokploy/server", async () => {
 	const real = await vi.importActual<
 		typeof import("@dokploy/server/services/service-reference-scope")
 	>("@dokploy/server/services/service-reference-scope");
-	const stubs: Record<string | symbol, unknown> = {};
-	const named: Record<string, unknown> = {
-		IS_CLOUD: false,
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock({
 		// the bind mounts of a service are looked at before it is copied
 		findMountsByApplicationId: vi.fn(async () => []),
 		assertServiceCopyReferencesInOrganization:
@@ -78,19 +79,6 @@ vi.mock("@dokploy/server", async () => {
 		createProject: mocks.createProject,
 		createApplication: mocks.createApplication,
 		createCompose: mocks.createCompose,
-	};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (typeof key === "string" && key in named) {
-				return named[key];
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
 	});
 });
 

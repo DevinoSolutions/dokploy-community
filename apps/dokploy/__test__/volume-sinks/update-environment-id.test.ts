@@ -10,10 +10,11 @@ const mocks = vi.hoisted(() => ({
 	audit: vi.fn(),
 }));
 
-vi.mock("@dokploy/server", () => {
-	const stubs: Record<string | symbol, unknown> = {};
-	const named: Record<string, unknown> = {
-		IS_CLOUD: false,
+vi.mock("@dokploy/server", async () => {
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock({
 		updateApplication: mocks.updated,
 		updateCompose: mocks.updated,
 		updatePostgresById: mocks.updated,
@@ -22,19 +23,6 @@ vi.mock("@dokploy/server", () => {
 		updateMongoById: mocks.updated,
 		updateRedisById: mocks.updated,
 		updateLibsqlById: mocks.updated,
-	};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (typeof key === "string" && key in named) {
-				return named[key];
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
 	});
 });
 
