@@ -153,6 +153,7 @@ import { cleanAllDeploymentQueue, myQueue } from "@/server/queues/queueSetup";
 import {
 	closeIntakeForRestart,
 	DEPLOY_INTAKE_SWAP_HOLD_MS,
+	UPDATE_PULL_KILL_GRACE_MS,
 	UPDATE_PULL_TIMEOUT_MS,
 } from "@/server/queues/restart-guard";
 import { applyDockerCleanupSchedule } from "@/server/utils/docker-cleanup";
@@ -1355,15 +1356,27 @@ export const settingsRouter = createTRPCRouter({
 					// Bounded below the intake hold: a pull that never ends must not
 					// outlive the hold it runs under.
 					const pullStarted = Date.now();
+					// The timeout sends SIGTERM; a docker client that ignores it is killed
+					// a few seconds later, so the pull cannot outlive the hold.
+					const pull = spawnAsync("docker", ["pull", image], undefined, {
+						timeout: UPDATE_PULL_TIMEOUT_MS,
+					});
+					const escalate = setTimeout(() => {
+						const child = pull.child;
+						if (child && child.exitCode === null && child.signalCode === null) {
+							child.kill("SIGKILL");
+						}
+					}, UPDATE_PULL_TIMEOUT_MS + UPDATE_PULL_KILL_GRACE_MS);
+					escalate.unref?.();
 					try {
-						await spawnAsync("docker", ["pull", image], undefined, {
-							timeout: UPDATE_PULL_TIMEOUT_MS,
-						});
+						await pull;
 					} catch (error) {
 						if (Date.now() - pullStarted >= UPDATE_PULL_TIMEOUT_MS) {
 							throw new Error("docker pull timed out");
 						}
 						throw error;
+					} finally {
+						clearTimeout(escalate);
 					}
 					// Still this job's attempt? A pull that outlasted the 15 minute
 					// cutoff may have been replaced by a newer attempt (or a forced

@@ -1376,3 +1376,56 @@ describe("review fixes: expired hold, pull timeout, swap bookkeeping", () => {
 		expect(error.message).toContain("then try again");
 	});
 });
+
+describe("the image pull is killed outright when it ignores the timeout", () => {
+	it("sends SIGKILL a few seconds after the timeout SIGTERM", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			let rejectPull!: (error: Error) => void;
+			const kill = vi.fn(() => rejectPull(new Error("killed")));
+			mocks.spawnAsync.mockImplementation((_command, args: string[]) => {
+				if (args[0] !== "pull") return Promise.resolve(Buffer.from(""));
+				return Object.assign(
+					new Promise((_, reject) => {
+						rejectPull = reject;
+					}),
+					{ child: { exitCode: null, signalCode: null, kill } },
+				);
+			});
+
+			await caller.updateServer();
+			await vi.advanceTimersByTimeAsync(10 * 60_000 + 4_000);
+			expect(kill).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(2_000);
+
+			expect(kill).toHaveBeenCalledWith("SIGKILL");
+			await Promise.all(jobs);
+			expect(hold.release).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("leaves no kill timer behind after a pull that finished", async () => {
+		vi.useFakeTimers();
+		try {
+			const kill = vi.fn();
+			mocks.spawnAsync.mockImplementation((_command, args: string[]) =>
+				args[0] === "pull"
+					? Object.assign(Promise.resolve(Buffer.from("")), {
+							child: { exitCode: 0, signalCode: null, kill },
+						})
+					: Promise.resolve(Buffer.from("")),
+			);
+
+			await caller.updateServer();
+			await Promise.all(jobs);
+			await vi.advanceTimersByTimeAsync(11 * 60_000);
+
+			expect(kill).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});

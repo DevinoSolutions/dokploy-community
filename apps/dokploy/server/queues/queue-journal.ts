@@ -91,6 +91,12 @@ export interface QueueJournalOptions {
 	timeoutMs?: number;
 	/** Cap on any single journal write; see WRITE_TIMEOUT_MS. */
 	writeTimeoutMs?: number;
+	/**
+	 * Awaited right before the restored jobs are put into the queue. The builds a
+	 * restart orphaned on a build server are stopped first, whenever the restore
+	 * runs relative to the worker gate. Must be bounded; a rejection is ignored.
+	 */
+	beforeReplay?: () => Promise<unknown>;
 }
 
 const EMPTY_RESULT: RestoreResult = { restored: 0, interrupted: 0, dropped: 0 };
@@ -300,6 +306,12 @@ export const createQueueJournal = (
 			// The rows stay `active`; the jobs still run, only the attempt count
 			// is not advanced.
 			fail("requeue", error);
+		}
+
+		try {
+			await options.beforeReplay?.();
+		} catch {
+			// The replay goes on; the kill reports its own failures.
 		}
 
 		const restored = queue.addRestored(

@@ -174,6 +174,9 @@ const failDroppedJob = async (payload: Record<string, unknown>) => {
 const createInMemoryQueue = (): DeploymentQueue => {
 	const durable = createQueueJournal(dbJournalStore, {
 		onDropped: failDroppedJob,
+		// A replayed job must not start next to the build it replaces, however
+		// early the worker gate opened: bounded by the shared boot budget.
+		beforeReplay: whenOrphanKillsSettled,
 	});
 	const queue = new InMemoryQueue({
 		resolveConcurrency: resolveBuildsConcurrency,

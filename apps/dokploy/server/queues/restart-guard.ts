@@ -28,6 +28,8 @@ export const DEPLOY_INTAKE_SWAP_HOLD_MS = 5 * 60_000;
  * still closed when a pull that never ends is given up on.
  */
 export const UPDATE_PULL_TIMEOUT_MS = 10 * 60_000;
+/** After the timeout's SIGTERM, how long before the pull is killed outright. */
+export const UPDATE_PULL_KILL_GRACE_MS = 5_000;
 
 /** How many services the refusal names before it says "and N more". */
 const NAMED_SERVICES = 5;
