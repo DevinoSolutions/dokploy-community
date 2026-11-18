@@ -1,20 +1,18 @@
 import {
-	apiSaveBitbucketProvider,
-	apiSaveGiteaProvider,
 	apiSaveGithubProvider,
-	apiSaveGitlabProvider,
-	apiSaveGitProvider,
 	apiUpdateApplication,
 	apiUpdateCompose,
 } from "@dokploy/server/db/schema";
+import { watchPathsSaveProblems } from "@dokploy/server/utils/watch-paths/assert-watch-paths-saveable";
 import {
 	isSafeWatchPath,
 	WATCH_PATH_MAX_LENGTH,
 	WATCH_PATHS_MAX_ENTRIES,
 	watchPathProblem,
-	watchPathsSchema,
+	watchPathsNotice,
+	watchPathsProblems,
 } from "@dokploy/server/utils/watch-paths/validate-watch-paths";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // picomatch GHSA-fc5q-39xc-vjpf: watch paths reach micromatch on every push.
 
@@ -87,126 +85,126 @@ describe("watchPathProblem", () => {
 	});
 });
 
-describe("watchPathsSchema", () => {
-	it("accepts an empty list and a list of plain globs", () => {
-		expect(watchPathsSchema.safeParse([]).success).toBe(true);
-		expect(watchPathsSchema.safeParse(accepted).success).toBe(true);
+describe("watchPathsProblems and watchPathsNotice", () => {
+	it("report nothing for a usable list", () => {
+		expect(watchPathsProblems(["src/**", "!docs/**"])).toEqual([]);
+		expect(watchPathsNotice(["src/**", "!docs/**"])).toBeNull();
+		expect(watchPathsNotice(null)).toBeNull();
+		expect(watchPathsNotice([])).toBeNull();
 	});
 
-	it("names the refused pattern and the reason", () => {
-		const result = watchPathsSchema.safeParse(["src/**", "+(*)"]);
-		expect(result.success).toBe(false);
-		const issue = result.error?.issues[0];
-		expect(issue?.path).toEqual([1]);
-		expect(issue?.message).toMatch(/^Invalid watch path "\+\(\*\)": extglob/);
-	});
-
-	it(`allows ${WATCH_PATHS_MAX_ENTRIES} entries and refuses one more`, () => {
-		const many = Array.from({ length: WATCH_PATHS_MAX_ENTRIES }, (_, i) =>
-			`dir${i}/**`,
+	it("name each refused pattern and say the list is ignored", () => {
+		const notice = watchPathsNotice(["src/**", "src/**/*.{ts,tsx}", "+(*)"]);
+		expect(notice).toMatch(
+			/^These watch paths are ignored and every push deploys/,
 		);
-		expect(watchPathsSchema.safeParse(many).success).toBe(true);
-		const result = watchPathsSchema.safeParse([...many, "one-more/**"]);
-		expect(result.success).toBe(false);
-		expect(result.error?.issues[0]?.message).toMatch(/At most 100/);
+		expect(notice).toContain('Invalid watch path "src/**/*.{ts,tsx}": brace');
+		expect(notice).toContain('Invalid watch path "+(*)": extglob');
+	});
+
+	it(`count more than ${WATCH_PATHS_MAX_ENTRIES} entries as a problem`, () => {
+		const many = Array.from(
+			{ length: WATCH_PATHS_MAX_ENTRIES + 1 },
+			(_, i) => `dir${i}/**`,
+		);
+		expect(watchPathsProblems(many.slice(1))).toEqual([]);
+		expect(watchPathsProblems(many)).toEqual([
+			{ pattern: null, message: "At most 100 watch paths are allowed" },
+		]);
 	});
 });
 
-describe("every API schema that accepts watchPaths refuses a bad pattern", () => {
-	const bad = ["src/**", "+(*)"];
-	const good = ["src/**", "!docs/**"];
+// The pattern rules depend on what is stored for the unit, so the zod schemas
+// only check the type and the routers apply the rules. A form that sends the
+// whole object back with a list saved before the rules existed must still parse.
+describe("the API schemas keep accepting a stored list", () => {
+	const legacy = ["src/**/*.{ts,tsx}", "+(*)"];
 
-	const cases = [
-		[
-			"application.update",
-			(watchPaths: string[]) =>
-				apiUpdateApplication.safeParse({ applicationId: "app-1", watchPaths }),
-		],
-		[
-			"compose.update",
-			(watchPaths: string[]) =>
-				apiUpdateCompose.safeParse({ composeId: "compose-1", watchPaths }),
-		],
-		[
-			"application.saveGithubProvider",
-			(watchPaths: string[]) =>
-				apiSaveGithubProvider.safeParse({
-					applicationId: "app-1",
-					repository: "repo",
-					owner: "owner",
-					buildPath: "/",
-					githubId: "gh-1",
-					branch: "main",
-					triggerType: "push",
-					enableSubmodules: false,
-					watchPaths,
-				}),
-		],
-		[
-			"application.saveGitlabProvider",
-			(watchPaths: string[]) =>
-				apiSaveGitlabProvider.safeParse({
-					applicationId: "app-1",
-					gitlabBuildPath: "/",
-					gitlabOwner: "owner",
-					gitlabRepository: "repo",
-					gitlabId: "gl-1",
-					gitlabProjectId: 1,
-					gitlabPathNamespace: "owner/repo",
-					gitlabBranch: "main",
-					watchPaths,
-				}),
-		],
-		[
-			"application.saveBitbucketProvider",
-			(watchPaths: string[]) =>
-				apiSaveBitbucketProvider.safeParse({
-					applicationId: "app-1",
-					bitbucketBuildPath: "/",
-					bitbucketOwner: "owner",
-					bitbucketRepository: "repo",
-					bitbucketRepositorySlug: "repo",
-					bitbucketId: "bb-1",
-					bitbucketBranch: "main",
-					watchPaths,
-				}),
-		],
-		[
-			"application.saveGiteaProvider",
-			(watchPaths: string[]) =>
-				apiSaveGiteaProvider.safeParse({
-					applicationId: "app-1",
-					giteaBuildPath: "/",
-					giteaOwner: "owner",
-					giteaRepository: "repo",
-					giteaId: "gt-1",
-					giteaBranch: "main",
-					watchPaths,
-				}),
-		],
-		[
-			"application.saveGitProvider",
-			(watchPaths: string[]) =>
-				apiSaveGitProvider.safeParse({
-					applicationId: "app-1",
-					customGitBuildPath: "/",
-					customGitUrl: "https://github.com/owner/repo.git",
-					customGitBranch: "main",
-					enableSubmodules: false,
-					watchPaths,
-				}),
-		],
-	] as const;
-
-	it.each(cases)("%s", (_name, parse) => {
-		const ok = parse(good);
-		expect(ok.error?.issues ?? []).toEqual([]);
-		const refused = parse(bad);
-		expect(refused.success).toBe(false);
+	it("application.update, compose.update and save*Provider parse it", () => {
 		expect(
-			refused.error?.issues.some((issue) =>
-				/Invalid watch path "\+\(\*\)"/.test(issue.message),
-			),
+			apiUpdateApplication.safeParse({ applicationId: "a", watchPaths: legacy })
+				.success,
 		).toBe(true);
+		expect(
+			apiUpdateCompose.safeParse({ composeId: "c", watchPaths: legacy })
+				.success,
+		).toBe(true);
+		expect(
+			apiSaveGithubProvider.safeParse({
+				applicationId: "a",
+				repository: "repo",
+				owner: "owner",
+				buildPath: "/",
+				githubId: "gh-1",
+				branch: "main",
+				triggerType: "push",
+				enableSubmodules: false,
+				watchPaths: legacy,
+			}).success,
+		).toBe(true);
+	});
+
+	it("still refuses a non-string entry", () => {
+		expect(
+			apiUpdateApplication.safeParse({ applicationId: "a", watchPaths: [1] })
+				.success,
+		).toBe(false);
+	});
+});
+
+describe("watchPathsSaveProblems: refused patterns are saveable only when already stored", () => {
+	const stored = ["src/**/*.{ts,tsx}", "!docs/**"];
+	const load = (current: string[] | null) => vi.fn(async () => current);
+
+	it("accepts a valid list without reading the stored row", async () => {
+		const loadCurrent = load(stored);
+		expect(
+			await watchPathsSaveProblems(["apps/web/**", "!docs/**"], loadCurrent),
+		).toEqual([]);
+		expect(loadCurrent).not.toHaveBeenCalled();
+	});
+
+	it("accepts nothing to save", async () => {
+		expect(await watchPathsSaveProblems(undefined, load(stored))).toEqual([]);
+		expect(await watchPathsSaveProblems([], load(stored))).toEqual([]);
+	});
+
+	it("accepts the unchanged stored list", async () => {
+		expect(await watchPathsSaveProblems([...stored], load(stored))).toEqual([]);
+	});
+
+	it("accepts the stored bad pattern next to removed or added valid ones", async () => {
+		expect(
+			await watchPathsSaveProblems(["src/**/*.{ts,tsx}"], load(stored)),
+		).toEqual([]);
+		expect(
+			await watchPathsSaveProblems([...stored, "apps/api/**"], load(stored)),
+		).toEqual([]);
+	});
+
+	it("refuses a new bad pattern", async () => {
+		expect(
+			await watchPathsSaveProblems([...stored, "+(*)"], load(stored)),
+		).toEqual([
+			expect.stringMatching(/^Invalid watch path "\+\(\*\)": extglob/),
+		]);
+		expect(await watchPathsSaveProblems(["+(*)"], load(null))).toHaveLength(1);
+	});
+
+	it("refuses a changed bad pattern", async () => {
+		expect(
+			await watchPathsSaveProblems(["src/**/*.{js,jsx}"], load(stored)),
+		).toEqual([expect.stringMatching(/brace/)]);
+	});
+
+	it("refuses a changed list over the entry limit, keeps an unchanged one", async () => {
+		const many = Array.from(
+			{ length: WATCH_PATHS_MAX_ENTRIES + 1 },
+			(_, i) => `dir${i}/**`,
+		);
+		expect(await watchPathsSaveProblems(many, load(many))).toEqual([]);
+		expect(await watchPathsSaveProblems([...many, "x/**"], load(many))).toEqual(
+			["At most 100 watch paths are allowed"],
+		);
 	});
 });

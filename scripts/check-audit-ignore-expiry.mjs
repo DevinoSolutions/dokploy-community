@@ -17,9 +17,8 @@
 // A dated mute is a loan: the date must be after today (UTC; the expiry day
 // itself is already expired) and at most MAX_AUDIT_IGNORE_DAYS out, so the
 // audit job goes red, and stays red, once the date passes. A table entry for a
-// GHSA that is no longer muted is refused too, so the two cannot drift apart.
-// A mute with no table entry predates this check: it is reported as a warning,
-// not a failure, until someone dates it.
+// GHSA that is no longer muted is refused too, so the two cannot drift apart,
+// and so is a mute with no table entry: an undated mute is not allowed.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -69,8 +68,8 @@ export function auditIgnoreProblems(pkg, today) {
 			continue;
 		}
 		if (!(ghsa in dated)) {
-			warnings.push(
-				`${ghsa} is muted with no auditIgnoreExpiry entry (an undated mute)`,
+			problems.push(
+				`${ghsa} is muted with no auditIgnoreExpiry entry: an undated mute is not allowed`,
 			);
 		}
 	}

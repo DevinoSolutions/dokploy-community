@@ -35,11 +35,10 @@ describe("auditIgnoreProblems", () => {
 		expect(auditIgnoreProblems(input, today).problems).toHaveLength(problems);
 	});
 
-	it("warns, without failing, about a mute with no date", () => {
+	it("refuses a mute with no date", () => {
 		const result = auditIgnoreProblems(pkg([GHSA]), "2026-11-17");
-		expect(result.problems).toEqual([]);
-		expect(result.warnings).toEqual([
-			`${GHSA} is muted with no auditIgnoreExpiry entry (an undated mute)`,
+		expect(result.problems).toEqual([
+			`${GHSA} is muted with no auditIgnoreExpiry entry: an undated mute is not allowed`,
 		]);
 	});
 
@@ -48,7 +47,9 @@ describe("auditIgnoreProblems", () => {
 			dated("expires=2026-12-01 | r"),
 			"2026-12-02",
 		);
-		expect(problems[0]).toMatch(/GHSA-fc5q-39xc-vjpf: the mute expired on 2026-12-01/);
+		expect(problems[0]).toMatch(
+			/GHSA-fc5q-39xc-vjpf: the mute expired on 2026-12-01/,
+		);
 	});
 
 	it("the repo's picomatch mute is dated 2026-12-01 with the required reason", () => {
@@ -61,6 +62,15 @@ describe("auditIgnoreProblems", () => {
 			/^expires=2026-12-01 \| runtime watchPaths now validated and matched with extglob\/brace parsing disabled \(see should-deploy\.ts\); checked .+; drop when picomatch ships a fix \(micromatch\/picomatch#194\)$/,
 		);
 		expect(auditIgnoreProblems(root, "2026-11-17").problems).toEqual([]);
-		expect(auditIgnoreProblems(root, "2026-12-01").problems).toHaveLength(1);
+		expect(auditIgnoreProblems(root, "2026-12-01").problems).toHaveLength(2);
+	});
+
+	it("the repo's braces mute is dated 2026-12-01 with its reason", () => {
+		const root = JSON.parse(
+			readFileSync(join(__dirname, "../../../../package.json"), "utf8"),
+		);
+		expect(root.auditIgnoreExpiry["GHSA-vfj7-8cjw-p6xm"]).toMatch(
+			/^expires=2026-12-01 \| braces only reached via micromatch in should-deploy\.ts, which now runs with nobrace and validated patterns.+; drop when braces ships a fix$/,
+		);
 	});
 });

@@ -69,6 +69,7 @@ import {
 } from "@dokploy/server/services/service-secrets";
 import { checkoutPathSchema } from "@dokploy/server/utils/compose-path";
 import { assertGitUrlSaveable } from "@dokploy/server/utils/providers/git-url";
+import { assertWatchPathsSaveable } from "@dokploy/server/utils/watch-paths/assert-watch-paths-saveable";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -779,6 +780,12 @@ export const applicationRouter = createTRPCRouter({
 				() => findApplicationById(input.applicationId),
 				ctx.session,
 			);
+			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
+			// when it is already stored on this application.
+			await assertWatchPathsSaveable(
+				input.watchPaths,
+				async () => (await findApplicationById(input.applicationId)).watchPaths,
+			);
 			await updateApplication(input.applicationId, {
 				repository: input.repository,
 				branch: input.branch,
@@ -829,6 +836,12 @@ export const applicationRouter = createTRPCRouter({
 				},
 				() => findApplicationById(input.applicationId),
 				ctx.session,
+			);
+			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
+			// when it is already stored on this application.
+			await assertWatchPathsSaveable(
+				input.watchPaths,
+				async () => (await findApplicationById(input.applicationId)).watchPaths,
 			);
 			await updateApplication(input.applicationId, {
 				gitlabRepository: input.gitlabRepository,
@@ -882,6 +895,12 @@ export const applicationRouter = createTRPCRouter({
 				() => findApplicationById(input.applicationId),
 				ctx.session,
 			);
+			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
+			// when it is already stored on this application.
+			await assertWatchPathsSaveable(
+				input.watchPaths,
+				async () => (await findApplicationById(input.applicationId)).watchPaths,
+			);
 			await updateApplication(input.applicationId, {
 				bitbucketRepository: input.bitbucketRepository,
 				bitbucketRepositorySlug: input.bitbucketRepositorySlug,
@@ -931,6 +950,12 @@ export const applicationRouter = createTRPCRouter({
 				},
 				() => findApplicationById(input.applicationId),
 				ctx.session,
+			);
+			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
+			// when it is already stored on this application.
+			await assertWatchPathsSaveable(
+				input.watchPaths,
+				async () => (await findApplicationById(input.applicationId)).watchPaths,
 			);
 			await updateApplication(input.applicationId, {
 				giteaRepository: input.giteaRepository,
@@ -1001,6 +1026,12 @@ export const applicationRouter = createTRPCRouter({
 			assertGitUrlSaveable(
 				input.customGitUrl,
 				(await findApplicationById(input.applicationId)).customGitUrl,
+			);
+			// picomatch GHSA-fc5q-39xc-vjpf: a refused pattern is saveable only
+			// when it is already stored on this application.
+			await assertWatchPathsSaveable(
+				input.watchPaths,
+				async () => (await findApplicationById(input.applicationId)).watchPaths,
 			);
 			await updateApplication(input.applicationId, {
 				customGitBranch: input.customGitBranch,
@@ -1137,6 +1168,12 @@ export const applicationRouter = createTRPCRouter({
 					(await findApplicationById(applicationId)).customGitUrl,
 				);
 			}
+			// Same rule for watch paths (picomatch GHSA-fc5q-39xc-vjpf): a pattern
+			// the validator refuses is saveable only when it is already stored.
+			await assertWatchPathsSaveable(
+				input.watchPaths,
+				async () => (await findApplicationById(applicationId)).watchPaths,
+			);
 
 			// >>> build-policy hook: refuse a required check the unit can never
 			// satisfy, here rather than on every deploy for ever after. Reading a

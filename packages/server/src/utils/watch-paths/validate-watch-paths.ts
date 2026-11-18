@@ -36,9 +36,16 @@ import { z } from "zod";
  * valid. Every pattern this allows matched a 4,096 character path in under
  * 100 ms in the same measurement.
  *
- * The check runs twice: in the zod schemas that accept watch paths, so a bad
- * pattern is refused with a clear message, and in `shouldDeploy`, so a row
- * stored before this check existed cannot reach the matcher either.
+ * The check runs in three places:
+ *
+ * - on save (`assert-watch-paths-saveable.ts`, called by the application and
+ *   compose routers), for every pattern that is not already stored on that
+ *   unit, so a bad pattern is refused with a clear message while a row stored
+ *   before this check existed can still be saved unchanged (same rule as
+ *   `assertGitUrlSaveable`, T-8420);
+ * - in `shouldDeploy`, so such a stored row never reaches the matcher;
+ * - in the watch-paths form fields, which show `watchPathsNotice` so the user
+ *   sees that the list is being ignored.
  */
 export const WATCH_PATH_MAX_LENGTH = 256;
 export const WATCH_PATHS_MAX_ENTRIES = 100;
@@ -91,20 +98,55 @@ export const watchPathProblem = (pattern: unknown): string | null => {
 export const isSafeWatchPath = (pattern: unknown): pattern is string =>
 	watchPathProblem(pattern) === null;
 
-/** zod shape for every API input that accepts watch paths. */
+/** `Invalid watch path "…": reason` for one refused pattern. */
+export const watchPathMessage = (pattern: unknown, problem: string) =>
+	`Invalid watch path ${JSON.stringify(String(pattern).slice(0, 64))}: ${problem}`;
+
+/**
+ * The refused patterns of a list, each with its message. A list over
+ * WATCH_PATHS_MAX_ENTRIES is reported as one more entry with pattern `null`.
+ */
+export const watchPathsProblems = (
+	paths: readonly unknown[] | null | undefined,
+): { pattern: unknown; message: string }[] => {
+	if (!Array.isArray(paths)) return [];
+	const problems: { pattern: unknown; message: string }[] = [];
+	for (const pattern of paths) {
+		const problem = watchPathProblem(pattern);
+		if (problem) {
+			problems.push({ pattern, message: watchPathMessage(pattern, problem) });
+		}
+	}
+	if (paths.length > WATCH_PATHS_MAX_ENTRIES) {
+		problems.push({
+			pattern: null,
+			message: `At most ${WATCH_PATHS_MAX_ENTRIES} watch paths are allowed`,
+		});
+	}
+	return problems;
+};
+
+/**
+ * What the watch-paths field shows when `shouldDeploy` would ignore the list,
+ * or `null` when the list is usable.
+ */
+export const watchPathsNotice = (
+	paths: readonly unknown[] | null | undefined,
+): string | null => {
+	const problems = watchPathsProblems(paths);
+	if (problems.length === 0) return null;
+	return `These watch paths are ignored and every push deploys until this is fixed. ${problems
+		.map((p) => p.message)
+		.join(" ")}`;
+};
+
+/**
+ * zod shape for the API inputs that accept watch paths. It only checks the
+ * type: the pattern rules depend on what is already stored for the unit, so
+ * the routers apply them with `assertWatchPathsSaveable`.
+ */
 export const watchPathsSchema = z
-	.array(
-		z.string().superRefine((value, ctx) => {
-			const problem = watchPathProblem(value);
-			if (problem) {
-				ctx.addIssue({
-					code: "custom",
-					message: `Invalid watch path "${value.slice(0, 64)}": ${problem}`,
-				});
-			}
-		}),
-	)
-	.max(
-		WATCH_PATHS_MAX_ENTRIES,
-		`At most ${WATCH_PATHS_MAX_ENTRIES} watch paths are allowed`,
+	.array(z.string())
+	.describe(
+		`Glob patterns. Saving refuses a pattern not already stored on this unit that has an extglob (+(…) *(…) ?(…) @(…) !(…)), a brace or parenthesis, "]+", more than 2 * in one name, more than 2 ** or 3 * in total, or more than ${WATCH_PATH_MAX_LENGTH} characters, and a changed list of more than ${WATCH_PATHS_MAX_ENTRIES} entries.`,
 	);
