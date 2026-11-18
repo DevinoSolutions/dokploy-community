@@ -286,10 +286,15 @@ export const deploymentRouter = createTRPCRouter({
 			rows.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
 		} else {
 			const jobs = await myQueue.getJobs();
+			// One read for the whole list: it is the same answer for every row.
+			const intakeClosed = myQueue.intakeClosed();
 			const jobRows = await Promise.all(
-				jobs.map(async (job) => {
+				jobs.map(async (job): Promise<QueueJobRow> => {
 					const state = await job.getState();
 					return {
+						...(intakeClosed && state === "waiting"
+							? { heldReason: "intake-closed-for-update" as const }
+							: {}),
 						id: String(job.id),
 						name: job.name ?? undefined,
 						data: job.data as Record<string, unknown>,

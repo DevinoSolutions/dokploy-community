@@ -8,6 +8,7 @@ import {
 } from "@dokploy/server";
 import { isCoalescableDeployJob } from "@dokploy/server/services/build-policy/coalesce";
 import { isCoalescingEnforcedForUnit } from "@dokploy/server/services/build-policy/webhook";
+import { whenOrphanKillsSettled } from "@dokploy/server/services/orphan-build-kill";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -18,9 +19,11 @@ import {
 	type CoalesceWaitingOutcome,
 	type InMemoryJob,
 	InMemoryQueue,
+	type IntakeHold,
 	type KeepOldestOutcome,
 	type KeptWaitingJob,
 	type PriorityOutcome,
+	type QueueBusySnapshot,
 } from "./in-memory-queue";
 import { gateWorkerUntilRestored, registerShutdownHandler } from "./lifecycle";
 import {
@@ -91,6 +94,11 @@ interface DeploymentQueue {
 		predicate: (data: DeploymentJob) => boolean,
 	) => CoalesceWaitingOutcome;
 	clearWaiting: () => number;
+	/** Stop starting jobs while still accepting them (see InMemoryQueue.closeIntake). */
+	closeIntake: (ttlMs: number) => IntakeHold;
+	intakeClosed: () => boolean;
+	/** The work a restart right now would interrupt. */
+	busy: () => QueueBusySnapshot;
 	/** Re-enqueue the jobs the previous process left unfinished. Never throws. */
 	restore: () => Promise<RestoreResult>;
 	/** Stop taking jobs, give running ones `graceMs` to finish, flush the journal. */
@@ -113,6 +121,9 @@ const createNoopQueue = (): DeploymentQueue => ({
 	keepOldestWaiting: () => ({ kept: [], removed: [] }),
 	coalesceWaiting: () => ({ merged: null, removed: [], titles: [] }),
 	clearWaiting: () => 0,
+	closeIntake: () => ({ release: () => {}, extend: () => true }),
+	intakeClosed: () => false,
+	busy: () => ({ active: [], heldGroups: [] }),
 	restore: () => Promise.resolve({ restored: 0, interrupted: 0, dropped: 0 }),
 	shutdown: () => Promise.resolve(),
 });
@@ -163,6 +174,9 @@ const failDroppedJob = async (payload: Record<string, unknown>) => {
 const createInMemoryQueue = (): DeploymentQueue => {
 	const durable = createQueueJournal(dbJournalStore, {
 		onDropped: failDroppedJob,
+		// A replayed job must not start next to the build it replaces, however
+		// early the worker gate opened: bounded by the shared boot budget.
+		beforeReplay: whenOrphanKillsSettled,
 	});
 	const queue = new InMemoryQueue({
 		resolveConcurrency: resolveBuildsConcurrency,
@@ -174,7 +188,14 @@ const createInMemoryQueue = (): DeploymentQueue => {
 	});
 	// Held until the boot replay is done (or 30s pass), so a webhook arriving
 	// first cannot start ahead of the same job restored from the journal.
-	const gate = gateWorkerUntilRestored(queue);
+	// Also held until the builds a restart orphaned on a build server are
+	// stopped (or their boot budget ran out), so a replayed job cannot start
+	// a second build next to one. The restore itself does not wait for them.
+	const gate = gateWorkerUntilRestored(
+		queue,
+		undefined,
+		whenOrphanKillsSettled,
+	);
 	queue.process(processDeploymentJob);
 
 	let shuttingDown: Promise<void> | null = null;
@@ -197,6 +218,9 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		coalesceWaiting: (incoming, predicate) =>
 			queue.coalesceWaiting(incoming, predicate),
 		clearWaiting: () => queue.clearWaiting(),
+		closeIntake: (ttlMs) => queue.closeIntake(ttlMs),
+		intakeClosed: () => queue.intakeClosed(),
+		busy: () => queue.busy(),
 		restore: async () => {
 			try {
 				const result = await durable.restore(queue);
@@ -453,5 +477,8 @@ export const killDockerBuild = async (
 		console.error(error);
 	}
 };
+
+/** True while an update or reload of Dokploy has closed the deploy intake. */
+export const isDeployIntakeClosed = () => myQueue.intakeClosed();
 
 export { myQueue };

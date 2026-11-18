@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
 	recordDokployRollbackPoint: vi.fn(),
 	runBackgroundJob: vi.fn(),
 	spawnAsync: vi.fn(),
+	reloadDockerResource: vi.fn(),
+	closeIntake: vi.fn(),
+	busy: vi.fn(),
 	claimDokployUpdateAttempt: vi.fn(),
 	transitionDokployUpdateAttempt: vi.fn(),
 	audit: vi.fn(async (_ctx: unknown, _event: unknown) => undefined),
@@ -33,6 +36,7 @@ vi.mock("@dokploy/server", () => ({
 	recordDokployRollbackPoint: mocks.recordDokployRollbackPoint,
 	runBackgroundJob: mocks.runBackgroundJob,
 	spawnAsync: mocks.spawnAsync,
+	reloadDockerResource: mocks.reloadDockerResource,
 	claimDokployUpdateAttempt: mocks.claimDokployUpdateAttempt,
 	transitionDokployUpdateAttempt: mocks.transitionDokployUpdateAttempt,
 }));
@@ -47,6 +51,7 @@ vi.mock("@/server/api/utils/audit", () => ({
 
 vi.mock("@/server/queues/queueSetup", () => ({
 	cleanAllDeploymentQueue: vi.fn(),
+	myQueue: { closeIntake: mocks.closeIntake, busy: mocks.busy },
 }));
 
 vi.mock("@/server/utils/backup", () => ({
@@ -68,6 +73,7 @@ const REPO = "ghcr.io/devinosolutions/dokploy-community";
 const DIGEST = `sha256:${"ab12".repeat(16)}`;
 
 let jobs: Promise<unknown>[] = [];
+let hold = { release: vi.fn(), extend: vi.fn(() => true) };
 let failures: unknown[] = [];
 
 // The docker argv of every spawn, once the background jobs have settled.
@@ -84,6 +90,8 @@ const serviceUpdate = (image: string) => [
 	"service",
 	"update",
 	"--force",
+	"--update-order",
+	"stop-first",
 	"--image",
 	image,
 	"dokploy",
@@ -133,6 +141,10 @@ beforeEach(() => {
 	mocks.getLastUpdateAttempt.mockReset();
 	mocks.getLastUpdateAttempt.mockResolvedValue(null);
 	mocks.getDockerResourceType.mockResolvedValue("service");
+	hold = { release: vi.fn(), extend: vi.fn(() => true) };
+	mocks.closeIntake.mockReset().mockReturnValue(hold);
+	mocks.busy.mockReset().mockReturnValue({ active: [], heldGroups: [] });
+	mocks.reloadDockerResource.mockReset().mockResolvedValue(undefined);
 	mocks.getUpdateData.mockResolvedValue({
 		latestVersion: "v0.30.9-community.1",
 		updateAvailable: true,
@@ -1082,5 +1094,338 @@ describe("settings.updateServer when Dokploy is not a Docker service", () => {
 
 		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
 		expect(await spawned()).toEqual([]);
+	});
+});
+
+describe("the deploy intake around settings.updateServer", () => {
+	it("is closed before the update is claimed, and kept through a successful swap", async () => {
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(mocks.closeIntake).toHaveBeenCalledTimes(1);
+		expect(mocks.closeIntake.mock.invocationCallOrder[0]).toBeLessThan(
+			mocks.claimDokployUpdateAttempt.mock.invocationCallOrder[0]!,
+		);
+		// After the pull, before the swap: a fresh limit.
+		expect(hold.extend).toHaveBeenCalledTimes(1);
+		const [pull, update] = [
+			mocks.spawnAsync.mock.invocationCallOrder[1]!,
+			mocks.spawnAsync.mock.invocationCallOrder[2]!,
+		];
+		const [extend] = hold.extend.mock.invocationCallOrder;
+		expect(pull).toBeLessThan(extend!);
+		expect(extend).toBeLessThan(update);
+		// The process is about to be replaced: do not reopen for the gap.
+		expect(hold.release).not.toHaveBeenCalled();
+	});
+
+	it("refuses while a deploy runs, with service names only, and takes nothing else", async () => {
+		mocks.busy.mockReturnValue({
+			active: [
+				{
+					group: "application:app-1",
+					data: { env: "SECRET=hunter2", applicationId: "app-1" },
+				},
+			],
+			heldGroups: [],
+		});
+
+		const error = await caller.updateServer().catch((e) => e);
+
+		expect(error).toMatchObject({ code: "CONFLICT" });
+		expect(error.message).toContain("Not updating");
+		expect(error.message).toContain("would interrupt it");
+		expect(error.message).not.toContain("hunter2");
+		expect(hold.release).toHaveBeenCalledTimes(1);
+		expect(mocks.claimDokployUpdateAttempt).not.toHaveBeenCalled();
+		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("refuses while a compose Fetch holds a service lock", async () => {
+		mocks.busy.mockReturnValue({
+			active: [],
+			heldGroups: ["compose:c-1"],
+		});
+
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+		expect(hold.release).toHaveBeenCalledTimes(1);
+	});
+
+	it("reopens when the claim says another update is in progress", async () => {
+		mocks.claimDokployUpdateAttempt.mockResolvedValue({
+			claimed: false,
+			reason: "in_progress",
+		});
+
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+
+		expect(hold.release).toHaveBeenCalledTimes(1);
+		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
+	});
+
+	it("reopens when the claim itself throws", async () => {
+		mocks.claimDokployUpdateAttempt.mockRejectedValue(new Error("disk full"));
+
+		await expect(caller.updateServer()).rejects.toThrow("disk full");
+
+		expect(hold.release).toHaveBeenCalledTimes(1);
+	});
+
+	it("reopens when the pull fails, and does not extend or swap", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.spawnAsync.mockImplementation(async (_command, args: string[]) => {
+			if (args[0] === "pull") throw new Error("pull failed");
+			return Buffer.from("");
+		});
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(hold.release).toHaveBeenCalledTimes(1);
+		expect(hold.extend).not.toHaveBeenCalled();
+		expect(failures).toHaveLength(1);
+	});
+
+	it("reopens when the service update fails", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.spawnAsync.mockImplementation(async (_command, args: string[]) => {
+			if (args[0] === "service") throw new Error("swap failed");
+			return Buffer.from("");
+		});
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(hold.release).toHaveBeenCalledTimes(1);
+		expect(failures).toHaveLength(1);
+	});
+
+	it("reopens when the attempt was replaced before the swap", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.transitionDokployUpdateAttempt.mockResolvedValue(false);
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(hold.release).toHaveBeenCalledTimes(1);
+		expect((await spawned()).filter((argv) => argv[1] === "service")).toEqual(
+			[],
+		);
+	});
+
+	it("force overrides the in-progress guard only, not the refusal while a deploy runs", async () => {
+		mocks.busy.mockReturnValue({
+			active: [{ group: "application:app-1", data: {} }],
+			heldGroups: [],
+		});
+
+		await expect(caller.updateServer({ force: true })).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+	});
+});
+
+describe("the deploy intake around settings.reloadServer", () => {
+	it("closes the intake, restarts, and keeps it closed", async () => {
+		await expect(caller.reloadServer()).resolves.toBe(true);
+
+		expect(mocks.closeIntake).toHaveBeenCalledTimes(1);
+		expect(mocks.reloadDockerResource).toHaveBeenCalledWith(
+			"dokploy",
+			undefined,
+			packageInfo.version,
+		);
+		expect(hold.release).not.toHaveBeenCalled();
+	});
+
+	it("refuses while a deploy runs and does not restart", async () => {
+		mocks.busy.mockReturnValue({
+			active: [{ group: "compose:c-1", data: {} }],
+			heldGroups: [],
+		});
+
+		await expect(caller.reloadServer()).rejects.toMatchObject({
+			code: "CONFLICT",
+			message: expect.stringContaining("Not reloading"),
+		});
+
+		expect(mocks.reloadDockerResource).not.toHaveBeenCalled();
+		expect(hold.release).toHaveBeenCalledTimes(1);
+	});
+
+	it("reopens when the restart command fails", async () => {
+		mocks.reloadDockerResource.mockRejectedValue(new Error("docker down"));
+
+		await expect(caller.reloadServer()).rejects.toThrow("docker down");
+
+		expect(hold.release).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("review fixes: expired hold, pull timeout, swap bookkeeping", () => {
+	const lastFailure = () =>
+		mocks.transitionDokployUpdateAttempt.mock.calls
+			.map(([, patch]) => patch as { status?: string; errorCode?: string })
+			.find((patch) => patch.status === "failed");
+
+	it("pulls with a timeout shorter than the hold's time limit", async () => {
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		const pull = mocks.spawnAsync.mock.calls.find(
+			([, args]) => args[0] === "pull",
+		);
+		expect(pull?.[3]).toEqual({ timeout: 10 * 60_000 });
+		expect(10 * 60_000).toBeLessThan(15 * 60_000);
+	});
+
+	it("a pull that hit the timeout reopens the intake and records a timeout", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const dateNow = vi.spyOn(Date, "now");
+		let now = 1_000_000;
+		dateNow.mockImplementation(() => now);
+		mocks.spawnAsync.mockImplementation(async (_command, args: string[]) => {
+			if (args[0] === "pull") {
+				now += 10 * 60_000;
+				throw new Error("");
+			}
+			return Buffer.from("");
+		});
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		dateNow.mockRestore();
+		expect(hold.release).toHaveBeenCalledTimes(1);
+		expect(lastFailure()?.errorCode).toBe("timeout");
+	});
+
+	it("retakes the intake and re-checks what runs when the hold expired during the pull, then swaps if idle", async () => {
+		hold.extend.mockReturnValueOnce(false);
+		const retaken = { release: vi.fn(), extend: vi.fn(() => true) };
+		mocks.closeIntake.mockReturnValueOnce(hold).mockReturnValueOnce(retaken);
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(mocks.closeIntake).toHaveBeenCalledTimes(2);
+		expect(retaken.extend).toHaveBeenCalledTimes(1);
+		expect(
+			(await spawned()).filter((argv) => argv[1] === "service"),
+		).toHaveLength(1);
+		expect(retaken.release).not.toHaveBeenCalled();
+		expect(failures).toEqual([]);
+	});
+
+	it("aborts before the swap, with a recorded reason, when a deploy started while the hold was gone", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		hold.extend.mockReturnValueOnce(false);
+		const second = { release: vi.fn(), extend: vi.fn(() => true) };
+		mocks.closeIntake.mockReturnValueOnce(hold).mockReturnValueOnce(second);
+		mocks.busy
+			.mockReturnValueOnce({ active: [], heldGroups: [] })
+			.mockReturnValueOnce({
+				active: [{ group: "application:app-1", data: {} }],
+				heldGroups: [],
+			});
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect((await spawned()).filter((argv) => argv[1] === "service")).toEqual(
+			[],
+		);
+		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+		expect(second.release).toHaveBeenCalledTimes(1);
+		expect(lastFailure()?.errorCode).toBe("deploys_running");
+		expect(failures).toHaveLength(1);
+	});
+
+	it("keeps the intake closed when recording the submitted attempt fails after a successful swap", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.transitionDokployUpdateAttempt.mockImplementation(
+			async (_id: string, patch: { status?: string }) => {
+				if (patch.status === "submitted") throw new Error("disk full");
+				return true;
+			},
+		);
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(
+			(await spawned()).filter((argv) => argv[1] === "service"),
+		).toHaveLength(1);
+		expect(hold.release).not.toHaveBeenCalled();
+	});
+
+	it("the refusal says how to proceed", async () => {
+		mocks.busy.mockReturnValue({
+			active: [{ group: "application:app-1", data: {} }],
+			heldGroups: [],
+		});
+
+		const error = await caller.updateServer().catch((e) => e);
+
+		expect(error.message).toContain("Wait for it to finish, or cancel");
+		expect(error.message).toContain("then try again");
+	});
+});
+
+describe("the image pull is killed outright when it ignores the timeout", () => {
+	it("sends SIGKILL a few seconds after the timeout SIGTERM", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			let rejectPull!: (error: Error) => void;
+			const kill = vi.fn(() => rejectPull(new Error("killed")));
+			mocks.spawnAsync.mockImplementation((_command, args: string[]) => {
+				if (args[0] !== "pull") return Promise.resolve(Buffer.from(""));
+				return Object.assign(
+					new Promise((_, reject) => {
+						rejectPull = reject;
+					}),
+					{ child: { exitCode: null, signalCode: null, kill } },
+				);
+			});
+
+			await caller.updateServer();
+			await vi.advanceTimersByTimeAsync(10 * 60_000 + 4_000);
+			expect(kill).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(2_000);
+
+			expect(kill).toHaveBeenCalledWith("SIGKILL");
+			await Promise.all(jobs);
+			expect(hold.release).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("leaves no kill timer behind after a pull that finished", async () => {
+		vi.useFakeTimers();
+		try {
+			const kill = vi.fn();
+			mocks.spawnAsync.mockImplementation((_command, args: string[]) =>
+				args[0] === "pull"
+					? Object.assign(Promise.resolve(Buffer.from("")), {
+							child: { exitCode: 0, signalCode: null, kill },
+						})
+					: Promise.resolve(Buffer.from("")),
+			);
+
+			await caller.updateServer();
+			await Promise.all(jobs);
+			await vi.advanceTimersByTimeAsync(11 * 60_000);
+
+			expect(kill).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

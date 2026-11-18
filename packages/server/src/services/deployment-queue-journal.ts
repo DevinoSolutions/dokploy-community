@@ -12,6 +12,7 @@ import { updateApplicationStatus } from "./application";
 import { updateCompose } from "./compose";
 import { resolveDeploymentLogHost } from "./deployment-log-host";
 import { notWaitingForGithubRun } from "./live-build-claim";
+import { killOrphanedBuilds, type OrphanedBuild } from "./orphan-build-kill";
 import { updatePreviewDeployment } from "./preview-deployment";
 
 /**
@@ -213,6 +214,8 @@ export const markInterruptedQueueDeployments = async (
 ): Promise<number> => {
 	let closed = 0;
 	const notes: Array<Promise<unknown>> = [];
+	// Builds still running on a build server for deployments closed here (T-12684).
+	const orphans: OrphanedBuild[] = [];
 	for (const job of activeJobs) {
 		await resetServiceStatus(job.payload);
 		try {
@@ -227,12 +230,14 @@ export const markInterruptedQueueDeployments = async (
 				})
 				.where(where)
 				.returning({
+					deploymentId: deployments.deploymentId,
 					logPath: deployments.logPath,
 					serverId: deployments.serverId,
 					buildServerId: deployments.buildServerId,
 					previewDeploymentId: deployments.previewDeploymentId,
 				});
 			closed += rows.length;
+			orphans.push(...rows);
 			for (const row of rows) {
 				notes.push(
 					withDeadline(
@@ -258,6 +263,11 @@ export const markInterruptedQueueDeployments = async (
 			console.error("Could not mark an interrupted deployment", error);
 		}
 	}
+	// Not awaited: the boot and the restore go on while the build servers are
+	// reached. The queue holds its worker until these kills have finished or run
+	// out of their shared boot budget (whenOrphanKillsSettled), so the replay
+	// cannot start a second build next to an orphan. Never throws.
+	void killOrphanedBuilds(orphans);
 	await Promise.all(notes);
 	return closed;
 };

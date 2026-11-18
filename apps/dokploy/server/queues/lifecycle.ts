@@ -29,6 +29,11 @@ interface Pausable {
 export const gateWorkerUntilRestored = (
 	queue: Pausable,
 	timeoutMs = RESTORE_GATE_TIMEOUT_MS,
+	/**
+	 * Resolves when work the worker must not start before is over (the stop of
+	 * the builds a restart orphaned). Checked when the gate opens, by either path.
+	 */
+	barrier?: () => Promise<unknown>,
 ) => {
 	let opened = false;
 	queue.pause();
@@ -45,7 +50,14 @@ export const gateWorkerUntilRestored = (
 		if (opened) return;
 		opened = true;
 		clearTimeout(timer);
-		queue.resume();
+		if (!barrier) {
+			queue.resume();
+			return;
+		}
+		// The barrier never rejects in practice; if it did, start anyway.
+		void barrier()
+			.catch(() => undefined)
+			.then(() => queue.resume());
 	}
 
 	return { open };

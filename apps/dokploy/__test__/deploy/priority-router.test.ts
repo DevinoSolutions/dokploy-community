@@ -47,6 +47,7 @@ vi.mock("@/server/queues/queueSetup", () => ({
 	myQueue: {
 		add: mocks.add,
 		getJobs: mocks.getJobs,
+		intakeClosed: () => false,
 		prioritize: mocks.prioritize,
 	},
 }));

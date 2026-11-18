@@ -8,6 +8,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../../db/index";
 import { markInterruptedFromJournal } from "../../services/deployment-queue-journal";
 import { notWaitingForGithubRun } from "../../services/live-build-claim";
+import { killOrphanedBuilds } from "../../services/orphan-build-kill";
 
 export const initCancelDeployments = async () => {
 	try {
@@ -50,6 +51,11 @@ export const initCancelDeployments = async () => {
 			})
 			.where(inArray(deployments.deploymentId, deploymentIdsToCancel))
 			.returning();
+
+		// A running row nothing replays is cancelled here; a build it started on a
+		// build server is still running there and has to be stopped too (T-12684).
+		// Not awaited, like the journal path: the queue worker waits for it.
+		void killOrphanedBuilds(result);
 
 		const applicationIds = [
 			...new Set(
