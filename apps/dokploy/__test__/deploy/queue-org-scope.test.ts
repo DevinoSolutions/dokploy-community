@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
 	servers: [{ serverId: "srv-1" }, { serverId: "srv-2" }],
 	fetchDeployApiJobs: vi.fn(),
 	getJobs: vi.fn(),
+	intakeClosed: vi.fn(() => false),
 	prioritize: vi.fn(),
 	audit: vi.fn(),
 }));
@@ -127,6 +128,7 @@ vi.mock("@/server/queues/queueSetup", () => ({
 	killDockerBuild: vi.fn(),
 	myQueue: {
 		getJobs: mocks.getJobs,
+		intakeClosed: mocks.intakeClosed,
 		prioritize: mocks.prioritize,
 	},
 }));
@@ -241,6 +243,31 @@ describe("deployment.queueList", () => {
 		await caller.queueList();
 
 		expect(mocks.executeCalls).toHaveLength(1);
+	});
+
+	it("says why waiting jobs do not start while the intake is closed for an update", async () => {
+		mocks.intakeClosed.mockReturnValue(true);
+		mocks.jobs = mocks.jobs.map((j) =>
+			j.id === "j-app1" ? { ...j, state: "active" } : j,
+		);
+
+		const rows = await caller.queueList();
+		const held = Object.fromEntries(
+			rows.map((row) => [row.id, (row as { heldReason?: string }).heldReason]),
+		);
+
+		expect(held["j-comp1"]).toBe("intake-closed-for-update");
+		expect(held["j-prev1"]).toBe("intake-closed-for-update");
+		expect(held["j-app1"]).toBeUndefined();
+		mocks.intakeClosed.mockReturnValue(false);
+	});
+
+	it("adds no reason while the intake is open", async () => {
+		const rows = await caller.queueList();
+
+		expect(
+			rows.some((row) => (row as { heldReason?: string }).heldReason),
+		).toBe(false);
 	});
 
 	it("returns an empty list when the caller's organization has no jobs", async () => {

@@ -67,8 +67,8 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 
 import {
 	deleteQueueJobs,
-	insertQueueJob,
 	INTERRUPTED_DEPLOYMENT_MESSAGE,
+	insertQueueJob,
 	LOG_NOTE_TIMEOUT_MS,
 	listQueueJobs,
 	markInterruptedFromJournal,
@@ -76,9 +76,14 @@ import {
 	markQueueJobActive,
 	requeueInterruptedQueueJobs,
 } from "@dokploy/server/services/deployment-queue-journal";
+import {
+	resetOrphanKillBoot,
+	whenOrphanKillsSettled,
+} from "@dokploy/server/services/orphan-build-kill";
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	resetOrphanKillBoot();
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	mocks.updateApplicationStatus.mockReset().mockResolvedValue(undefined);
@@ -322,6 +327,113 @@ describe("markInterruptedQueueDeployments", () => {
 				active({ applicationType: "application", applicationId: "a" }),
 			]),
 		).resolves.toBe(1);
+	});
+});
+
+describe("markInterruptedQueueDeployments stops the orphaned remote build (T-12684)", () => {
+	const active = (payload: Record<string, unknown>) => ({ payload });
+	const killCalls = () =>
+		mocks.execAsyncRemote.mock.calls.filter(([, command]) =>
+			String(command).includes(".build-pids/"),
+		);
+
+	it("runs the build-server kill for the closed deployment, keyed by its id, without holding the marking up", async () => {
+		mocks.updateReturning.mockResolvedValue([
+			{
+				deploymentId: "dep-1",
+				logPath: "/logs/a.log",
+				serverId: null,
+				buildServerId: "build-1",
+			},
+		]);
+		mocks.execAsyncRemote.mockImplementation(
+			async (_server: string, command: string) => ({
+				stdout: command.includes(".build-pids/") ? "KILLED\n" : "",
+				stderr: "",
+			}),
+		);
+
+		await expect(
+			markInterruptedQueueDeployments([
+				active({ applicationType: "application", applicationId: "a" }),
+			]),
+		).resolves.toBe(1);
+		await whenOrphanKillsSettled();
+
+		const calls = killCalls();
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.[0]).toBe("build-1");
+		expect(String(calls[0]?.[1])).toContain("dep-1.pid");
+		expect(String(calls[0]?.[1])).toContain("kill -s TERM");
+	});
+
+	it("does nothing remote for a deployment that did not build on a build server", async () => {
+		mocks.updateReturning.mockResolvedValue([
+			{
+				deploymentId: "dep-2",
+				logPath: "/logs/a.log",
+				serverId: null,
+				buildServerId: null,
+			},
+		]);
+
+		await markInterruptedQueueDeployments([
+			active({ applicationType: "application", applicationId: "a" }),
+		]);
+
+		expect(killCalls()).toHaveLength(0);
+	});
+
+	it("an unreachable build server neither delays the marking nor outlasts the budget for the queue worker", async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.updateReturning.mockResolvedValue([
+				{
+					deploymentId: "dep-3",
+					logPath: "/logs/a.log",
+					serverId: null,
+					buildServerId: "build-down",
+				},
+			]);
+			mocks.execAsyncRemote.mockReturnValue(new Promise(() => {}));
+
+			const done = markInterruptedQueueDeployments([
+				active({ applicationType: "application", applicationId: "a" }),
+			]);
+			// The marking only waits for its own bounded log note (4 s), not the kill.
+			await vi.advanceTimersByTimeAsync(LOG_NOTE_TIMEOUT_MS + 100);
+			await expect(done).resolves.toBe(1);
+			let settled = false;
+			void whenOrphanKillsSettled().then(() => {
+				settled = true;
+			});
+			await vi.advanceTimersByTimeAsync(5_000);
+			expect(settled).toBe(false);
+
+			// The queue worker is released when the budget ends.
+			await vi.advanceTimersByTimeAsync(20_000);
+			expect(settled).toBe(true);
+			expect(killCalls().length).toBeGreaterThan(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("a waiting journal row (a job parked while the intake was closed) closes and kills nothing", async () => {
+		mocks.selectRows.mockResolvedValue([
+			{
+				jobId: "j9",
+				state: "waiting",
+				attempts: 0,
+				payload: { applicationType: "application", applicationId: "parked" },
+			},
+		]);
+
+		await expect(markInterruptedFromJournal()).resolves.toBe(0);
+
+		expect(mocks.updateSet).not.toHaveBeenCalled();
+		expect(mocks.updateApplicationStatus).not.toHaveBeenCalled();
+		expect(killCalls()).toHaveLength(0);
 	});
 });
 

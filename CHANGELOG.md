@@ -4,10 +4,19 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.7 keeps working.
+
 **Security.**
 
 - The passwords of an application's HTTP basic-auth users (the Security tab) are no longer returned to everyone who can read the application. Before, `application.one` and `security.one` handed the plain-text password of every basic-auth user to any member with read access to the service. Now the user names still show, and the passwords go only to users who may edit the service, because the edit form reads the stored password back. A blanked password cannot be saved back by mistake: the form refuses an empty password.
 - Moving a service to another environment (application, compose stack, Postgres, MySQL, MariaDB, MongoDB, Redis, libSQL) now answers with the service id and its new environment id instead of the whole row. The row held environment variables, build arguments and secrets, the deploy webhook token, the registry password and database passwords, and the permission a move needs (creating services) does not include reading them. The dashboard does not read the result.
+- Exporting a project with "Include secrets" is now limited to users who may edit services. Before, any user who could read the project got every environment variable, registry and database password, deploy token and basic-auth password of all its services in the file. A reader who asks for secrets is refused; the export without secrets still works for readers, and the dashboard greys the checkbox out for them.
+
+**Fixed.**
+
+- Update Server and Reload Server no longer interrupt a deploy that starts between the operator checking the queue and the restart, or during the image pull (T-14624). From the moment an update is accepted until Dokploy is replaced, no deploy starts: a deploy that arrives meanwhile (UI, API, webhooks, GitHub Actions) is accepted as before, kept in the journal, and runs after the restart as an ordinary first run, not as an "Interrupted by a Dokploy restart; re-queued" replay that reports a failure to its caller. If a deploy cannot be recorded while the intake is closed, the request fails with a message to retry. The intake reopens on its own if the update or the restart fails, and after 15 minutes if the process is never replaced; the image pull now has a 10 minute limit, and if the intake had expired before the swap it is closed again and the update is abandoned (with a recorded reason) when a deploy is running by then.
+- Update Server and Reload Server now refuse while a deployment is running (or a compose Fetch holds a service) and name the services, with what to do next: wait, or cancel them, then try again. Waiting deploys do not block an update: they run after the restart. The queue list says "Intake closed for an update" on a waiting deploy while the intake is closed. `--update-order stop-first` is now passed when Dokploy restarts its own service from the panel, so the old process is gone before the new one restores the parked deploys.
+- When Dokploy restarts while a build runs on a build server, that build is now stopped at boot, before the replayed job starts a second one (T-12684). It uses the same stop as Kill Build (the per-deployment pid file, checked against the recorded start time and boot id). A build server that cannot be reached is logged and costs at most 25 seconds in total; the rest of the boot and the restore do not wait for it, only the start of the queue worker does.
 
 ### New in v0.31.0-community.7
 

@@ -50,6 +50,7 @@ import {
 	checkProjectAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
+	hasPermission,
 } from "@dokploy/server/services/permission";
 import {
 	findProjectWildcardConfig,
@@ -277,6 +278,21 @@ export const projectRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
+			// `includeSecrets` puts every environment variable, registry and
+			// database password, deploy token and basic-auth password of the project
+			// into the file. Reading a project does not include that: only a caller
+			// who may edit services gets it, the same rule as `application.one`
+			// uses for the registry password (T-19588). Refused, not stripped, so
+			// nobody downloads a file they think is complete.
+			if (
+				input.includeSecrets &&
+				!(await hasPermission(ctx, { service: ["create"] }))
+			) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "You are not allowed to export secrets",
+				});
+			}
 			// Mirror the read-access semantics of `project.one`.
 			if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
 				const { accessedProjects } = await findMemberByUserId(

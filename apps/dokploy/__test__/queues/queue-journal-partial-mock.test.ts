@@ -30,6 +30,7 @@ describe("queue journal under a partial @dokploy/server mock", () => {
 					applicationType: "application",
 				},
 			} as Parameters<typeof journal.enqueued>[0]),
-		).resolves.toBeUndefined();
+		// Does not throw; false says the row was not written.
+		).resolves.toBe(false);
 	});
 });

@@ -75,3 +75,15 @@ describe("security.one", () => {
 		await expect(caller.one({ securityId: "sec-1" })).rejects.toThrow();
 	});
 });
+
+// A blanked password (what a reader gets back) must never be saved over the
+// stored one: the update input refuses an empty password before anything runs.
+describe("security.update", () => {
+	it("refuses an empty password", async () => {
+		state.checkServicePermissionAndAccess.mockClear();
+		await expect(
+			caller.update({ securityId: "sec-1", username: "admin", password: "" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(state.checkServicePermissionAndAccess).not.toHaveBeenCalled();
+	});
+});
