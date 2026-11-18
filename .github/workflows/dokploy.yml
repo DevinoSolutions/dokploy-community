@@ -152,15 +152,37 @@ jobs:
           # land after it keep the same package.json version, and retagging the
           # version on each of them would put unreleased code under a released
           # version. So the tag is published only by the push that changes the
-          # version. A manual run republishes it: run one only while the release
-          # commit is still canary's tip.
-          PREVIOUS=""
-          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+          # version, and only when the registry does not have that tag yet. When
+          # the previous version cannot be read (failed fetch, force-pushed
+          # branch, first push of a branch) nothing is published: guessing
+          # "changed" would move an already released tag onto this build. A
+          # manual run (no BEFORE) publishes the tag only if it is missing.
+          ZERO=0000000000000000000000000000000000000000
+          PUBLISH=0
+          if [ -z "$BEFORE" ]; then
+            PUBLISH=1
+          elif [ "$BEFORE" = "$ZERO" ]; then
+            echo "::warning::No previous commit (first push of a branch); not publishing the ${VERSION} tag."
+          else
+            PREVIOUS=""
             git fetch --no-tags --depth=1 origin "$BEFORE" 2>/dev/null || true
             PREVIOUS=$(git show "$BEFORE:apps/dokploy/package.json" 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || true)
+            if [ -z "$PREVIOUS" ]; then
+              echo "::warning::Could not read the previous version from ${BEFORE}; not publishing the ${VERSION} tag."
+            elif [ "$VERSION" = "$PREVIOUS" ]; then
+              echo "This push does not change the version; keeping the ${VERSION} tag."
+            else
+              PUBLISH=1
+            fi
           fi
-          if [ "$VERSION" != "$PREVIOUS" ]; then
-            docker buildx imagetools create -t ${IMAGE_NAME}:${VERSION} "$AMD64" "$ARM64"
-          else
-            echo "This push does not change the version; keeping the ${VERSION} tag."
+
+          if [ "$PUBLISH" = "1" ]; then
+            if INSPECT=$(docker buildx imagetools inspect "${IMAGE_NAME}:${VERSION}" 2>&1); then
+              echo "::warning::${IMAGE_NAME}:${VERSION} already exists in the registry; not overwriting it."
+            elif echo "$INSPECT" | grep -qiE 'not found|manifest unknown|no such manifest'; then
+              docker buildx imagetools create -t ${IMAGE_NAME}:${VERSION} "$AMD64" "$ARM64"
+            else
+              echo "::warning::Could not check whether ${IMAGE_NAME}:${VERSION} exists; not publishing it."
+              echo "$INSPECT" | tail -3
+            fi
           fi
