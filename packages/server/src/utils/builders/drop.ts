@@ -12,6 +12,7 @@ import {
 } from "../filesystem/directory";
 import { execAsyncRemote } from "../process/execAsync";
 import { assertServerHasSshKey } from "../process/MissingSshKeyError";
+import { SSH_KEEPALIVE } from "../process/ssh-keepalive";
 
 export const unzipDrop = async (zipFile: File, application: Application) => {
 	let sftp: SFTPWrapper | null = null;
@@ -129,6 +130,7 @@ const getSFTPConnection = async (serverId: string): Promise<SFTPWrapper> => {
 				port: server.port,
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
+				...SSH_KEEPALIVE,
 			});
 	});
 };

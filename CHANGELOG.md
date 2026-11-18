@@ -8,6 +8,10 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 - Taking back the share of a GitHub connection now stops the watches other members bound to it. Before, those services kept polling GitHub and deploying with the owner's token (which can carry `repo` access to their private repositories) until someone removed the watches by hand. The check now runs on every poll and every private GHCR pull, so it holds however the share was changed. A stopped watch shows "Paused: ..." as its last error and resumes by itself when the connection is shared again or its owner saves the watch; nothing is deleted. The watch now records who saved it (migration 0236, additive): watches on a connection that was never shared are attributed to its owner, and watches on a shared connection have no recorded saver and need their owner to save them again, or to connect them again for a GitHub Actions connection, if the connection is later unshared.
 
+**Fixed.**
+
+- A heavily loaded build server no longer fails a deploy with "SSH connection error: Keepalive timeout". The remote command, file write and Docker API connections gave up after 30 seconds of silence (a ping every 10 s, 3 misses), which a busy server can exceed while the build is fine. Every SSH connection now uses one setting, a ping every 15 s and a drop after 8 misses (about two minutes). The setup, validation and audit checks, the terminals, the log viewers and the SFTP upload had no keepalive and now have it too.
+
 ### New in v0.31.0-community.6
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.5 keeps working. This release includes everything in v0.31.0-community.5.

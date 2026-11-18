@@ -418,7 +418,7 @@ export const patchGithubWatch = async (
 export const checkGithubWatchAccess = async (watch: {
 	organizationId: string;
 	connectionId: string;
-	createdByUserId: string | null;
+	createdByUserId?: string | null;
 }): Promise<WatchAccess> => {
 	const [connection] = await db
 		.select({
@@ -428,19 +428,25 @@ export const checkGithubWatchAccess = async (watch: {
 		.from(githubDeploymentConnection)
 		.where(eq(githubDeploymentConnection.connectionId, watch.connectionId));
 	if (!connection) return { allowed: true };
-	return evaluateWatchAccess(connection, watch, async () => {
-		if (watch.createdByUserId === null) return false;
-		const [row] = await db
-			.select({ role: member.role })
-			.from(member)
-			.where(
-				and(
-					eq(member.userId, watch.createdByUserId),
-					eq(member.organizationId, watch.organizationId),
-				),
-			);
-		return row?.role === "owner" || row?.role === "admin";
-	});
+	const creator = watch.createdByUserId ?? null;
+	return evaluateWatchAccess(
+		connection,
+		{ createdByUserId: creator },
+		async () => {
+			if (creator === null) return false;
+			// The saver's role as it is NOW: a demoted admin stops being served.
+			const [row] = await db
+				.select({ role: member.role })
+				.from(member)
+				.where(
+					and(
+						eq(member.userId, creator),
+						eq(member.organizationId, watch.organizationId),
+					),
+				);
+			return row?.role === "owner" || row?.role === "admin";
+		},
+	);
 };
 
 const warnedNoPackagesScope = new Set<string>();

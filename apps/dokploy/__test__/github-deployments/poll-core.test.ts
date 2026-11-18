@@ -694,7 +694,7 @@ describe("a watch whose connection stopped serving it (T-13796)", () => {
 
 	it("does not touch GitHub or the token, says why in lastError, and backs off", async () => {
 		const loadToken = vi.fn(async () => "gho_secret");
-		const h = harness([{ status: 200, body: [] }], { access: blocked });
+		const h = harness([{ status: 200, json: [] }], { access: blocked });
 		h.deps.loadToken = loadToken;
 		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
 		expect(loadToken).not.toHaveBeenCalled();
@@ -708,7 +708,7 @@ describe("a watch whose connection stopped serving it (T-13796)", () => {
 	});
 
 	it("does not report an in-flight deployment to GitHub with the owner's token", async () => {
-		const h = harness([{ status: 201, body: {} }], {
+		const h = harness([{ status: 201, json: {} }], {
 			access: blocked,
 			inflight: { state: "done" },
 		});
@@ -746,7 +746,7 @@ describe("a watch whose connection stopped serving it (T-13796)", () => {
 	});
 
 	it("does not tell GitHub the service is gone with a token the watch may not use", async () => {
-		const h = harness([{ status: 201, body: {} }], { access: blocked });
+		const h = harness([{ status: 201, json: {} }], { access: blocked });
 		await reportServiceGone(
 			baseWatch({ createdByUserId: "u2", inflightDeploymentId: 12 }),
 			h.deps,

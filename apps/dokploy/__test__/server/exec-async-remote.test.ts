@@ -314,8 +314,8 @@ describe("execAsyncRemote when the connection dies", () => {
 
 		await execAsyncRemote("server-1", "cmd");
 
-		expect(ssh.clients[0].config.keepaliveInterval).toBe(10_000);
-		expect(ssh.clients[0].config.keepaliveCountMax).toBe(3);
+		expect(ssh.clients[0].config.keepaliveInterval).toBe(15_000);
+		expect(ssh.clients[0].config.keepaliveCountMax).toBe(8);
 	});
 
 	it("rejects once, and releases the build registration, when the connection closes under a running command", async () => {

@@ -338,6 +338,25 @@ describe.skipIf(!ready)("who a connection's token may serve", () => {
 		expect(await allowed("w-otherorg")).toBe(false);
 	});
 
+	it("stops serving a watch whose admin saver is later demoted, and serves it again if promoted back", async () => {
+		await insertConnection("c1", "owner-1");
+		await client?.exec(
+			`INSERT INTO "member" ("id","organization_id","user_id","role") VALUES ('m1','org-a','admin-1','admin')`,
+		);
+		await insertWatch("w-admin", "c1", "admin-1");
+		const allowed = async () =>
+			(await store.checkGithubWatchAccess(await watchOf("w-admin"))).allowed;
+		expect(await allowed()).toBe(true);
+		await client?.exec(
+			`UPDATE "member" SET "role" = 'member' WHERE "id" = 'm1'`,
+		);
+		expect(await allowed()).toBe(false);
+		await client?.exec(
+			`UPDATE "member" SET "role" = 'owner' WHERE "id" = 'm1'`,
+		);
+		expect(await allowed()).toBe(true);
+	});
+
 	it("fails closed for a watch with no known saver on an unshared connection, with a message that names the fix", async () => {
 		await insertConnection("c1", "owner-1");
 		await insertWatch("w-null", "c1", null);
