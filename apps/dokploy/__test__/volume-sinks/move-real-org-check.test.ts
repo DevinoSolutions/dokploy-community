@@ -9,21 +9,11 @@ const mocks = vi.hoisted(() => ({
 	returning: vi.fn(),
 }));
 
-vi.mock("@dokploy/server", () => {
-	const stubs: Record<string | symbol, unknown> = {};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (key === "IS_CLOUD") {
-				return false;
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
-	});
+vi.mock("@dokploy/server", async () => {
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock();
 });
 
 vi.mock("@dokploy/server/services/permission", async (importOriginal) => ({

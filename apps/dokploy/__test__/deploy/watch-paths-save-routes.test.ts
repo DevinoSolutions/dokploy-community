@@ -15,10 +15,11 @@ const mocks = vi.hoisted(() => ({
 
 const STORED = ["src/**/*.{ts,tsx}", "!docs/**"];
 
-vi.mock("@dokploy/server", () => {
-	const stubs: Record<string | symbol, unknown> = {};
-	const named: Record<string, unknown> = {
-		IS_CLOUD: false,
+vi.mock("@dokploy/server", async () => {
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock({
 		findApplicationById: mocks.findApplicationById,
 		findComposeById: mocks.findComposeById,
 		updateApplication: mocks.updateApplication,
@@ -27,19 +28,6 @@ vi.mock("@dokploy/server", () => {
 		assertCanUseServiceGitProviders: vi.fn(),
 		assertComposeBuildSettings: vi.fn(),
 		assertComposeRollingSettings: vi.fn(),
-	};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (typeof key === "string" && key in named) {
-				return named[key];
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
 	});
 });
 

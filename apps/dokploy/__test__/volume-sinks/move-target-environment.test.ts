@@ -15,20 +15,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@dokploy/server", async () => {
 	// the routers pull dozens of services from the barrel; none of them is
 	// reached by `move`, so any name resolves to a stub
-	const stubs: Record<string | symbol, unknown> = {};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (key === "IS_CLOUD") {
-				return false;
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
-	});
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock();
 });
 
 vi.mock("@dokploy/server/services/permission", () => ({

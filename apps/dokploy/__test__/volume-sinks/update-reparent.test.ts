@@ -34,9 +34,10 @@ vi.mock("@dokploy/server", async () => {
 	const { parseGithubAppUrl } = await vi.importActual<
 		typeof import("@dokploy/server/utils/providers/github")
 	>("@dokploy/server/utils/providers/github");
-	const stubs: Record<string | symbol, unknown> = {};
-	const named: Record<string, unknown> = {
-		IS_CLOUD: false,
+	const { createDokployServerMock } = await import(
+		"../helpers/mock-dokploy-server"
+	);
+	return createDokployServerMock({
 		updateRegistry: mocks.updateRegistry,
 		findRegistryById: mocks.findRegistryById,
 		updateProjectById: mocks.updateProjectById,
@@ -67,19 +68,6 @@ vi.mock("@dokploy/server", async () => {
 				throw new TRPCError({ code: "UNAUTHORIZED" });
 			}
 		},
-	};
-	return new Proxy(stubs, {
-		get: (target, key) => {
-			if (key === "then") {
-				return undefined;
-			}
-			if (typeof key === "string" && key in named) {
-				return named[key];
-			}
-			target[key] ??= vi.fn();
-			return target[key];
-		},
-		has: () => true,
 	});
 });
 
