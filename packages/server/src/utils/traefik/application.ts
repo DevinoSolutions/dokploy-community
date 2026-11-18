@@ -1,4 +1,4 @@
-import fs, { writeFileSync } from "node:fs";
+import fs from "node:fs";
 import path from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { Domain } from "@dokploy/server/services/domain";
@@ -17,6 +17,15 @@ import {
 	execAsyncRemote,
 	writeFileRemote,
 } from "../process/execAsync";
+import {
+	asRemoteRefusal,
+	isTraefikPathError,
+	REMOTE_ABSENT,
+	readConfinedFile,
+	remoteConfinedReadCommand,
+	remoteConfinedWriteCommand,
+	writeConfinedFile,
+} from "./confine";
 import type { FileConfig, HttpLoadBalancerService } from "./file-types";
 
 export const createTraefikConfig = (appName: string) => {
@@ -54,11 +63,7 @@ export const createTraefikConfig = (appName: string) => {
 	const yamlStr = stringify(config);
 	const { DYNAMIC_TRAEFIK_PATH } = paths();
 	fs.mkdirSync(DYNAMIC_TRAEFIK_PATH, { recursive: true });
-	writeFileSync(
-		path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`),
-		yamlStr,
-		"utf8",
-	);
+	writeConfinedFile(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`, yamlStr);
 };
 
 export const removeTraefikConfig = async (
@@ -96,6 +101,56 @@ export const removeTraefikConfigRemote = async (
 	}
 };
 
+/**
+ * Reads `<dir>/<name>` on a remote server, confined to `dir` (symlinks
+ * resolved and refused, see `confine.ts`). Null when the file does not exist;
+ * a refusal throws.
+ */
+export const readConfinedRemote = async (
+	serverId: string,
+	dir: string,
+	name: string,
+): Promise<string | null> => {
+	try {
+		const { stdout } = await execAsyncRemote(
+			serverId,
+			remoteConfinedReadCommand(dir, name),
+		);
+		return stdout || null;
+	} catch (error) {
+		const refusal = asRemoteRefusal(error);
+		if (refusal) throw refusal;
+		if ((error as { exitCode?: unknown })?.exitCode === REMOTE_ABSENT) {
+			return null;
+		}
+		throw error;
+	}
+};
+
+/**
+ * Writes `<dir>/<name>` on a remote server, confined to `dir`; the text goes
+ * over stdin. A refusal throws a TRPCError (BAD_REQUEST).
+ */
+export const writeConfinedRemote = async (
+	serverId: string,
+	dir: string,
+	name: string,
+	content: string,
+): Promise<void> => {
+	try {
+		await execAsyncRemote(
+			serverId,
+			remoteConfinedWriteCommand(dir, name),
+			undefined,
+			{ stdin: content },
+		);
+	} catch (error) {
+		const refusal = asRemoteRefusal(error);
+		if (refusal) throw refusal;
+		throw error;
+	}
+};
+
 const configLocks = new Map<string, Promise<unknown>>();
 
 export const withTraefikConfigLock = async <T>(
@@ -118,9 +173,8 @@ export const withTraefikConfigLock = async <T>(
 
 export const loadOrCreateConfig = (appName: string): FileConfig => {
 	const { DYNAMIC_TRAEFIK_PATH } = paths();
-	const configPath = path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
-	if (fs.existsSync(configPath)) {
-		const yamlStr = fs.readFileSync(configPath, "utf8");
+	const yamlStr = readConfinedFile(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
+	if (yamlStr !== null) {
 		const parsedConfig = (parse(yamlStr) as FileConfig) || {
 			http: { routers: {}, services: {} },
 		};
@@ -135,11 +189,11 @@ export const loadOrCreateConfigRemote = async (
 ) => {
 	const { DYNAMIC_TRAEFIK_PATH } = paths(true);
 	const fileConfig: FileConfig = { http: { routers: {}, services: {} } };
-	const configPath = path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
 	try {
-		const { stdout } = await execAsyncRemote(
+		const stdout = await readConfinedRemote(
 			serverId,
-			`cat ${quote([configPath])}`,
+			DYNAMIC_TRAEFIK_PATH,
+			`${appName}.yml`,
 		);
 
 		if (!stdout) return fileConfig;
@@ -148,32 +202,27 @@ export const loadOrCreateConfigRemote = async (
 			http: { routers: {}, services: {} },
 		};
 		return parsedConfig;
-	} catch {
+	} catch (error) {
+		if (isTraefikPathError(error)) throw error;
 		return fileConfig;
 	}
 };
 
 export const readConfig = (appName: string) => {
 	const { DYNAMIC_TRAEFIK_PATH } = paths();
-	const configPath = path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
-	if (fs.existsSync(configPath)) {
-		const yamlStr = fs.readFileSync(configPath, "utf8");
-		return yamlStr;
-	}
-	return null;
+	return readConfinedFile(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
 };
 
 export const readRemoteConfig = async (serverId: string, appName: string) => {
 	const { DYNAMIC_TRAEFIK_PATH } = paths(true);
-	const configPath = path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
 	try {
-		const { stdout } = await execAsyncRemote(
+		return await readConfinedRemote(
 			serverId,
-			`cat ${quote([configPath])}`,
+			DYNAMIC_TRAEFIK_PATH,
+			`${appName}.yml`,
 		);
-		if (!stdout) return null;
-		return stdout;
-	} catch {
+	} catch (error) {
+		if (isTraefikPathError(error)) throw error;
 		return null;
 	}
 };
@@ -245,9 +294,9 @@ export const readConfigInPath = async (pathFile: string, serverId?: string) => {
 export const writeConfig = (appName: string, traefikConfig: string) => {
 	try {
 		const { DYNAMIC_TRAEFIK_PATH } = paths();
-		const configPath = path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
-		fs.writeFileSync(configPath, traefikConfig, "utf8");
+		writeConfinedFile(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`, traefikConfig);
 	} catch (e) {
+		if (isTraefikPathError(e)) throw e;
 		console.error("Error saving the YAML config file:", e);
 	}
 };
@@ -259,9 +308,14 @@ export const writeConfigRemote = async (
 ) => {
 	try {
 		const { DYNAMIC_TRAEFIK_PATH } = paths(true);
-		const configPath = path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
-		await writeFileRemote(serverId, configPath, traefikConfig);
+		await writeConfinedRemote(
+			serverId,
+			DYNAMIC_TRAEFIK_PATH,
+			`${appName}.yml`,
+			traefikConfig,
+		);
 	} catch (e) {
+		if (isTraefikPathError(e)) throw e;
 		console.error("Error saving the YAML config file:", e);
 	}
 };
@@ -289,10 +343,10 @@ export const writeTraefikConfig = (
 ) => {
 	try {
 		const { DYNAMIC_TRAEFIK_PATH } = paths();
-		const configPath = path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
 		const yamlStr = stringify(traefikConfig);
-		fs.writeFileSync(configPath, yamlStr, "utf8");
+		writeConfinedFile(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`, yamlStr);
 	} catch (e) {
+		if (isTraefikPathError(e)) throw e;
 		console.error("Error saving the YAML config file:", e);
 	}
 };
@@ -304,10 +358,15 @@ export const writeTraefikConfigRemote = async (
 ) => {
 	try {
 		const { DYNAMIC_TRAEFIK_PATH } = paths(true);
-		const configPath = path.join(DYNAMIC_TRAEFIK_PATH, `${appName}.yml`);
 		const yamlStr = stringify(traefikConfig);
-		await writeFileRemote(serverId, configPath, yamlStr);
+		await writeConfinedRemote(
+			serverId,
+			DYNAMIC_TRAEFIK_PATH,
+			`${appName}.yml`,
+			yamlStr,
+		);
 	} catch (e) {
+		if (isTraefikPathError(e)) throw e;
 		console.error("Error saving the YAML config file:", e);
 	}
 };

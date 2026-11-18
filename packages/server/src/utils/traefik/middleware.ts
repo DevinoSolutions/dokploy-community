@@ -1,11 +1,12 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { Domain } from "@dokploy/server/services/domain";
 import { parse, stringify } from "yaml";
 import type { ApplicationNested } from "../builders";
-import { execAsyncRemote } from "../process/execAsync";
-import { writeTraefikConfigRemote } from "./application";
+import {
+	readConfinedRemote,
+	writeTraefikConfigRemote,
+} from "./application";
+import { isTraefikPathError, readConfinedFile, writeConfinedFile } from "./confine";
 import type { FileConfig } from "./file-types";
 
 export const addMiddleware = (config: FileConfig, middlewareName: string) => {
@@ -77,40 +78,38 @@ export const deleteAllMiddlewares = async (application: ApplicationNested) => {
 
 export const loadMiddlewares = <T>() => {
 	const { DYNAMIC_TRAEFIK_PATH } = paths();
-	const configPath = join(DYNAMIC_TRAEFIK_PATH, "middlewares.yml");
-	if (!existsSync(configPath)) {
-		throw new Error(`File not found: ${configPath}`);
+	const yamlStr = readConfinedFile(DYNAMIC_TRAEFIK_PATH, "middlewares.yml");
+	if (yamlStr === null) {
+		throw new Error(`File not found: ${DYNAMIC_TRAEFIK_PATH}/middlewares.yml`);
 	}
-	const yamlStr = readFileSync(configPath, "utf8");
 	const config = parse(yamlStr) as T;
 	return config;
 };
 
 export const loadRemoteMiddlewares = async (serverId: string) => {
 	const { DYNAMIC_TRAEFIK_PATH } = paths(true);
-	const configPath = join(DYNAMIC_TRAEFIK_PATH, "middlewares.yml");
+	const configPath = `${DYNAMIC_TRAEFIK_PATH}/middlewares.yml`;
 
 	try {
-		const { stdout, stderr } = await execAsyncRemote(
+		const stdout = await readConfinedRemote(
 			serverId,
-			`cat ${configPath}`,
+			DYNAMIC_TRAEFIK_PATH,
+			"middlewares.yml",
 		);
-
-		if (stderr) {
-			console.error(`Error: ${stderr}`);
+		if (stdout === null) {
 			throw new Error(`File not found: ${configPath}`);
 		}
 		const config = parse(stdout) as FileConfig;
 		return config;
-	} catch (_) {
+	} catch (error) {
+		if (isTraefikPathError(error)) throw error;
 		throw new Error(`File not found: ${configPath}`);
 	}
 };
 export const writeMiddleware = (config: FileConfig) => {
 	const { DYNAMIC_TRAEFIK_PATH } = paths();
-	const configPath = join(DYNAMIC_TRAEFIK_PATH, "middlewares.yml");
 	const newYamlContent = stringify(config);
-	writeFileSync(configPath, newYamlContent, "utf8");
+	writeConfinedFile(DYNAMIC_TRAEFIK_PATH, "middlewares.yml", newYamlContent);
 };
 
 export const createPathMiddlewares = async (

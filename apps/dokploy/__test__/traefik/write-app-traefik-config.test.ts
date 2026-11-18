@@ -93,7 +93,7 @@ describe("writeAppTraefikConfig", () => {
 	});
 
 	it("writes the remote file when routers/services are present", async () => {
-		mocks.writeFileRemote.mockResolvedValue(undefined);
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
 
 		await writeAppTraefikConfig(
 			{
@@ -111,11 +111,11 @@ describe("writeAppTraefikConfig", () => {
 			"server-id",
 		);
 
-		expect(mocks.writeFileRemote).toHaveBeenCalledOnce();
-		const [serverId, remotePath, content] =
-			mocks.writeFileRemote.mock.calls[0] ?? [];
+		expect(mocks.execAsyncRemote).toHaveBeenCalledOnce();
+		const [serverId, command, , options] =
+			mocks.execAsyncRemote.mock.calls[0] ?? [];
 		expect(serverId).toBe("server-id");
-		expect(remotePath).toContain("with-domain-app.yml");
-		expect(content).toContain("with-domain-app-router-1");
+		expect(command).toContain("with-domain-app.yml");
+		expect(options.stdin).toContain("with-domain-app-router-1");
 	});
 });
