@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
  * Body `code` of the 429 a throttled API key gets. A throttled key is still a
  * good key: answering 401 made CI pollers treat a busy key as a lost login.
  */
-export const API_KEY_RATE_LIMITED_CODE = "RATE_LIMITED";
+const API_KEY_RATE_LIMITED_CODE = "RATE_LIMITED";
 
 export interface ApiKeyRateLimitInfo {
 	retryAfterSeconds: number;
@@ -47,7 +47,7 @@ export const respondApiKeyRateLimited = (
 ) => {
 	logApiKeyRateLimited(req, info);
 	res.statusCode = 429;
-	res.setHeader("Retry-After", String(info.retryAfterSeconds));
+	setRetryAfter(res, info.retryAfterSeconds);
 	res.setHeader("Content-Type", "application/json");
 	res.end(
 		JSON.stringify({
