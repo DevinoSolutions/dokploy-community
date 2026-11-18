@@ -16,6 +16,8 @@ vi.mock("@dokploy/server", () => {
 	const stubs: Record<string | symbol, unknown> = {};
 	const named: Record<string, unknown> = {
 		IS_CLOUD: false,
+		// the bind mounts of a service are looked at before it is copied
+		findMountsByApplicationId: vi.fn(async () => []),
 		createProject: mocks.createProject,
 		findEnvironmentById: mocks.findEnvironmentById,
 		findApplicationById: mocks.findApplicationById,

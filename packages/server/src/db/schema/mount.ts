@@ -106,6 +106,17 @@ export const MountssRelations = relations(mounts, ({ one }) => ({
 	}),
 }));
 
+const mountServiceTypeSchema = z.enum([
+	"application",
+	"postgres",
+	"mysql",
+	"mariadb",
+	"mongo",
+	"redis",
+	"compose",
+	"libsql",
+]);
+
 const createSchema = createInsertSchema(mounts, {
 	applicationId: z.string(),
 	type: z.enum(["bind", "volume", "file"]),
@@ -123,18 +134,7 @@ const createSchema = createInsertSchema(mounts, {
 	mountPath: z.string().min(1),
 	mountId: z.string().optional(),
 	filePath: z.string().optional(),
-	serviceType: z
-		.enum([
-			"application",
-			"postgres",
-			"mysql",
-			"mariadb",
-			"mongo",
-			"redis",
-			"compose",
-			"libsql",
-		])
-		.default("application"),
+	serviceType: mountServiceTypeSchema.default("application"),
 	// Optional ownership and permissions
 	uid: z.number().int().optional(),
 	gid: z.number().int().optional(),
@@ -183,6 +183,9 @@ export const apiFindMountByApplicationId = z.object({
 });
 
 export const apiUpdateMount = createSchema.partial().extend({
+	// No default here: an update that leaves it out keeps the stored row's
+	// service type (`.partial()` keeps the default of the create schema).
+	serviceType: mountServiceTypeSchema.optional(),
 	mountId: z.string().min(1),
 	expectedContent: z.string().nullable().optional(),
 });

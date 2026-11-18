@@ -7,6 +7,7 @@ import {
 	type ServiceType,
 	shEscape,
 } from "@dokploy/server/db/schema";
+import { getUnsafePermissionTargetReason } from "@dokploy/server/utils/docker/bind-mount-policy";
 import { removeStagedFiles } from "@dokploy/server/utils/docker/staging";
 import {
 	createFile,
@@ -30,6 +31,39 @@ const hasOwnership = (m: Partial<Mount>) =>
 	m.gid !== undefined ||
 	(m.mode !== undefined && m.mode !== null && m.mode !== "");
 
+// The settings that make Dokploy run chown/chmod on the mount's path.
+const hasPermissionSettings = (m: Partial<Mount>) =>
+	(m.uid !== undefined && m.uid !== null) ||
+	(m.gid !== undefined && m.gid !== null) ||
+	!!m.mode;
+
+// A bind mount's host path is raw host territory: the recursive chown/chmod
+// never runs on a system or Dokploy directory, a socket, a path with `..` or a
+// trailing slash, or a path that is not absolute.
+const assertSafePermissionTarget = (m: Partial<Mount>) => {
+	if (m.type !== "bind" || !m.hostPath || !hasPermissionSettings(m)) return;
+	const reason = getUnsafePermissionTargetReason(m.hostPath);
+	if (reason !== null) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Ownership and permissions are not applied to this host path: ${reason}.`,
+		});
+	}
+};
+
+// Printed by the permission command when it refuses a bind mount's path.
+const NOT_APPLIED_MARKER = "mount-permissions-not-applied";
+
+const isNotAppliedError = (error: unknown) => {
+	const { message, stderr } = (error ?? {}) as {
+		message?: unknown;
+		stderr?: unknown;
+	};
+	return [message, stderr].some((value) =>
+		String(value ?? "").includes(NOT_APPLIED_MARKER),
+	);
+};
+
 const assertValidId = (value: number, label: "uid" | "gid") => {
 	if (!Number.isInteger(value) || value < 0) {
 		throw new Error(`Invalid ${label}: must be a non-negative integer`);
@@ -44,7 +78,7 @@ const assertValidMode = (mode: string) => {
 	}
 };
 
-const SAFE_PATH_REGEX = /^[A-Za-z0-9_.\/ -]+$/;
+const SAFE_PATH_REGEX = /^[A-Za-z0-9_./ -]+$/;
 
 const assertValidTargetPath = (target: string, label: string) => {
 	if (!SAFE_PATH_REGEX.test(target)) {
@@ -101,16 +135,42 @@ export const applyMountPermissions = async (mountId: string) => {
 		}
 	};
 
-	const buildPermissionCommand = (target: string) => {
+	// Only a directory or a regular file, never a symlink: the target cannot be
+	// swapped for a socket, a device or a link to another path. A bind mount's
+	// path must also be its own real path, so no component of it is a link, and
+	// the recursion never follows one (-h -P; `--` ends the options). A bind
+	// mount path that exists but fails that exits non-zero, so the caller hears
+	// that nothing was applied; one that does not exist yet is skipped as before.
+	const buildPermissionCommand = (target: string, realPathOnly = false) => {
 		const escapedTarget = shEscape(target);
-		return `if [ -e ${escapedTarget} ]; then ${haveChown ? `chown -R ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R ${mount.mode} ${escapedTarget};` : ""} fi`;
+		const realPath = realPathOnly
+			? ` && [ "$(realpath -- ${escapedTarget})" = ${escapedTarget} ]`
+			: "";
+		const apply = `${haveChown ? `chown -h -R -P -- ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R -- ${mount.mode} ${escapedTarget};` : ""}`;
+		const guard = `{ [ -d ${escapedTarget} ] || [ -f ${escapedTarget} ]; } && [ ! -L ${escapedTarget} ]${realPath}`;
+		return realPathOnly
+			? `if [ ! -e ${escapedTarget} ] && [ ! -L ${escapedTarget} ]; then :; elif ${guard}; then ${apply} else echo ${NOT_APPLIED_MARKER} >&2; exit 3; fi`
+			: `if ${guard}; then ${apply} fi`;
 	};
 
 	if (mount.type === "bind") {
 		const target = mount.hostPath;
 		if (!target) return;
 		assertValidTargetPath(target, "hostPath");
-		await run(buildPermissionCommand(target));
+		// The path is canonical here, so the value that was checked is the value
+		// the command gets
+		assertSafePermissionTarget(mount);
+		try {
+			await run(buildPermissionCommand(target, true));
+		} catch (error) {
+			if (!isNotAppliedError(error)) throw error;
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message:
+					"Ownership and permissions were not applied: the host path passes through a symlink or is not a directory or regular file. The mount itself is saved.",
+				cause: error,
+			});
+		}
 		return;
 	}
 
@@ -160,6 +220,8 @@ export const createMount = async (input: z.infer<typeof apiCreateMount>) => {
 				message: `Invalid file path: ${input.filePath}`,
 			});
 		}
+		// Checked before insert: a refused path must not leave a saved row behind
+		assertSafePermissionTarget(input);
 		const { serviceId, ...rest } = input;
 		const value = await db
 			.insert(mounts)
@@ -330,6 +392,32 @@ export const updateMount = async (
 			message: `Invalid file path: ${mountData.filePath}`,
 		});
 	}
+	// A bind mount saved earlier is not checked again unless the update changes
+	// its type, host path or permission settings: it keeps deploying and stays
+	// editable for its other fields.
+	const current = await findMountById(mountId);
+	const empty = (value: unknown) =>
+		value === undefined || value === null || value === "" ? null : value;
+	const permissionsChanged = (
+		["type", "hostPath", "uid", "gid", "mode"] as const
+	).some(
+		(key) =>
+			mountData[key] !== undefined &&
+			empty(mountData[key]) !== empty(current[key]),
+	);
+	if (permissionsChanged) {
+		// The mount as it will be saved, checked before anything is written
+		const pick = <K extends "type" | "hostPath" | "uid" | "gid" | "mode">(
+			key: K,
+		) => (mountData[key] === undefined ? current[key] : mountData[key]);
+		assertSafePermissionTarget({
+			type: pick("type"),
+			hostPath: pick("hostPath"),
+			uid: pick("uid"),
+			gid: pick("gid"),
+			mode: pick("mode"),
+		});
+	}
 	const mount = await db.transaction(async (tx) => {
 		const mount = await tx
 			.update(mounts)
@@ -354,7 +442,7 @@ export const updateMount = async (
 		await updateFileMount(mountId);
 	}
 
-	if (hasOwnership(mount)) {
+	if (hasOwnership(mount) && (mount.type !== "bind" || permissionsChanged)) {
 		await applyMountPermissions(mountId);
 	}
 	return mount;
