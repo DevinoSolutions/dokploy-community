@@ -44,6 +44,9 @@
 		"@types/react": "18.3.5",
 		"@types/react-dom": "18.3.0"
 	},
+	"auditIgnoreExpiry": {
+		"GHSA-fc5q-39xc-vjpf": "expires=2026-12-01 | runtime watchPaths now validated and matched with extglob/brace parsing disabled (see should-deploy.ts); checked that packages/server/src/utils/watch-paths/should-deploy.ts is the only source file importing a glob library (micromatch/picomatch/minimatch/glob/fast-glob/globby/tinyglobby/anymatch/chokidar), that `pnpm why picomatch --prod` reaches picomatch only through that micromatch and the shadcn CLI (dotenvx, fast-glob; no request data), and that every pattern the validator allows matches a 4,096-character path in under 100 ms; drop when picomatch ships a fix (micromatch/picomatch#194)"
+	},
 	"pnpm": {
 		"overrides": {
 			"js-yaml@4": "4.3.2",
@@ -104,7 +107,6 @@
 		},
 		"auditConfig": {
 			"ignoreGhsas": [
-				"GHSA-vfj7-8cjw-p6xm",
 				"GHSA-fc5q-39xc-vjpf"
 			]
 		},

@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { z } from "zod";
 import { BitbucketIcon } from "@/components/icons/data-tools-icons";
 import { AlertBlock } from "@/components/shared/alert-block";
+import { WatchPathsNotice } from "@/components/shared/watch-paths-notice";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -448,6 +449,7 @@ export const SaveBitbucketProvider = ({ applicationId }: Props) => {
 											</Tooltip>
 										</TooltipProvider>
 									</div>
+									<WatchPathsNotice paths={field.value} />
 									<div className="flex flex-wrap gap-2 mb-2">
 										{field.value?.map((path, index) => (
 											<Badge key={index} variant="secondary">
