@@ -233,6 +233,7 @@ export * from "./utils/vault";
 export * from "./utils/volume-backups/index";
 export * from "./utils/watch-paths/normalize-changed-files";
 export * from "./utils/watch-paths/should-deploy";
+export * from "./utils/watch-paths/validate-watch-paths";
 export * from "./utils/wildcard-restriction";
 export * from "./verification/send-verification-email";
 export * from "./wss/utils";

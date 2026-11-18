@@ -2,6 +2,7 @@ import { deployPriorityInput } from "@dokploy/server/db/validations/deploy-prior
 import { checkoutPathSchema } from "@dokploy/server/utils/compose-path";
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import { getPreviewImageTemplateError } from "@dokploy/server/utils/preview-image";
+import { watchPathsSchema } from "@dokploy/server/utils/watch-paths/validate-watch-paths";
 import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
@@ -447,7 +448,8 @@ const createSchema = createInsertSchema(applications, {
 	previewPath: z.string().optional(),
 	previewCertificateType: z.enum(["letsencrypt", "none", "custom"]).optional(),
 	previewRequireCollaboratorPermissions: z.boolean().optional(),
-	watchPaths: z.array(z.string()).optional().optional(),
+	// Refuses extglob/brace/paren patterns (picomatch ReDoS GHSA-fc5q-39xc-vjpf).
+	watchPaths: watchPathsSchema.optional(),
 	// build-policy hook: array column, needs the same explicit zod shape.
 	requiredChecks: z.array(z.string()).optional(),
 	previewLabels: z.array(z.string()).optional(),

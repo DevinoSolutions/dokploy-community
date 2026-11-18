@@ -13,6 +13,7 @@ import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
 } from "@dokploy/server/utils/preview-wildcard";
+import { watchPathsSchema } from "@dokploy/server/utils/watch-paths/validate-watch-paths";
 import { relations } from "drizzle-orm";
 import {
 	boolean,
@@ -314,7 +315,8 @@ const createSchema = createInsertSchema(compose, {
 	// See utils/compose-path (T-8238).
 	composePath: composePathSchema,
 	composeType: z.enum(["docker-compose", "stack"]).optional(),
-	watchPaths: z.array(z.string()).optional(),
+	// Refuses extglob/brace/paren patterns (picomatch ReDoS GHSA-fc5q-39xc-vjpf).
+	watchPaths: watchPathsSchema.optional(),
 	// build-policy hook: array column, needs the same explicit zod shape.
 	requiredChecks: z.array(z.string()).optional(),
 	sourceType: z

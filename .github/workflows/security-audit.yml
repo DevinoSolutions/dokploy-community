@@ -8,10 +8,14 @@
 #   release exists (every version up to 4.0.7 is affected). It reaches the tree
 #   through vite (build time) and micromatch. micromatch runs on the server:
 #   packages/server/src/utils/watch-paths/should-deploy.ts matches a service's
-#   watch paths, which a signed-in member with edit rights on that service sets,
-#   against the file list of a git webhook. So a member could store a slow
-#   pattern; it is not reachable without an account. Remove the ignore and
-#   raise picomatch once a fixed release is out; re-check by 2026-12-17.
+#   watch paths against the file list of a git webhook. Watch paths are now
+#   refused at the API when they hold extglob, brace or other slow syntax
+#   (utils/watch-paths/validate-watch-paths.ts), and should-deploy.ts re-checks
+#   stored rows and matches with noextglob/nobrace. The mute is DATED: its
+#   expiry and reason sit in package.json `auditIgnoreExpiry`, and the "Check
+#   dated audit mutes" step fails this job once the date passes (or when the entry is
+#   missing a reason, malformed or more than 30 days out). Remove the ignore
+#   and raise picomatch once a fixed release is out (micromatch/picomatch#194).
 name: Security audit
 
 on:
@@ -22,6 +26,7 @@ on:
       - "**/package.json"
       - pnpm-workspace.yaml
       - .github/workflows/security-audit.yml
+      - scripts/check-audit-ignore-expiry.mjs
   workflow_dispatch:
   schedule:
     - cron: "23 5 * * 1"
@@ -40,4 +45,8 @@ jobs:
         with:
           node-version: 24.22.1
           package-manager-cache: false
+      # Before the audit: a dated mute that expired keeps this job red until
+      # someone re-reviews the advisory (see the header and package.json).
+      - name: Check dated audit mutes
+        run: node scripts/check-audit-ignore-expiry.mjs
       - run: pnpm audit --audit-level=high
