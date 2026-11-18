@@ -1616,7 +1616,10 @@ export const projectRouter = createTRPCRouter({
 					},
 				});
 				// A member's copy has no bind mounts: say how many were left out.
-				return { ...targetProject, skippedBindMounts };
+				return {
+					...(targetProject as NonNullable<typeof targetProject>),
+					skippedBindMounts,
+				};
 			} catch (error) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",

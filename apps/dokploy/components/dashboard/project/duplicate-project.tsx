@@ -108,6 +108,11 @@ export const DuplicateProject = ({
 						? "Project duplicated successfully"
 						: "Services duplicated successfully",
 				);
+				if (newProject.skippedBindMounts > 0) {
+					toast.info(
+						`${newProject.skippedBindMounts} bind mount${newProject.skippedBindMounts === 1 ? " was" : "s were"} not copied: only owners and admins can have bind mounts.`,
+					);
+				}
 				setOpen(false);
 				if (duplicateType === "new-project") {
 					router.push(

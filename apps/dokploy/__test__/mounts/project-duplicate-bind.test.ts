@@ -102,7 +102,9 @@ const dataVolume = {
 	mountPath: "/data",
 };
 
-const input = (type: string, overrides: Record<string, unknown> = {}) => ({
+type ServiceKind = (typeof TYPES)[number][0];
+
+const input = (type: ServiceKind, overrides: Record<string, unknown> = {}) => ({
 	sourceEnvironmentId: "env-b",
 	name: "copy",
 	includeServices: true,
@@ -111,7 +113,7 @@ const input = (type: string, overrides: Record<string, unknown> = {}) => ({
 	...overrides,
 });
 
-const scriptService = (type: string, mounts: unknown[]) => {
+const scriptService = (type: ServiceKind, mounts: unknown[]) => {
 	mocks.findMountsByApplicationId.mockResolvedValue(mounts);
 	mocks.finders[type]?.mockResolvedValue({
 		[`${type}Id`]: "svc-1",

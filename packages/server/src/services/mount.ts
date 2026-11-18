@@ -51,6 +51,19 @@ const assertSafePermissionTarget = (m: Partial<Mount>) => {
 	}
 };
 
+// Printed by the permission command when it refuses a bind mount's path.
+const NOT_APPLIED_MARKER = "mount-permissions-not-applied";
+
+const isNotAppliedError = (error: unknown) => {
+	const { message, stderr } = (error ?? {}) as {
+		message?: unknown;
+		stderr?: unknown;
+	};
+	return [message, stderr].some((value) =>
+		String(value ?? "").includes(NOT_APPLIED_MARKER),
+	);
+};
+
 const assertValidId = (value: number, label: "uid" | "gid") => {
 	if (!Number.isInteger(value) || value < 0) {
 		throw new Error(`Invalid ${label}: must be a non-negative integer`);
@@ -125,13 +138,19 @@ export const applyMountPermissions = async (mountId: string) => {
 	// Only a directory or a regular file, never a symlink: the target cannot be
 	// swapped for a socket, a device or a link to another path. A bind mount's
 	// path must also be its own real path, so no component of it is a link, and
-	// the recursion never follows one (-h -P; `--` ends the options).
+	// the recursion never follows one (-h -P; `--` ends the options). A bind
+	// mount path that exists but fails that exits non-zero, so the caller hears
+	// that nothing was applied; one that does not exist yet is skipped as before.
 	const buildPermissionCommand = (target: string, realPathOnly = false) => {
 		const escapedTarget = shEscape(target);
 		const realPath = realPathOnly
 			? ` && [ "$(realpath -- ${escapedTarget})" = ${escapedTarget} ]`
 			: "";
-		return `if { [ -d ${escapedTarget} ] || [ -f ${escapedTarget} ]; } && [ ! -L ${escapedTarget} ]${realPath}; then ${haveChown ? `chown -h -R -P -- ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R -- ${mount.mode} ${escapedTarget};` : ""} fi`;
+		const apply = `${haveChown ? `chown -h -R -P -- ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R -- ${mount.mode} ${escapedTarget};` : ""}`;
+		const guard = `{ [ -d ${escapedTarget} ] || [ -f ${escapedTarget} ]; } && [ ! -L ${escapedTarget} ]${realPath}`;
+		return realPathOnly
+			? `if [ ! -e ${escapedTarget} ] && [ ! -L ${escapedTarget} ]; then :; elif ${guard}; then ${apply} else echo ${NOT_APPLIED_MARKER} >&2; exit 3; fi`
+			: `if ${guard}; then ${apply} fi`;
 	};
 
 	if (mount.type === "bind") {
@@ -141,7 +160,17 @@ export const applyMountPermissions = async (mountId: string) => {
 		// The path is canonical here, so the value that was checked is the value
 		// the command gets
 		assertSafePermissionTarget(mount);
-		await run(buildPermissionCommand(target, true));
+		try {
+			await run(buildPermissionCommand(target, true));
+		} catch (error) {
+			if (!isNotAppliedError(error)) throw error;
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message:
+					"Ownership and permissions were not applied: the host path passes through a symlink or is not a directory or regular file. The mount itself is saved.",
+				cause: error,
+			});
+		}
 		return;
 	}
 

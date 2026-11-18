@@ -251,7 +251,9 @@ describe.skipIf(process.platform !== "linux")(
 				stored({ hostPath, uid: process.getuid?.(), mode: "750" }),
 			);
 			mocks.execAsync.mockImplementation(async (command: string) => {
-				execFileSync("sh", ["-c", command]);
+				execFileSync("sh", ["-c", command], {
+					stdio: ["ignore", "pipe", "pipe"],
+				});
 				return { stdout: "", stderr: "" };
 			});
 			await applyMountPermissions("mount-1");
@@ -281,16 +283,42 @@ describe.skipIf(process.platform !== "linux")(
 			expect(modeOf(join(dir, "outside"))).toBe(0o700);
 		});
 
-		it("skips a path that is a symlink", async () => {
-			await applyTo(join(dir, "link"));
+		const notApplied = {
+			code: "BAD_REQUEST",
+			message: expect.stringMatching(/not applied.*symlink/i),
+		};
+
+		it("reports that nothing was applied for a path that is a symlink", async () => {
+			await expect(applyTo(join(dir, "link"))).rejects.toMatchObject(
+				notApplied,
+			);
 			expect(modeOf(join(dir, "real"))).toBe(0o700);
 		});
 
-		it("skips a path that goes through a symlink", async () => {
-			await applyTo(join(dir, "link", "sub"));
+		it("reports that nothing was applied for a path that goes through a symlink", async () => {
+			await expect(applyTo(join(dir, "link", "sub"))).rejects.toMatchObject(
+				notApplied,
+			);
 			expect(modeOf(join(dir, "real", "sub"))).toBe(0o700);
-			await applyTo(join(dir, "real", "inner"));
+			await expect(applyTo(join(dir, "real", "inner"))).rejects.toMatchObject(
+				notApplied,
+			);
 			expect(modeOf(join(dir, "outside"))).toBe(0o700);
+		});
+
+		it("still skips quietly a path that does not exist yet", async () => {
+			await applyTo(join(dir, "not-created-yet"));
+			expect(modeOf(join(dir, "real"))).toBe(0o700);
+		});
+
+		it("does not hide another failure behind the symlink message", async () => {
+			mocks.findFirst.mockResolvedValue(
+				stored({ hostPath: join(dir, "real"), uid: 1, mode: "750" }),
+			);
+			mocks.execAsync.mockRejectedValue(new Error("chown: permission denied"));
+			await expect(applyMountPermissions("mount-1")).rejects.toThrow(
+				"permission denied",
+			);
 		});
 
 		it("never reaches a link through a trailing slash or a dot-dot segment", async () => {
