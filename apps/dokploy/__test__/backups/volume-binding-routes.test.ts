@@ -544,12 +544,12 @@ describe("named mounts", () => {
 		expect(mocks.createMount).not.toHaveBeenCalled();
 	});
 
-	it("does not look at bind and file mounts", async () => {
+	it("does not look at file mounts", async () => {
 		await mountsAs("member").create({
 			...mountInput,
-			type: "bind",
+			type: "file",
 			volumeName: undefined,
-			hostPath: "/srv/data",
+			filePath: "config.json",
 		});
 
 		expect(mocks.createMount).toHaveBeenCalledTimes(1);

@@ -2,15 +2,8 @@ import {
 	createMount,
 	deleteMount,
 	findApplicationById,
-	findComposeById,
-	findLibsqlById,
-	findMariadbById,
-	findMongoById,
 	findMountById,
 	findMountsByApplicationId,
-	findMySqlById,
-	findPostgresById,
-	findRedisById,
 	getServiceContainer,
 	readFileMountContent,
 	updateMount,
@@ -23,6 +16,11 @@ import {
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import {
+	assertBindMountAllowed,
+	getServiceHost,
+	hasPermissionSettings,
+} from "@/server/api/utils/bind-mount";
 import { assertVolumeNameForService } from "@/server/api/utils/volume-binding";
 import {
 	apiCreateMount,
@@ -37,43 +35,19 @@ async function getServiceOrganizationId(
 	serviceId: string,
 	serviceType: ServiceType,
 ): Promise<string | null> {
-	switch (serviceType) {
-		case "application": {
-			const app = await findApplicationById(serviceId);
-			return app?.environment?.project?.organizationId ?? null;
-		}
-		case "postgres": {
-			const postgres = await findPostgresById(serviceId);
-			return postgres?.environment?.project?.organizationId ?? null;
-		}
-		case "mariadb": {
-			const mariadb = await findMariadbById(serviceId);
-			return mariadb?.environment?.project?.organizationId ?? null;
-		}
-		case "mongo": {
-			const mongo = await findMongoById(serviceId);
-			return mongo?.environment?.project?.organizationId ?? null;
-		}
-		case "mysql": {
-			const mysql = await findMySqlById(serviceId);
-			return mysql?.environment?.project?.organizationId ?? null;
-		}
-		case "redis": {
-			const redis = await findRedisById(serviceId);
-			return redis?.environment?.project?.organizationId ?? null;
-		}
-		case "compose": {
-			const compose = await findComposeById(serviceId);
-			return compose?.environment?.project?.organizationId ?? null;
-		}
-		case "libsql": {
-			const libsql = await findLibsqlById(serviceId);
-			return libsql?.environment?.project?.organizationId ?? null;
-		}
-		default:
-			return null;
-	}
+	return (await getServiceHost(serviceId, serviceType))?.organizationId ?? null;
 }
+
+type PermissionSettings = {
+	uid?: number | null;
+	gid?: number | null;
+	mode?: string | null;
+};
+
+const samePermissionSettings = (a: PermissionSettings, b: PermissionSettings) =>
+	(a.uid ?? null) === (b.uid ?? null) &&
+	(a.gid ?? null) === (b.gid ?? null) &&
+	(a.mode || null) === (b.mode || null);
 
 const MOUNT_SERVICE_KEYS = [
 	"applicationId",
@@ -100,6 +74,14 @@ export const mountRouter = createTRPCRouter({
 					serviceType: input.serviceType ?? "application",
 					serviceId: input.serviceId,
 					volumeName: input.volumeName,
+				});
+			}
+			if (input.type === "bind" && input.hostPath) {
+				await assertBindMountAllowed(ctx, {
+					serviceType: input.serviceType ?? "application",
+					serviceId: input.serviceId,
+					hostPath: input.hostPath,
+					withPermissions: hasPermissionSettings(input),
 				});
 			}
 			const mount = await createMount(input);
@@ -220,6 +202,31 @@ export const mountRouter = createTRPCRouter({
 					volumeName,
 					existingRow:
 						mount.type === "volume" && volumeName === mount.volumeName,
+				});
+			}
+			// What the mount will be once saved. Only a new or changed host path, or
+			// changed permission settings, need the caller's reach: a mount that was
+			// saved earlier keeps working as it is.
+			const bindHostPath =
+				input.hostPath === undefined ? mount.hostPath : input.hostPath;
+			const bindPermissions = {
+				uid: input.uid === undefined ? mount.uid : input.uid,
+				gid: input.gid === undefined ? mount.gid : input.gid,
+				mode: input.mode === undefined ? mount.mode : input.mode,
+			};
+			if (
+				serviceId &&
+				volumeType === "bind" &&
+				bindHostPath &&
+				(mount.type !== "bind" ||
+					bindHostPath !== mount.hostPath ||
+					!samePermissionSettings(bindPermissions, mount))
+			) {
+				await assertBindMountAllowed(ctx, {
+					serviceType: mount.serviceType,
+					serviceId,
+					hostPath: bindHostPath,
+					withPermissions: hasPermissionSettings(bindPermissions),
 				});
 			}
 			const { expectedContent, ...mountData } = input;
