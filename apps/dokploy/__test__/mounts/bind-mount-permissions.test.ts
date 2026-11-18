@@ -321,18 +321,30 @@ describe.skipIf(process.platform !== "linux")(
 			);
 		});
 
-		it("never reaches a link through a trailing slash or a dot-dot segment", async () => {
+		// Built by concatenation: path.join would normalize the `..` and the
+		// trailing slash away and hand the code a canonical path.
+		it("refuses a non-canonical path before the shell, and the referent of the link is untouched", async () => {
+			const link = `${dir}/link`;
+			const real = `${dir}/real`;
 			for (const hostPath of [
-				`${join(dir, "link")}/`,
-				join(dir, "link", "sub", ".."),
-				join(dir, "real", "inner", ".."),
+				`${link}/`,
+				`${link}//sub`,
+				`${link}/./sub`,
+				`${link}/sub/..`,
+				`${real}/inner/..`,
+				`${real}/inner/../sub`,
+				`${real}/`,
 			]) {
+				mocks.execAsync.mockClear();
 				await expect(applyTo(hostPath)).rejects.toMatchObject({
 					code: "BAD_REQUEST",
+					message: expect.stringMatching(/canonical/),
 				});
+				expect(mocks.execAsync).not.toHaveBeenCalled();
 			}
-			expect(modeOf(join(dir, "real"))).toBe(0o700);
-			expect(modeOf(join(dir, "outside"))).toBe(0o700);
+			for (const name of ["real", "real/sub", "real/sub/f", "outside"]) {
+				expect(modeOf(join(dir, name))).toBe(0o700);
+			}
 		});
 	},
 );
