@@ -36,6 +36,7 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	movedServiceResult,
 	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -549,7 +550,7 @@ export const mysqlRouter = createTRPCRouter({
 				resourceId: updatedMysql.mysqlId,
 				resourceName: updatedMysql.appName,
 			});
-			return updatedMysql;
+			return movedServiceResult(updatedMysql, "mysqlId");
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildMysql)

@@ -2,6 +2,13 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+**Security.**
+
+- The passwords of an application's HTTP basic-auth users (the Security tab) are no longer returned to everyone who can read the application. Before, `application.one` and `security.one` handed the plain-text password of every basic-auth user to any member with read access to the service. Now the user names still show, and the passwords go only to users who may edit the service, because the edit form reads the stored password back. A blanked password cannot be saved back by mistake: the form refuses an empty password.
+- Moving a service to another environment (application, compose stack, Postgres, MySQL, MariaDB, MongoDB, Redis, libSQL) now answers with the service id and its new environment id instead of the whole row. The row held environment variables, build arguments and secrets, the deploy webhook token, the registry password and database passwords, and the permission a move needs (creating services) does not include reading them. The dashboard does not read the result.
+
 ### New in v0.31.0-community.7
 
 Upgrade notes: one additive database migration (0236, a nullable column on the GitHub Deployments watch table), nothing to configure. Migration 0236 is additive, so an image-only rollback to v0.31.0-community.6 keeps working. This release includes everything in v0.31.0-community.6. Mounts that are already saved keep deploying as they are.

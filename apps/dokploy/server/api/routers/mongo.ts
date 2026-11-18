@@ -36,6 +36,7 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	movedServiceResult,
 	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -550,7 +551,7 @@ export const mongoRouter = createTRPCRouter({
 				resourceId: updatedMongo.mongoId,
 				resourceName: updatedMongo.appName,
 			});
-			return updatedMongo;
+			return movedServiceResult(updatedMongo, "mongoId");
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildMongo)

@@ -4,7 +4,11 @@ import {
 	findSecurityById,
 	updateSecurityById,
 } from "@dokploy/server";
-import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import {
+	checkServicePermissionAndAccess,
+	hasPermission,
+} from "@dokploy/server/services/permission";
+import { redactBasicAuthEntry } from "@dokploy/server/services/service-secrets";
 import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
@@ -37,7 +41,10 @@ export const securityRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, security.applicationId, {
 				service: ["read"],
 			});
-			return security;
+			// The password goes only to a caller who may edit the service: the
+			// edit form of the Security tab is the one reader that needs it.
+			const canEdit = await hasPermission(ctx, { service: ["create"] });
+			return redactBasicAuthEntry(security, { keepPasswords: canEdit });
 		}),
 
 	delete: protectedProcedure

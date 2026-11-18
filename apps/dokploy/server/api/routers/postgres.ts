@@ -37,6 +37,7 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	movedServiceResult,
 	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -556,7 +557,7 @@ export const postgresRouter = createTRPCRouter({
 				resourceId: updatedPostgres.postgresId,
 				resourceName: updatedPostgres.appName,
 			});
-			return updatedPostgres;
+			return movedServiceResult(updatedPostgres, "postgresId");
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildPostgres)
