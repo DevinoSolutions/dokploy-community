@@ -54,3 +54,7 @@ yarn-error.log*
 
 # Dev instance state (scripts/dev-instance.sh)
 .dev-instance
+
+# Stray files from "> nul" run in a POSIX shell on Windows
+nul
+**/nul
