@@ -62,7 +62,16 @@ export const NESTED_SECRET_FIELDS = [
 	// AWS ECR registry credentials (`registry`, `buildRegistry`, `rollbackRegistry`).
 	"awsAccessKeyId",
 	"awsSecretAccessKey",
+	// Raw rclone flags of a backup destination; they can carry a header or a token.
+	"additionalFlags",
 ] as const;
+
+/**
+ * Nested columns that name an account rather than prove access to it. A caller
+ * who may edit the service keeps them on the dashboard read (the registry form
+ * shows the access key id); everybody else gets them blank.
+ */
+const NESTED_IDENTIFIER_FIELDS: readonly string[] = ["awsAccessKeyId"];
 
 /** The three registries a service row can link; each can be an AWS ECR one. */
 const SERVICE_REGISTRY_RELATIONS = [
@@ -81,6 +90,8 @@ const blankFields = (row: unknown, fields: readonly string[]): unknown => {
 	const next: AnyRecord = { ...row };
 	for (const field of fields) {
 		if (typeof next[field] === "string") next[field] = BLANK;
+		// A list column (a destination's `additionalFlags`): emptied, not removed.
+		else if (Array.isArray(next[field])) next[field] = [];
 	}
 	return next;
 };
@@ -146,32 +157,47 @@ const redactEnvironment = (environment: unknown): unknown => {
 };
 
 /**
- * The row with the AWS credentials of its linked registries blanked, for a
- * service read that otherwise keeps its values (the dashboard's `application.one`
- * and the mutations that echo the row). The finder has to load
+ * The row with the credentials of its linked registries blanked (every column
+ * of `NESTED_SECRET_FIELDS`), for the dashboard read of `application.one`,
+ * which otherwise keeps its values. The finder has to load
  * `awsSecretAccessKey`: the ECR login on the deploy path reads it from the
  * relation. A client never needs it, and the registry router withholds it from
- * everybody, so it is blanked here for every caller. The access key id is an
- * identifier rather than a secret and stays for a caller who may edit the
- * service (`keepAccessKeyId`). Strings become `""`, null stays null.
+ * everybody, so it is blanked here for every caller. The access key id names
+ * the account rather than proving access to it, and stays for a caller who may
+ * edit the service (`keepAccessKeyId`). Strings become `""`, null stays null.
  */
 export const redactRegistryAwsKeys = <T extends object>(
 	row: T,
 	options: { keepAccessKeyId: boolean },
 ): T => {
 	const record = row as AnyRecord;
+	const fields = options.keepAccessKeyId
+		? NESTED_SECRET_FIELDS.filter(
+				(field) => !NESTED_IDENTIFIER_FIELDS.includes(field),
+			)
+		: NESTED_SECRET_FIELDS;
 	let next: AnyRecord | null = null;
 	for (const relation of SERVICE_REGISTRY_RELATIONS) {
 		if (!(relation in record)) continue;
 		next ??= { ...record };
-		next[relation] = blankFields(
-			record[relation],
-			options.keepAccessKeyId
-				? ["awsSecretAccessKey"]
-				: ["awsSecretAccessKey", "awsAccessKeyId"],
-		);
+		next[relation] = blankFields(record[relation], fields);
 	}
 	return (next ?? row) as T;
+};
+
+/**
+ * What a start, stop or status mutation answers: the service id and the status
+ * it was just set to. Not the row `find*ById` loaded: it holds `env`, the
+ * webhook `refreshToken`, passwords and the linked registries' credentials,
+ * and the `deployment.create` permission these routes need does not include
+ * reading them (`application.one` withholds some of them from such callers).
+ */
+export const serviceStatusResult = <K extends string, S extends string>(
+	row: Record<K, string>,
+	idKey: K,
+	applicationStatus: S,
+) => ({ [idKey]: row[idKey], applicationStatus }) as Record<K, string> & {
+	applicationStatus: S;
 };
 
 /**

@@ -21,13 +21,15 @@ export const rollbackRouter = createTRPCRouter({
 						deployment: ["create"],
 					});
 				}
-				const result = await removeRollbackById(input.rollbackId);
+				await removeRollbackById(input.rollbackId);
 				await audit(ctx, {
 					action: "delete",
 					resourceType: "deployment",
 					resourceId: input.rollbackId,
 				});
-				return result;
+				// Not the row: its `fullContext` is the whole application row with its
+				// registries' credentials, and `deployment.create` does not include reading them.
+				return { rollbackId: input.rollbackId };
 			} catch (error) {
 				const message =
 					error instanceof Error

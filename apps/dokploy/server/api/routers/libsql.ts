@@ -30,6 +30,7 @@ import {
 import {
 	deletedServiceResult,
 	listEnvKeys,
+	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
@@ -171,7 +172,7 @@ export const libsqlRouter = createTRPCRouter({
 				resourceId: libsql.libsqlId,
 				resourceName: libsql.appName,
 			});
-			return libsql;
+			return serviceStatusResult(libsql, "libsqlId", "done");
 		}),
 	stop: protectedProcedure
 		.input(apiFindOneLibsql)
@@ -196,7 +197,7 @@ export const libsqlRouter = createTRPCRouter({
 				resourceId: libsql.libsqlId,
 				resourceName: libsql.appName,
 			});
-			return libsql;
+			return serviceStatusResult(libsql, "libsqlId", "idle");
 		}),
 	saveExternalPorts: protectedProcedure
 		.input(apiSaveExternalPortsLibsql)
@@ -328,7 +329,7 @@ export const libsqlRouter = createTRPCRouter({
 				resourceId: libsql.libsqlId,
 				resourceName: libsql.appName,
 			});
-			return libsql;
+			return serviceStatusResult(libsql, "libsqlId", input.applicationStatus);
 		}),
 	remove: protectedProcedure
 		.input(apiFindOneLibsql)

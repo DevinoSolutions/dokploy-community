@@ -88,6 +88,9 @@ describe("redactServiceSecrets", () => {
 		const backup = redacted.backups[0];
 		expect(backup?.destination.encryptionKey).toBe("");
 		expect(backup?.destination.encryptionPassword2).toBe("");
+		// Raw rclone flags can carry a header or a token: emptied, still a list.
+		expect(backup?.destination.additionalFlags).toEqual([]);
+		expect(JSON.stringify(redacted)).not.toContain("FLAGVALUE");
 		expect(backup?.destination.bucket).toBe("backups");
 		expect(backup?.metadata.mariadb.databaseUser).toBe("u");
 		expect(backup?.metadata.mariadb.databasePassword).toBe("");

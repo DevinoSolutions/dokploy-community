@@ -23,6 +23,10 @@ export const REVIEWED_NOT_SECRET: Record<string, string> = {
 	"oauth_resource.refreshTokenTtl": "lifetime in seconds",
 	"oauth_resource.dpopBoundAccessTokensRequired": "boolean setting",
 	"oauth_resource.signingKeyId": "id of a signing key, not the key",
+	"oauth_refresh_token.authorizationCodeId":
+		"id of the authorization code row it came from, not the code",
+	"oauth_provider_access_token.authorizationCodeId":
+		"id of the authorization code row it came from, not the code",
 	"passkey.publicKey": "public half of the WebAuthn key",
 	"passkey.credentialID": "public credential id the browser presents",
 	"ssh-key.publicKey": "public half of the SSH key",
@@ -45,6 +49,8 @@ export const REVIEWED_NOT_SECRET: Record<string, string> = {
 	"uptimely_channel_incident.serviceKey": "service type and id, a lookup key",
 	"notifly.workflowKey":
 		"name of a workflow the user picked; the credential is apiKey (masked)",
+	"telemetryProvider.extraConfig":
+		"non-secret settings (region, namespace, username, tenant id, index); the credentials are apiKey, apiSecret and endpoint, which the finders exclude",
 	// SCIM bookkeeping: normalized lookup keys and ids.
 	"scim_managed_credential.credentialId": "id of a credential row",
 	"scim_managed_credential.activeSlotKey": "name of a slot",
@@ -78,6 +84,12 @@ export const SECRET_OWN_SURFACE: Record<string, string> = {
 		"better-auth API key row (hashed); the key is shown once at creation",
 	"scim_managed_credential.tokenDigest":
 		"digest of a SCIM token, never the token; no router selects it",
+	"two_factor.backupCodes":
+		"better-auth table; the codes reach the user once, from better-auth's enable and regenerate calls; no router or service selects the column",
+	"sso_provider.oidcConfig":
+		"JSON blob with the OIDC clientSecret. Returned unmasked by sso.one and sso.listProviders to the organization's owners and admins (enterprise procedure; admin-only over MCP, mcp/scopes.ts) because the edit dialog reads it back; no service read nests it. Open: not masked for admins",
+	"sso_provider.samlConfig":
+		"JSON blob with the SAML private key. Same surface as oidcConfig: sso.one and sso.listProviders, owners and admins only, not masked. Open: not masked for admins",
 	"telemetryProvider.apiSecret":
 		"stripped by CREDENTIAL_COLUMNS in services/logs-and-metrics/service.ts",
 	"pushover.userKey": "masked by maskSecrets in routers/notification.ts",

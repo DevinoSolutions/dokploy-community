@@ -67,6 +67,7 @@ import {
 	deletedServiceResult,
 	listEnvKeys,
 	redactRegistryAwsKeys,
+	serviceStatusResult,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
 import { checkoutPathSchema } from "@dokploy/server/utils/compose-path";
@@ -575,8 +576,7 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: service.applicationId,
 				resourceName: service.appName,
 			});
-			// The row carries the linked registries; their AWS keys do not leave.
-			return redactRegistryAwsKeys(service, { keepAccessKeyId: false });
+			return serviceStatusResult(service, "applicationId", "idle");
 		}),
 
 	start: protectedProcedure
@@ -598,8 +598,7 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: service.applicationId,
 				resourceName: service.appName,
 			});
-			// The row carries the linked registries; their AWS keys do not leave.
-			return redactRegistryAwsKeys(service, { keepAccessKeyId: false });
+			return serviceStatusResult(service, "applicationId", "done");
 		}),
 
 	redeploy: protectedProcedure

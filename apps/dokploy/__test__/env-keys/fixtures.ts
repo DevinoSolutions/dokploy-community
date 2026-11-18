@@ -131,6 +131,7 @@ export const secretComposeRow = () => ({
 				encryptionEnabled: true,
 				encryptionKey: "SECRET-crypt-key",
 				encryptionPassword2: "SECRET-crypt-salt",
+				additionalFlags: ["--header=X-Token: FLAGVALUE"],
 			},
 			metadata: {
 				mariadb: { databaseUser: "u", databasePassword: "SECRET-meta-pass" },

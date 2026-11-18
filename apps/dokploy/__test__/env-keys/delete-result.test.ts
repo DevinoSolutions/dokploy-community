@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
 		findMongoById: vi.fn(),
 		findRedisById: vi.fn(),
 		findLibsqlById: vi.fn(),
+		findRollbackById: vi.fn(),
+		removeRollbackById: vi.fn(),
 		findApplicationById: vi.fn(),
 		findComposeById: vi.fn(),
 	} as Record<string, ReturnType<typeof vi.fn>>,
@@ -192,35 +194,81 @@ describe("deletedServiceResult", () => {
 	});
 });
 
-describe("application.stop and application.start", () => {
-	it.each(["stop", "start"] as const)(
-		"%s does not echo the AWS keys of a linked registry",
-		async (procedure) => {
-			const row = {
-				...serviceRow("applicationId"),
-				applicationId: "svc-1",
+// start, stop and changeStatus need `deployment.create`, which does not include
+// reading the service (application.one withholds `password` and `refreshToken`
+// from such a caller). They answer with the id and the status just set.
+const STATUS_ROUTES = [
+	["application", "applicationId", "findApplicationById", "stop", "idle"],
+	["application", "applicationId", "findApplicationById", "start", "done"],
+	["postgres", "postgresId", "findPostgresById", "stop", "idle"],
+	["postgres", "postgresId", "findPostgresById", "start", "done"],
+	["postgres", "postgresId", "findPostgresById", "changeStatus", "error"],
+	["mysql", "mysqlId", "findMySqlById", "stop", "idle"],
+	["mysql", "mysqlId", "findMySqlById", "start", "done"],
+	["mysql", "mysqlId", "findMySqlById", "changeStatus", "error"],
+	["mariadb", "mariadbId", "findMariadbById", "stop", "idle"],
+	["mariadb", "mariadbId", "findMariadbById", "start", "done"],
+	["mariadb", "mariadbId", "findMariadbById", "changeStatus", "error"],
+	["mongo", "mongoId", "findMongoById", "stop", "idle"],
+	["mongo", "mongoId", "findMongoById", "start", "done"],
+	["mongo", "mongoId", "findMongoById", "changeStatus", "error"],
+	["redis", "redisId", "findRedisById", "stop", "idle"],
+	["redis", "redisId", "findRedisById", "start", "done"],
+	["redis", "redisId", "findRedisById", "changeStatus", "error"],
+	["libsql", "libsqlId", "findLibsqlById", "stop", "idle"],
+	["libsql", "libsqlId", "findLibsqlById", "start", "done"],
+	["libsql", "libsqlId", "findLibsqlById", "changeStatus", "error"],
+] as const;
+
+describe.each(STATUS_ROUTES)(
+	"%s.%s",
+	{ timeout: 60_000 },
+	(router, idKey, finder, procedure, status) => {
+		it(`answers with the id and the status ${status}, and nothing of the row`, async () => {
+			mocks.finders[finder]?.mockResolvedValue({
+				...serviceRow(idKey),
 				registry: {
 					registryId: "reg-1",
 					awsAccessKeyId: "SECRET-aws-key-id",
 					awsSecretAccessKey: "SECRET-aws-secret",
-					awsRegion: "us-east-1",
 				},
-			};
-			mocks.finders.findApplicationById?.mockResolvedValue(row);
-			const caller = await callerFor("application");
-
-			const result = (await caller[procedure]?.({
-				applicationId: "svc-1",
-			})) as typeof row;
-
-			expect(result.applicationId).toBe("svc-1");
-			expect(result.registry).toEqual({
-				registryId: "reg-1",
-				awsAccessKeyId: "",
-				awsSecretAccessKey: "",
-				awsRegion: "us-east-1",
 			});
-			expect(JSON.stringify(result)).not.toContain("SECRET-aws");
-		},
-	);
+			const caller = await callerFor(router);
+
+			const result = await caller[procedure]?.({
+				[idKey]: "svc-1",
+				applicationStatus: status,
+			});
+
+			expect(result).toEqual({ [idKey]: "svc-1", applicationStatus: status });
+		});
+	},
+);
+
+describe("rollback.delete", () => {
+	it("answers with the rollback id, not the stored snapshot of the application", async () => {
+		mocks.finders.findRollbackById?.mockResolvedValue({
+			rollbackId: "rb-1",
+			deployment: { applicationId: "svc-1" },
+		});
+		mocks.finders.removeRollbackById?.mockResolvedValue({
+			rollbackId: "rb-1",
+			image: "app:v1",
+			fullContext: {
+				env: "API_KEY=SECRET-env",
+				registry: {
+					password: "SECRET-reg-password",
+					awsSecretAccessKey: "SECRET-aws-secret",
+				},
+			},
+		});
+		const { rollbackRouter } = await import("@/server/api/routers/rollbacks");
+
+		const result = await rollbackRouter
+			.createCaller(ctx as never)
+			.delete({ rollbackId: "rb-1" });
+
+		expect(result).toEqual({ rollbackId: "rb-1" });
+		expect(mocks.finders.removeRollbackById).toHaveBeenCalledWith("rb-1");
+	});
 });
