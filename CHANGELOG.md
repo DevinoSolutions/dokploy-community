@@ -2,6 +2,12 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+**Security.**
+
+- Taking back the share of a GitHub connection now stops the watches other members bound to it. Before, those services kept polling GitHub and deploying with the owner's token (which can carry `repo` access to their private repositories) until someone removed the watches by hand. The check now runs on every poll and every private GHCR pull, so it holds however the share was changed. A stopped watch shows "Paused: ..." as its last error and resumes by itself when the connection is shared again or its owner saves the watch; nothing is deleted. The watch now records who saved it (migration 0236, additive): watches on a connection that was never shared are attributed to its owner, and watches on a shared connection have no recorded saver and need their owner to save them again, or to connect them again for a GitHub Actions connection, if the connection is later unshared.
+
 ### New in v0.31.0-community.6
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.5 keeps working. This release includes everything in v0.31.0-community.5.

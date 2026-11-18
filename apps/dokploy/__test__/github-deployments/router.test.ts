@@ -241,6 +241,8 @@ describe("watchSet and watchRemove need to be allowed to manage git providers AN
 				expect.objectContaining({
 					organizationId: "org-a",
 					postLogUrl: false,
+					// The saver claims the watch (T-13796).
+					createdByUserId: "user-1",
 				}),
 			);
 		},

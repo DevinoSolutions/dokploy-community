@@ -55,12 +55,17 @@ beforeAll(async () => {
 	const { statements, names } = enumSql(schema);
 	for (const statement of statements) await pg.exec(statement);
 	await pg.exec('CREATE TABLE "organization" ("id" text PRIMARY KEY)');
+	await pg.exec(
+		'CREATE TABLE "member" ("id" text PRIMARY KEY, "organization_id" text, "user_id" text, "role" text)',
+	);
 	await pg.exec(createTableSql(schema.deployments, names));
 	for (const file of [
 		"0227_deployment_live_github_run.sql",
 		"0228_github_deployment_watch.sql",
 		// A second run: the migration is guarded, a replay is a no-op.
 		"0228_github_deployment_watch.sql",
+		"0236_gha_watch_creator.sql",
+		"0236_gha_watch_creator.sql",
 	]) {
 		for (const statement of migrationStatements(file)) await pg.exec(statement);
 	}
@@ -73,7 +78,7 @@ afterAll(async () => {
 beforeEach(async () => {
 	if (!client) return;
 	await client.exec(
-		'TRUNCATE "deployment", "github_deployment_watch", "github_deployment_connection", "organization" CASCADE',
+		'TRUNCATE "deployment", "github_deployment_watch", "github_deployment_connection", "organization", "member" CASCADE',
 	);
 	await client.exec(
 		`INSERT INTO "organization" ("id") VALUES ('org-a'), ('org-b')`,
@@ -234,5 +239,157 @@ describe.skipIf(!ready)("findRecentOtherGithubDeployer", () => {
 			{ origin: "github-actions" },
 		);
 		expect(await find()).toBeNull();
+	});
+});
+
+const insertWatch = (
+	id: string,
+	connectionId: string,
+	creator: string | null,
+	service = `app-${id}`,
+) =>
+	client?.exec(
+		`INSERT INTO "github_deployment_watch" ("watchId","organizationId","serviceType","serviceId","connectionId","createdByUserId","owner","repo") VALUES ('${id}','org-a','application','${service}','${connectionId}',${creator ? `'${creator}'` : "NULL"},'o','r')`,
+	);
+
+const creatorOf = async (watchId: string) =>
+	(
+		await client?.query(
+			`SELECT "createdByUserId" AS c FROM github_deployment_watch WHERE "watchId" = '${watchId}'`,
+		)
+	)?.rows[0]?.c;
+
+describe.skipIf(!ready)("migration 0236 (who saved a watch, T-13796)", () => {
+	const rerun = async () => {
+		for (const statement of migrationStatements("0236_gha_watch_creator.sql")) {
+			await client?.exec(statement);
+		}
+	};
+
+	it("gives a watch on a connection that is not shared the connection's owner, and leaves the rest unknown", async () => {
+		await client?.exec(
+			'ALTER TABLE "github_deployment_watch" DROP COLUMN "createdByUserId"',
+		);
+		await insertConnection("private", "owner-1");
+		await insertConnection("shared", "owner-2", { shared: true });
+		await insertConnection("ownerless", null);
+		await client?.exec(
+			`INSERT INTO "github_deployment_watch" ("watchId","organizationId","serviceType","serviceId","connectionId","owner","repo") VALUES
+			('w-private','org-a','application','a1','private','o','r'),
+			('w-shared','org-a','application','a2','shared','o','r'),
+			('w-ownerless','org-a','application','a3','ownerless','o','r')`,
+		);
+		await rerun();
+		expect(await creatorOf("w-private")).toBe("owner-1");
+		expect(await creatorOf("w-shared")).toBeNull();
+		expect(await creatorOf("w-ownerless")).toBeNull();
+		// A replay is a no-op, and never overwrites a creator that was saved since.
+		await client?.exec(
+			`UPDATE "github_deployment_watch" SET "createdByUserId" = 'someone-else' WHERE "watchId" = 'w-private'`,
+		);
+		await rerun();
+		expect(await creatorOf("w-private")).toBe("someone-else");
+	});
+});
+
+describe.skipIf(!ready)("who a connection's token may serve", () => {
+	const watchOf = async (watchId: string) => {
+		const watch = await store.findGithubWatch("application", `app-${watchId}`);
+		if (!watch) throw new Error(`no watch ${watchId}`);
+		return watch;
+	};
+
+	it("serves the owner's own watch, and anyone's while the connection is shared", async () => {
+		await insertConnection("c1", "owner-1");
+		await insertWatch("w-own", "c1", "owner-1");
+		await insertWatch("w-other", "c1", "member-2");
+		expect(
+			(await store.checkGithubWatchAccess(await watchOf("w-own"))).allowed,
+		).toBe(true);
+		expect(
+			(await store.checkGithubWatchAccess(await watchOf("w-other"))).allowed,
+		).toBe(false);
+		await store.setGithubConnectionShared("c1", "org-a", true);
+		expect(
+			(await store.checkGithubWatchAccess(await watchOf("w-other"))).allowed,
+		).toBe(true);
+		// Taking the share back stops it again, and sharing again resumes it: no row is changed.
+		await store.setGithubConnectionShared("c1", "org-a", false);
+		expect(
+			(await store.checkGithubWatchAccess(await watchOf("w-other"))).allowed,
+		).toBe(false);
+	});
+
+	it("serves a watch an organization owner or admin saved, but not one whose saver left or is only a member", async () => {
+		await insertConnection("c1", "owner-1");
+		await client?.exec(
+			`INSERT INTO "member" ("id","organization_id","user_id","role") VALUES ('m1','org-a','admin-1','admin'),('m2','org-a','member-2','member'),('m3','org-b','admin-3','admin')`,
+		);
+		await insertWatch("w-admin", "c1", "admin-1");
+		await insertWatch("w-member", "c1", "member-2");
+		await insertWatch("w-gone", "c1", "left-4");
+		await insertWatch("w-otherorg", "c1", "admin-3");
+		const allowed = async (id: string) =>
+			(await store.checkGithubWatchAccess(await watchOf(id))).allowed;
+		expect(await allowed("w-admin")).toBe(true);
+		expect(await allowed("w-member")).toBe(false);
+		expect(await allowed("w-gone")).toBe(false);
+		// An admin of another organization is not an admin here.
+		expect(await allowed("w-otherorg")).toBe(false);
+	});
+
+	it("fails closed for a watch with no known saver on an unshared connection, with a message that names the fix", async () => {
+		await insertConnection("c1", "owner-1");
+		await insertWatch("w-null", "c1", null);
+		const access = await store.checkGithubWatchAccess(await watchOf("w-null"));
+		expect(access).toMatchObject({ allowed: false, reason: "creator-unknown" });
+		expect(access.allowed === false && access.message).toMatch(
+			/owner must save the watch again/,
+		);
+	});
+
+	it("lets the poll fail on its own when the connection is gone (it cannot be, the cascade removes the watch)", async () => {
+		expect(
+			await store.checkGithubWatchAccess({
+				organizationId: "org-a",
+				connectionId: "nope",
+				createdByUserId: "u1",
+			}),
+		).toEqual({ allowed: true });
+	});
+
+	it("also stops the registry login of a watch it does not serve", async () => {
+		await client?.exec(
+			`INSERT INTO "github_deployment_connection" ("connectionId","organizationId","createdByUserId","githubLogin","githubUserId","accessToken","scopes") VALUES ('c1','org-a','owner-1','login','gh-1','tok','repo_deployment,read:packages')`,
+		);
+		await insertWatch("w-other", "c1", "member-2", "app-x");
+		expect(await store.loadGhcrCredentials("application", "app-x")).toBeNull();
+		await store.setGithubConnectionShared("c1", "org-a", true);
+		expect(
+			await store.loadGhcrCredentials("application", "app-x"),
+		).toMatchObject({
+			username: "login",
+		});
+	});
+
+	it("records the saver on save, keeps it when the poller turns the watch on, and lets the owner claim it", async () => {
+		await insertConnection("c1", "owner-1", { shared: true });
+		const save = (user: string | null | undefined) =>
+			store.upsertGithubWatch({
+				organizationId: "org-a",
+				serviceType: "application",
+				serviceId: "app-1",
+				connectionId: "c1",
+				owner: "o",
+				repo: "r",
+				environment: "production",
+				enabled: true,
+				createdByUserId: user,
+			});
+		expect((await save("member-2")).createdByUserId).toBe("member-2");
+		// No saver given (the poller's own re-save): the recorded one stays.
+		expect((await save(undefined)).createdByUserId).toBe("member-2");
+		// The owner saving it claims it.
+		expect((await save("owner-1")).createdByUserId).toBe("owner-1");
 	});
 });

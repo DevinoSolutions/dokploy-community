@@ -209,6 +209,7 @@ const isUniqueViolation = (error: unknown): boolean => {
 
 const persistConnection = async (
 	organizationId: string,
+	userId: string,
 	plan: ConnectPlan,
 	input: ConnectServiceInput,
 	mirror: { registryProbeHost: string | null },
@@ -233,6 +234,8 @@ const persistConnection = async (
 				repo: input.repo,
 				environment: input.environment,
 				enabled: false,
+				// Who connected the service claims its watch (T-13796).
+				createdByUserId: userId,
 			},
 			tx,
 		);
@@ -436,7 +439,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 			const result = await connectGhaService(
 				input,
 				connectDeps(ctx, (plan, request, mirror) =>
-					persistConnection(organizationId, plan, request, mirror),
+					persistConnection(organizationId, ctx.user.id, plan, request, mirror),
 				),
 			);
 			if (!result.ok) {

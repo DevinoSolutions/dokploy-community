@@ -1,3 +1,4 @@
+import type { WatchAccess } from "@dokploy/server/services/github-deployments/connection-access";
 import {
 	describeError,
 	INFLIGHT_ROW_GRACE_MS,
@@ -64,6 +65,8 @@ const harness = (
 		token?: string | null;
 		/** The cursor was reset elsewhere: every compare-and-set patch is refused. */
 		cursorMoved?: boolean;
+		/** T-13796: the answer of the connection access rule (absent = no rule). */
+		access?: WatchAccess;
 	} = {},
 ) => {
 	const { fetch, calls } = scriptedFetch(fetchReplies);
@@ -80,6 +83,9 @@ const harness = (
 		markRevoked: async (id) => {
 			revoked.push(id);
 		},
+		...(options.access
+			? { checkWatchAccess: async () => options.access as WatchAccess }
+			: {}),
 		blockedUntil: (key) => blocks.get(key),
 		block: (key, until) => {
 			blocks.set(key, until);
@@ -676,5 +682,75 @@ describe("reporting the end of a Dokploy deployment", () => {
 			expect(call.url).not.toContain("gho_secret");
 		}
 		expect(JSON.stringify(log.mock.calls)).not.toContain("gho_secret");
+	});
+});
+
+describe("a watch whose connection stopped serving it (T-13796)", () => {
+	const blocked: WatchAccess = {
+		allowed: false,
+		reason: "not-shared",
+		message: "Paused: the connection is no longer shared.",
+	};
+
+	it("does not touch GitHub or the token, says why in lastError, and backs off", async () => {
+		const loadToken = vi.fn(async () => "gho_secret");
+		const h = harness([{ status: 200, body: [] }], { access: blocked });
+		h.deps.loadToken = loadToken;
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(loadToken).not.toHaveBeenCalled();
+		expect(h.calls).toHaveLength(0);
+		expect(h.started).toEqual([]);
+		expect(h.revoked).toEqual([]);
+		expect(h.patches).toEqual([
+			{ lastError: blocked.message, lastCheckedAt: new Date(NOW) },
+		]);
+		expect(h.blocks.get("watch:w1")).toBeGreaterThan(NOW);
+	});
+
+	it("does not report an in-flight deployment to GitHub with the owner's token", async () => {
+		const h = harness([{ status: 201, body: {} }], {
+			access: blocked,
+			inflight: { state: "done" },
+		});
+		await pollWatch(
+			baseWatch({
+				createdByUserId: "u2",
+				inflightDeploymentId: 12,
+				inflightStartedAt: new Date(NOW - 1000),
+			}),
+			h.deps,
+		);
+		expect(h.calls).toHaveLength(0);
+	});
+
+	it("works as before when access is allowed", async () => {
+		const h = harness([{ status: 304 }], { access: { allowed: true } });
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(h.calls).toHaveLength(1);
+		expect(h.patches[0]).not.toHaveProperty("lastError", blocked.message);
+	});
+
+	it("resumes by itself after the back-off once access is back, without a new watch", async () => {
+		let access: WatchAccess = blocked;
+		const h = harness([{ status: 304 }]);
+		h.deps.checkWatchAccess = async () => access;
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(h.calls).toHaveLength(0);
+		// Still inside the back-off: nothing, even if the connection is shared again.
+		access = { allowed: true };
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(h.calls).toHaveLength(0);
+		h.blocks.clear();
+		await pollWatch(baseWatch({ createdByUserId: "u2" }), h.deps);
+		expect(h.calls).toHaveLength(1);
+	});
+
+	it("does not tell GitHub the service is gone with a token the watch may not use", async () => {
+		const h = harness([{ status: 201, body: {} }], { access: blocked });
+		await reportServiceGone(
+			baseWatch({ createdByUserId: "u2", inflightDeploymentId: 12 }),
+			h.deps,
+		);
+		expect(h.calls).toHaveLength(0);
 	});
 });

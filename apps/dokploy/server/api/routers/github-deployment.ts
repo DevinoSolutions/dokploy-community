@@ -417,7 +417,14 @@ export const githubDeploymentRouter = createTRPCRouter({
 					}
 				}
 			}
-			const watch = await upsertGithubWatch({ ...watchInput, organizationId });
+			const watch = await upsertGithubWatch({
+				...watchInput,
+				organizationId,
+				// The saver claims the watch: the poller uses the connection's token for
+				// it only while the connection is shared or this user owns it (or is an
+				// owner or admin). T-13796.
+				createdByUserId: ctx.user.id,
+			});
 			// A watch that is off has no use for a login on any host.
 			if (!watch.enabled) {
 				await removeGhcrWatchConfigDirs([watch.watchId], organizationId);

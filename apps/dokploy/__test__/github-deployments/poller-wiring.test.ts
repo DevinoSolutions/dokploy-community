@@ -194,7 +194,11 @@ const stack = (overrides: Record<string, unknown> = {}) => ({
 	...overrides,
 });
 
-const deps = () => poller.createGithubDeploymentsPollDeps();
+// The access rule (T-13796) has its own tests; here every watch is served.
+const deps = () => ({
+	...poller.createGithubDeploymentsPollDeps(),
+	checkWatchAccess: async () => ({ allowed: true as const }),
+});
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -694,6 +698,34 @@ describe("the tick", () => {
 		await poller.runGithubDeploymentsTick({ ...deps(), fetch });
 		expect(calls).toHaveLength(0);
 		expect(mocks.deleteGithubWatch).toHaveBeenCalled();
+	});
+
+	it("hands the watch's saver to the access rule and polls nothing for a watch it refuses (T-13796)", async () => {
+		mocks.listEnabledGithubWatches.mockResolvedValue([
+			record({ createdByUserId: "member-2" }),
+		]);
+		mocks.appFindFirst.mockResolvedValue({ applicationId: "app-1" });
+		const checkWatchAccess = vi.fn(async () => ({
+			allowed: false as const,
+			reason: "not-shared" as const,
+			message: "Paused: not shared",
+		}));
+		const patchWatch = vi.fn(async () => {});
+		const { fetch, calls } = scriptedFetch([{ status: 200, json: [] }]);
+		await poller.runGithubDeploymentsTick({
+			...deps(),
+			fetch,
+			checkWatchAccess,
+			patchWatch,
+		});
+		expect(checkWatchAccess).toHaveBeenCalledWith(
+			expect.objectContaining({ watchId: "w1", createdByUserId: "member-2" }),
+		);
+		expect(calls).toHaveLength(0);
+		expect(patchWatch).toHaveBeenCalledWith(
+			"w1",
+			expect.objectContaining({ lastError: "Paused: not shared" }),
+		);
 	});
 
 	it("one watch failing does not end the tick for the watches after it", async () => {

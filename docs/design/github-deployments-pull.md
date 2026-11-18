@@ -135,6 +135,17 @@ flow its owner, and leaves the sharing switch as it was. A connection with no
 recorded owner (none exist today) belongs to nobody and is usable by owners and
 admins only.
 
+Binding is checked again at use time (T-13796). Every tick, and every private GHCR
+pull, asks `checkGithubWatchAccess` whether the connection's token may serve the
+watch: yes while the connection is shared; otherwise only when the watch's
+`createdByUserId` (the member who last saved it) is the connection's owner or a
+current owner or admin of the organization. A watch that is not served stops
+cleanly: nothing goes to GitHub, `lastError` says it is paused and why, it is looked
+at again after the usual error back-off, and it resumes by itself when the connection
+is shared again or its owner saves the watch (which claims it). A null
+`createdByUserId` (migration 0236 fills it for watches on connections that were
+never shared; the rest stay unknown) is served only while the connection is shared.
+
 ## 2. Watch per service
 
 New table `github_deployment_watch` (nothing is added to `application` or

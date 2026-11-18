@@ -1,4 +1,5 @@
 import { db } from "@dokploy/server/db";
+import { member } from "@dokploy/server/db/schema/account";
 import { deployments } from "@dokploy/server/db/schema/deployment";
 import {
 	type GithubWatchServiceType,
@@ -17,6 +18,7 @@ import {
 	not,
 	or,
 } from "drizzle-orm";
+import { evaluateWatchAccess, type WatchAccess } from "./connection-access";
 
 /**
  * Database access for the GitHub Deployments pull flow.
@@ -259,17 +261,26 @@ export const listEnabledGithubWatches = async () =>
  * cursor, so the next poll baselines again at the then-newest deployment and
  * the backlog that piled up meanwhile never runs.
  */
-export const upsertGithubWatch = async (input: {
-	organizationId: string;
-	serviceType: GithubWatchServiceType;
-	serviceId: string;
-	connectionId: string;
-	owner: string;
-	repo: string;
-	environment: string;
-	enabled: boolean;
-	postLogUrl?: boolean;
-}, executor: WatchExecutor = db) => {
+export const upsertGithubWatch = async (
+	input: {
+		organizationId: string;
+		serviceType: GithubWatchServiceType;
+		serviceId: string;
+		connectionId: string;
+		owner: string;
+		repo: string;
+		environment: string;
+		enabled: boolean;
+		postLogUrl?: boolean;
+		/**
+		 * The Dokploy user saving the watch (T-13796): the poller uses the
+		 * connection's token for it only while the connection is shared or this user
+		 * owns it. Omit to leave the saver as it is (the poller turning a watch on).
+		 */
+		createdByUserId?: string | null;
+	},
+	executor: WatchExecutor = db,
+) => {
 	const existing = await findGithubWatch(
 		input.serviceType,
 		input.serviceId,
@@ -304,6 +315,9 @@ export const upsertGithubWatch = async (input: {
 				repo: input.repo,
 				environment: input.environment,
 				enabled: input.enabled,
+				...(input.createdByUserId === undefined
+					? {}
+					: { createdByUserId: input.createdByUserId }),
 				...(input.postLogUrl === undefined
 					? {}
 					: { postLogUrl: input.postLogUrl }),
@@ -394,6 +408,41 @@ export const patchGithubWatch = async (
 	return true;
 };
 
+/**
+ * Whether the connection's token may be used for this watch right now (the
+ * rule is `evaluateWatchAccess`). Read on every tick and every pull, never
+ * cached, so unsharing takes effect at the next one. A connection that no
+ * longer exists is "allowed" here: the token lookup fails on its own, with its
+ * own message.
+ */
+export const checkGithubWatchAccess = async (watch: {
+	organizationId: string;
+	connectionId: string;
+	createdByUserId: string | null;
+}): Promise<WatchAccess> => {
+	const [connection] = await db
+		.select({
+			createdByUserId: githubDeploymentConnection.createdByUserId,
+			sharedWithOrganization: githubDeploymentConnection.sharedWithOrganization,
+		})
+		.from(githubDeploymentConnection)
+		.where(eq(githubDeploymentConnection.connectionId, watch.connectionId));
+	if (!connection) return { allowed: true };
+	return evaluateWatchAccess(connection, watch, async () => {
+		if (watch.createdByUserId === null) return false;
+		const [row] = await db
+			.select({ role: member.role })
+			.from(member)
+			.where(
+				and(
+					eq(member.userId, watch.createdByUserId),
+					eq(member.organizationId, watch.organizationId),
+				),
+			);
+		return row?.role === "owner" || row?.role === "admin";
+	});
+};
+
 const warnedNoPackagesScope = new Set<string>();
 /** Once per watch and process: a private GHCR pull that follows will fail, and this says why. */
 const warnNoPackagesScope = (watchId: string) => {
@@ -416,6 +465,8 @@ export const loadGhcrCredentials = async (
 ) => {
 	const watch = await findGithubWatch(serviceType, serviceId);
 	if (!watch || !watch.enabled) return null;
+	// An unshared connection does not serve another member's watch (T-13796).
+	if (!(await checkGithubWatchAccess(watch)).allowed) return null;
 	const [row] = await db
 		.select({
 			githubLogin: githubDeploymentConnection.githubLogin,
