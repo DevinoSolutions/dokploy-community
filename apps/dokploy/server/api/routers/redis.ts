@@ -33,6 +33,7 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -374,7 +375,7 @@ export const redisRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return redis;
+			return deletedServiceResult(redis, "redisId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesRedis)

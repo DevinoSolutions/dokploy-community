@@ -8,6 +8,7 @@ import {
 	isBackupFileInPrefixes,
 	isRelativeBackupFile,
 } from "@dokploy/server/db/validations/backup";
+import { DESTINATION_READ_COLUMNS } from "@dokploy/server/services/backup-read-view";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, or } from "drizzle-orm";
@@ -43,12 +44,9 @@ export const findBackupById = async (backupId: string) => {
 			mariadb: true,
 			mongo: true,
 			libsql: true,
-			destination: {
-				columns: {
-					accessKey: false,
-					secretAccessKey: false,
-				},
-			},
+			// An allowlist: the runners load the destination they use themselves, and
+			// nothing that reads this row needs its credentials.
+			destination: { columns: DESTINATION_READ_COLUMNS },
 			compose: true,
 		},
 	});
@@ -97,12 +95,9 @@ export const findBackupsByDbId = async (
 			mariadb: true,
 			mongo: true,
 			libsql: true,
-			destination: {
-				columns: {
-					accessKey: false,
-					secretAccessKey: false,
-				},
-			},
+			// An allowlist: the runners load the destination they use themselves, and
+			// nothing that reads this row needs its credentials.
+			destination: { columns: DESTINATION_READ_COLUMNS },
 		},
 	});
 	return result || [];

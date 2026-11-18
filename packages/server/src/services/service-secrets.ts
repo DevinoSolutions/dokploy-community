@@ -25,7 +25,7 @@ export const listEnvKeys = (source: string | null | undefined): string[] =>
 const BLANK = "";
 
 /** Columns on a service row whose value is a secret (or a credential to one). */
-const SECRET_ROW_FIELDS = [
+export const SECRET_ROW_FIELDS = [
 	"env",
 	"buildArgs",
 	"buildSecrets",
@@ -41,7 +41,7 @@ const SECRET_ROW_FIELDS = [
 ] as const;
 
 /** Credential columns that a nested provider/registry/destination row can carry. */
-const NESTED_SECRET_FIELDS = [
+export const NESTED_SECRET_FIELDS = [
 	"password",
 	"secret",
 	"accessToken",
@@ -52,11 +52,23 @@ const NESTED_SECRET_FIELDS = [
 	"githubClientSecret",
 	"githubPrivateKey",
 	"githubWebhookSecret",
+	// GitLab's webhook secret (`gitlab.webhookSecret`).
+	"webhookSecret",
 	"accessKey",
 	"secretAccessKey",
 	"encryptionKey",
 	"encryptionPassword2",
 	"privateKey",
+	// AWS ECR registry credentials (`registry`, `buildRegistry`, `rollbackRegistry`).
+	"awsAccessKeyId",
+	"awsSecretAccessKey",
+] as const;
+
+/** The three registries a service row can link; each can be an AWS ECR one. */
+const SERVICE_REGISTRY_RELATIONS = [
+	"registry",
+	"buildRegistry",
+	"rollbackRegistry",
 ] as const;
 
 type AnyRecord = Record<string, unknown>;
@@ -133,6 +145,61 @@ const redactEnvironment = (environment: unknown): unknown => {
 	};
 };
 
+/**
+ * The row with the AWS credentials of its linked registries blanked, for a
+ * service read that otherwise keeps its values (the dashboard's `application.one`
+ * and the mutations that echo the row). The finder has to load
+ * `awsSecretAccessKey`: the ECR login on the deploy path reads it from the
+ * relation. A client never needs it, and the registry router withholds it from
+ * everybody, so it is blanked here for every caller. The access key id is an
+ * identifier rather than a secret and stays for a caller who may edit the
+ * service (`keepAccessKeyId`). Strings become `""`, null stays null.
+ */
+export const redactRegistryAwsKeys = <T extends object>(
+	row: T,
+	options: { keepAccessKeyId: boolean },
+): T => {
+	const record = row as AnyRecord;
+	let next: AnyRecord | null = null;
+	for (const relation of SERVICE_REGISTRY_RELATIONS) {
+		if (!(relation in record)) continue;
+		next ??= { ...record };
+		next[relation] = blankFields(
+			record[relation],
+			options.keepAccessKeyId
+				? ["awsSecretAccessKey"]
+				: ["awsSecretAccessKey", "awsAccessKeyId"],
+		);
+	}
+	return (next ?? row) as T;
+};
+
+/**
+ * What a delete mutation answers: the id of the service and the project and
+ * environment it lived in, which the dashboard needs to go back to the
+ * environment page. Not the row: `find*ById` loads `env`, the webhook
+ * `refreshToken`, database passwords and a compose service's backup metadata,
+ * and the `delete` permission does not include reading any of them.
+ */
+export const deletedServiceResult = <
+	K extends string,
+	R extends Record<K, string> & {
+		environment: { environmentId: string; projectId: string };
+	},
+>(
+	row: R,
+	idKey: K,
+) =>
+	({
+		[idKey]: row[idKey],
+		environment: {
+			environmentId: row.environment.environmentId,
+			projectId: row.environment.projectId,
+		},
+	}) as Record<K, string> & {
+		environment: { environmentId: string; projectId: string };
+	};
+
 /** Marker added to a redacted row so a reader can tell blank from unset. */
 export interface SecretsRedacted {
 	secretsRedacted: true;
@@ -169,9 +236,7 @@ export const redactServiceSecrets = <T extends AnyRecord>(
 		"gitlab",
 		"bitbucket",
 		"gitea",
-		"registry",
-		"buildRegistry",
-		"rollbackRegistry",
+		...SERVICE_REGISTRY_RELATIONS,
 		"customGitSSHKey",
 	]) {
 		if (relation in next) {
@@ -510,7 +575,10 @@ export const scrubCommandFields = (node: unknown): unknown => {
 	for (const [key, value] of Object.entries(node)) {
 		const lower = key.toLowerCase();
 		let next: unknown;
-		if ((lower === "command" || lower === "args") && typeof value === "string") {
+		if (
+			(lower === "command" || lower === "args") &&
+			typeof value === "string"
+		) {
 			next = scrubCommandText(value);
 		} else if (
 			(lower === "command" || lower === "args") &&

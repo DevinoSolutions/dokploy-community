@@ -34,6 +34,7 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -382,7 +383,7 @@ export const mysqlRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return mongo;
+			return deletedServiceResult(mongo, "mysqlId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesMySql)

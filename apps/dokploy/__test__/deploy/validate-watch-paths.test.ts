@@ -3,7 +3,10 @@ import {
 	apiUpdateApplication,
 	apiUpdateCompose,
 } from "@dokploy/server/db/schema";
-import { watchPathsSaveProblems } from "@dokploy/server/utils/watch-paths/assert-watch-paths-saveable";
+import {
+	watchPathsSaveGuard,
+	watchPathsSaveProblems,
+} from "@dokploy/server/utils/watch-paths/assert-watch-paths-saveable";
 import {
 	isSafeWatchPath,
 	WATCH_PATH_MAX_LENGTH,
@@ -206,5 +209,37 @@ describe("watchPathsSaveProblems: refused patterns are saveable only when alread
 		expect(await watchPathsSaveProblems([...many, "x/**"], load(many))).toEqual(
 			["At most 100 watch paths are allowed"],
 		);
+	});
+});
+
+describe("watchPathsSaveGuard: one definition of the save rule for a kind of unit", () => {
+	const stored = ["src/**/*.{ts,tsx}", "!docs/**"];
+
+	it("loads the stored row of the unit by id, and only when the new list has a problem", async () => {
+		const find = vi.fn(async (_id: string) => ({ watchPaths: stored }));
+		const guard = watchPathsSaveGuard(find);
+
+		await guard("unit-1", ["apps/web/**"]);
+		expect(find).not.toHaveBeenCalled();
+
+		await guard("unit-1", [...stored]);
+		expect(find).toHaveBeenCalledTimes(1);
+		expect(find).toHaveBeenCalledWith("unit-1");
+	});
+
+	it("refuses a new bad pattern with a BAD_REQUEST that names it", async () => {
+		const guard = watchPathsSaveGuard(async () => ({ watchPaths: stored }));
+
+		await expect(guard("unit-1", [...stored, "+(*)"])).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: expect.stringMatching(/^Invalid watch path "\+\(\*\)"/),
+		});
+	});
+
+	it("saves nothing-to-save and an empty list", async () => {
+		const guard = watchPathsSaveGuard(async () => ({ watchPaths: null }));
+
+		await expect(guard("unit-1", undefined)).resolves.toBeUndefined();
+		await expect(guard("unit-1", [])).resolves.toBeUndefined();
 	});
 });

@@ -2,6 +2,23 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.31.0-community.7
+
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.6 keeps working. This release includes everything in v0.31.0-community.6.
+
+**Security.**
+
+- A service that uses an AWS ECR registry no longer hands that registry's secret access key to everyone who can read the service. Before, `application.one` returned the secret access key and the access key id of the registry, build registry and rollback registry in plain text to any user with read access to the application (the registry settings page never returned the secret). Now the secret access key is never returned, and the access key id only to users who may edit the service. `application.stop` and `application.start` no longer echo them either. Deploys are unchanged: they read the keys on the server.
+- Deleting a service (application, compose stack, Postgres, MySQL, MariaDB, MongoDB, Redis, libSQL) now answers with the service id and its project and environment ids instead of the whole row. The row held environment variables, the deploy webhook token, database passwords and a compose stack's backup credentials, and the delete permission does not include reading them.
+- Reading a backup or volume backup internally no longer loads the destination's encryption keys and rclone flags; the backup and restore jobs load the destination they use themselves, as before.
+- GitLab's webhook secret is now blanked wherever a service read is redacted.
+- A test now walks every column of the database schema and fails when a column that looks like a secret (password, token, secret, key, credential, webhook) is neither covered by the redaction lists nor reviewed and listed with a reason, so a column added by an upstream sync cannot reach a client unnoticed.
+
+**Fixed.**
+
+- A service whose stored watch paths contain a pattern that is no longer allowed deploys on every push, as before, but this is now visible: the warning is logged at most once an hour per list instead of on every webhook delivery, and the server names every affected application and compose stack in its log when it starts.
+- The check that refuses new unsafe watch paths when a Git source is saved is one shared helper instead of seven copies.
+
 ### New in v0.31.0-community.6
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.5 keeps working. This release includes everything in v0.31.0-community.5.

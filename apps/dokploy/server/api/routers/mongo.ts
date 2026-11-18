@@ -34,6 +34,7 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -387,7 +388,7 @@ export const mongoRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return mongo;
+			return deletedServiceResult(mongo, "mongoId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesMongo)

@@ -232,6 +232,7 @@ export * from "./utils/uptimely/read-cache";
 export * from "./utils/vault";
 export * from "./utils/volume-backups/index";
 export * from "./utils/watch-paths/normalize-changed-files";
+export * from "./utils/watch-paths/report-refused-watch-paths";
 export * from "./utils/watch-paths/should-deploy";
 export * from "./utils/watch-paths/validate-watch-paths";
 export * from "./utils/wildcard-restriction";

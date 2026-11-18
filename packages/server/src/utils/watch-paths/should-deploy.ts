@@ -19,6 +19,37 @@ export const WATCH_PATH_MATCH_OPTIONS = Object.freeze({
  */
 export const MAX_CHANGED_FILE_LENGTH = 4096;
 
+/** The refused-list warning repeats at most this often per distinct list. */
+export const REFUSED_LIST_WARN_INTERVAL_MS = 60 * 60 * 1000;
+const MAX_WARNED_LISTS = 200;
+const warnedAt = new Map<string, number>();
+
+/** Test hook: forget which lists have already been warned about. */
+export const resetRefusedWatchPathWarnings = () => warnedAt.clear();
+
+/**
+ * A webhook delivery calls `shouldDeploy` for every unit it matches, so a
+ * stored list that is always refused would log on every push. One line per
+ * distinct list per hour is enough to see it; `logUnitsWithRefusedWatchPaths`
+ * names the units that hold such a list when the server starts.
+ */
+const shouldWarnAboutRefusedList = (watchPaths: string[]): boolean => {
+	const key = JSON.stringify(watchPaths);
+	const now = Date.now();
+	const last = warnedAt.get(key);
+	if (last !== undefined && now - last < REFUSED_LIST_WARN_INTERVAL_MS) {
+		return false;
+	}
+	// Re-insert so the oldest entry is the least recently warned about.
+	warnedAt.delete(key);
+	warnedAt.set(key, now);
+	if (warnedAt.size > MAX_WARNED_LISTS) {
+		const oldest = warnedAt.keys().next().value;
+		if (oldest !== undefined) warnedAt.delete(oldest);
+	}
+	return true;
+};
+
 /**
  * Whether a push that changed `modifiedFiles` should deploy a unit watching
  * `watchPaths`.
@@ -41,19 +72,21 @@ export const shouldDeploy = (
 	if (!watchPaths || watchPaths?.length === 0) return true;
 	const refused = watchPaths.filter((path) => watchPathProblem(path) !== null);
 	if (refused.length > 0) {
-		console.warn(
-			`[watch-paths] ignoring the stored watch paths and deploying: ${refused.length} pattern(s) are not allowed (${refused
-				.slice(0, 3)
-				.map((path) => JSON.stringify(String(path).slice(0, 64)))
-				.join(", ")}: ${watchPathProblem(refused[0])})`,
-		);
+		if (shouldWarnAboutRefusedList(watchPaths)) {
+			console.warn(
+				`[watch-paths] ignoring the stored watch paths and deploying on every push: ${refused.length} pattern(s) are not allowed (${refused
+					.slice(0, 3)
+					.map((path) => JSON.stringify(String(path).slice(0, 64)))
+					.join(
+						", ",
+					)}: ${watchPathProblem(refused[0])}). Repeats at most once an hour per list; edit the watch paths of the unit that stores it.`,
+			);
+		}
 		return true;
 	}
 	const files = (modifiedFiles ?? []).filter(
 		(file): file is string =>
 			typeof file === "string" && file.length <= MAX_CHANGED_FILE_LENGTH,
 	);
-	return (
-		micromatch(files, watchPaths, WATCH_PATH_MATCH_OPTIONS).length > 0
-	);
+	return micromatch(files, watchPaths, WATCH_PATH_MATCH_OPTIONS).length > 0;
 };

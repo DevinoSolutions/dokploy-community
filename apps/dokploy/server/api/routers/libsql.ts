@@ -28,6 +28,7 @@ import {
 	checkServicePermissionAndAccess,
 } from "@dokploy/server/services/permission";
 import {
+	deletedServiceResult,
 	listEnvKeys,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -362,7 +363,7 @@ export const libsqlRouter = createTRPCRouter({
 				} catch (_) {}
 			}
 
-			return libsql;
+			return deletedServiceResult(libsql, "libsqlId");
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariablesLibsql)

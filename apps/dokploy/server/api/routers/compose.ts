@@ -84,6 +84,7 @@ import {
 } from "@dokploy/server/services/permission";
 
 import {
+	deletedServiceResult,
 	listEnvKeys,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
@@ -95,7 +96,7 @@ import {
 } from "@dokploy/server/templates/github";
 import { assertSafeComposePath } from "@dokploy/server/utils/compose-path";
 import { assertGitUrlSaveable } from "@dokploy/server/utils/providers/git-url";
-import { assertWatchPathsSaveable } from "@dokploy/server/utils/watch-paths/assert-watch-paths-saveable";
+import { watchPathsSaveGuard } from "@dokploy/server/utils/watch-paths/assert-watch-paths-saveable";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import _ from "lodash";
@@ -185,6 +186,12 @@ const resolveTemplateServerIp = async (
 		? "127.0.0.1"
 		: (await resolveHostIpForOrg(ctx.session.activeOrganizationId, serverId)) ||
 			"127.0.0.1";
+
+// picomatch GHSA-fc5q-39xc-vjpf: a pattern the validator refuses is saveable
+// only when it is already stored on the unit being saved.
+const assertComposeWatchPaths = watchPathsSaveGuard((id) =>
+	findComposeById(id),
+);
 
 export const composeRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -384,10 +391,7 @@ export const composeRouter = createTRPCRouter({
 			}
 			// Same rule for watch paths (picomatch GHSA-fc5q-39xc-vjpf): a pattern
 			// the validator refuses is saveable only when it is already stored.
-			await assertWatchPathsSaveable(
-				input.watchPaths,
-				async () => (await findComposeById(input.composeId)).watchPaths,
-			);
+			await assertComposeWatchPaths(input.composeId, input.watchPaths);
 
 			// Build server: the caller must be allowed to use the server (same check
 			// as applications), and the settings as a whole must be valid. Checked
@@ -614,7 +618,7 @@ export const composeRouter = createTRPCRouter({
 				resourceId: composeResult.composeId,
 				resourceName: composeResult.appName,
 			});
-			return composeResult;
+			return deletedServiceResult(composeResult, "composeId");
 		}),
 	cleanQueues: protectedProcedure
 		.input(
