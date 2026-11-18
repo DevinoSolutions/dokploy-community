@@ -145,6 +145,11 @@ at again after the usual error back-off, and it resumes by itself when the conne
 is shared again or its owner saves the watch (which claims it). A null
 `createdByUserId` (migration 0236 fills it for watches on connections that were
 never shared; the rest stay unknown) is served only while the connection is shared.
+The creator is recorded when the watch is created (or pointed at another connection); a later save by
+another member leaves it, and only the connection owner's own save claims a watch. `toggleShare`
+to unshared returns `pausedWatches`, the number of watches that stop being served, and the owner
+can serve them again with `takeOver` (their watches on services they can deploy, GitHub Actions
+ones included). `checkNow` and `deployAnyway` refuse a paused watch with its reason.
 
 ## 2. Watch per service
 

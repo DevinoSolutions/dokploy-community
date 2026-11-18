@@ -11,6 +11,7 @@ describe("GitHub Deployments MCP tools", () => {
 		"githubDeployment-completeConnect",
 		"githubDeployment-disconnect",
 		"githubDeployment-toggleShare",
+		"githubDeployment-takeOver",
 		"githubDeployment-watches",
 		"githubDeployment-watchOne",
 		"githubDeployment-watchSet",
@@ -39,6 +40,7 @@ describe("GitHub Deployments MCP tools", () => {
 			"githubDeployment-completeConnect",
 			"githubDeployment-disconnect",
 			"githubDeployment-toggleShare",
+			"githubDeployment-takeOver",
 			"githubDeployment-watchSet",
 			"githubDeployment-watchRemove",
 		]) {
