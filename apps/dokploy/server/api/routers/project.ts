@@ -27,6 +27,7 @@ import {
 	findLibsqlById,
 	findMariadbById,
 	findMongoById,
+	findMountsByApplicationId,
 	findMySqlById,
 	findPostgresById,
 	findProjectById,
@@ -38,6 +39,7 @@ import {
 	updateUser,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import type { ServiceType } from "@dokploy/server/db/schema/mount";
 import { copiedSourceType } from "@dokploy/server/services/gha-connect/provider";
 import {
 	addNewEnvironment,
@@ -53,6 +55,7 @@ import {
 	findProjectWildcardConfig,
 	serviceColumns,
 } from "@dokploy/server/services/project";
+import { isPrivilegedVolumeRole } from "@dokploy/server/utils/volume-backups/binding";
 import { normalizeWildcardBaseDomain } from "@dokploy/server/utils/wildcard-domain-base";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -64,6 +67,10 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import {
+	assertBindMountAllowed,
+	hasPermissionSettings,
+} from "@/server/api/utils/bind-mount";
 import {
 	apiCreateProject,
 	apiFindOneProject,
@@ -1178,6 +1185,20 @@ export const projectRouter = createTRPCRouter({
 			try {
 				await checkProjectAccess(ctx, "create");
 
+				const privilegedCaller = isPrivilegedVolumeRole(ctx.user.role);
+				let skippedBindMounts = 0;
+				const copyMounts = async (
+					mounts: Awaited<ReturnType<typeof findMountsByApplicationId>>,
+					serviceId: string,
+					serviceType: ServiceType,
+				) => {
+					for (const mount of mounts) {
+						if (mount.type === "bind" && !privilegedCaller) continue;
+						const { mountId, ...rest } = mount;
+						await createMount({ ...rest, serviceId, serviceType });
+					}
+				};
+
 				// Every service to clone must belong to the caller's organization,
 				// whichever project it is copied into: its row, mounts and domains
 				// are copied verbatim. Checked before anything is created.
@@ -1190,6 +1211,26 @@ export const projectRouter = createTRPCRouter({
 						await checkServicePermissionAndAccess(ctx, selected.id, {
 							service: ["read"],
 						});
+						// The copy keeps the bind mounts of the source. They are an owner and
+						// admin capability: a member's copy gets none, and an owner or admin's
+						// copy keeps only what the bind mount policy allows. Decided here, so
+						// a refusal leaves no project or service behind.
+						const binds = (
+							await findMountsByApplicationId(selected.id, selected.type)
+						).filter((mount) => mount.type === "bind");
+						if (!privilegedCaller) {
+							skippedBindMounts += binds.length;
+						} else {
+							for (const bind of binds) {
+								if (!bind.hostPath) continue;
+								await assertBindMountAllowed(ctx, {
+									serviceType: selected.type,
+									serviceId: selected.id,
+									hostPath: bind.hostPath,
+									withPermissions: hasPermissionSettings(bind),
+								});
+							}
+						}
 						// The copy keeps the registry, git provider and SSH key ids of the
 						// source row: one of another organization is refused, not copied.
 						if (selected.type === "application") {
@@ -1309,14 +1350,11 @@ export const projectRouter = createTRPCRouter({
 									});
 								}
 
-								for (const mount of mounts) {
-									const { mountId, ...rest } = mount;
-									await createMount({
-										...rest,
-										serviceId: newApplication.applicationId,
-										serviceType: "application",
-									});
-								}
+								await copyMounts(
+									mounts,
+									newApplication.applicationId,
+									"application",
+								);
 
 								for (const redirect of redirects) {
 									const { redirectId, ...rest } = redirect;
@@ -1377,14 +1415,7 @@ export const projectRouter = createTRPCRouter({
 									environmentId: targetProject?.environmentId || "",
 								});
 
-								for (const mount of mounts) {
-									const { mountId, ...rest } = mount;
-									await createMount({
-										...rest,
-										serviceId: newCompose.composeId,
-										serviceType: "compose",
-									});
-								}
+								await copyMounts(mounts, newCompose.composeId, "compose");
 
 								for (const domain of domains) {
 									const { domainId, ...rest } = domain;
@@ -1415,14 +1446,7 @@ export const projectRouter = createTRPCRouter({
 									environmentId: targetProject?.environmentId || "",
 								});
 
-								for (const mount of mounts) {
-									const { mountId, ...rest } = mount;
-									await createMount({
-										...rest,
-										serviceId: newLibsql.libsqlId,
-										serviceType: "libsql",
-									});
-								}
+								await copyMounts(mounts, newLibsql.libsqlId, "libsql");
 
 								break;
 							}
@@ -1444,14 +1468,7 @@ export const projectRouter = createTRPCRouter({
 									environmentId: targetProject?.environmentId || "",
 								});
 
-								for (const mount of mounts) {
-									const { mountId, ...rest } = mount;
-									await createMount({
-										...rest,
-										serviceId: newMariadb.mariadbId,
-										serviceType: "mariadb",
-									});
-								}
+								await copyMounts(mounts, newMariadb.mariadbId, "mariadb");
 
 								for (const backup of backups) {
 									const { backupId, appName: _appName, ...rest } = backup;
@@ -1480,14 +1497,7 @@ export const projectRouter = createTRPCRouter({
 									environmentId: targetProject?.environmentId || "",
 								});
 
-								for (const mount of mounts) {
-									const { mountId, ...rest } = mount;
-									await createMount({
-										...rest,
-										serviceId: newMongo.mongoId,
-										serviceType: "mongo",
-									});
-								}
+								await copyMounts(mounts, newMongo.mongoId, "mongo");
 
 								for (const backup of backups) {
 									const { backupId, appName: _appName, ...rest } = backup;
@@ -1516,14 +1526,7 @@ export const projectRouter = createTRPCRouter({
 									environmentId: targetProject?.environmentId || "",
 								});
 
-								for (const mount of mounts) {
-									const { mountId, ...rest } = mount;
-									await createMount({
-										...rest,
-										serviceId: newMysql.mysqlId,
-										serviceType: "mysql",
-									});
-								}
+								await copyMounts(mounts, newMysql.mysqlId, "mysql");
 
 								for (const backup of backups) {
 									const { backupId, appName: _appName, ...rest } = backup;
@@ -1552,14 +1555,7 @@ export const projectRouter = createTRPCRouter({
 									environmentId: targetProject?.environmentId || "",
 								});
 
-								for (const mount of mounts) {
-									const { mountId, ...rest } = mount;
-									await createMount({
-										...rest,
-										serviceId: newPostgres.postgresId,
-										serviceType: "postgres",
-									});
-								}
+								await copyMounts(mounts, newPostgres.postgresId, "postgres");
 
 								for (const backup of backups) {
 									const { backupId, ...rest } = backup;
@@ -1588,14 +1584,7 @@ export const projectRouter = createTRPCRouter({
 									environmentId: targetProject?.environmentId || "",
 								});
 
-								for (const mount of mounts) {
-									const { mountId, ...rest } = mount;
-									await createMount({
-										...rest,
-										serviceId: newRedis.redisId,
-										serviceType: "redis",
-									});
-								}
+								await copyMounts(mounts, newRedis.redisId, "redis");
 
 								break;
 							}
@@ -1621,9 +1610,13 @@ export const projectRouter = createTRPCRouter({
 					resourceType: "project",
 					resourceId: targetProject?.projectId || "",
 					resourceName: input.name,
-					metadata: { duplicatedFrom: input.sourceEnvironmentId },
+					metadata: {
+						duplicatedFrom: input.sourceEnvironmentId,
+						skippedBindMounts,
+					},
 				});
-				return targetProject;
+				// A member's copy has no bind mounts: say how many were left out.
+				return { ...targetProject, skippedBindMounts };
 			} catch (error) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",

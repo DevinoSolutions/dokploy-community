@@ -242,17 +242,44 @@ describe("creating a bind mount as an owner or an admin", () => {
 		async (role) => {
 			for (const hostPath of [
 				"/",
-				"//",
 				"/etc",
 				"/var/run/docker.sock",
 				"/home",
-				"/srv/../etc",
+				"/home/deploy/.ssh",
+				"/var/log",
 				paths(true).BASE_PATH,
 			]) {
 				await expect(
 					as(role).create(createInput({ hostPath, mode: "777" })),
 				).rejects.toMatchObject({ code: "FORBIDDEN" });
 			}
+			expect(mocks.createMount).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["owner", "admin"])(
+		"answers a bad request for permissions on a path that is not canonical for the %s",
+		async (role) => {
+			for (const hostPath of [
+				"//",
+				"/srv/../etc",
+				"/srv/data/",
+				"/srv/a/./b",
+			]) {
+				await expect(
+					as(role).create(createInput({ hostPath, mode: "777" })),
+				).rejects.toMatchObject({ code: "BAD_REQUEST" });
+			}
+			expect(mocks.createMount).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["owner", "admin", "member"])(
+		"answers a bad request for a relative host path for the %s",
+		async (role) => {
+			await expect(
+				as(role).create(createInput({ hostPath: "data/relative" })),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
 			expect(mocks.createMount).not.toHaveBeenCalled();
 		},
 	);
@@ -268,6 +295,17 @@ describe("creating a bind mount as an owner or an admin", () => {
 			code: "FORBIDDEN",
 			message: expect.stringMatching(/owns this Dokploy instance/i),
 		});
+		expect(mocks.createMount).not.toHaveBeenCalled();
+	});
+
+	it("keeps that admin off the service's own directories on the Dokploy host", async () => {
+		mocks.isRootOrganization.mockResolvedValue(false);
+		for (const finder of Object.values(SERVICE_FINDERS)) {
+			finder.mockResolvedValue(service("app-one-x", null));
+		}
+		await expect(
+			as("admin").create(createInput({ hostPath: `${ownDir}/files` })),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
 		expect(mocks.createMount).not.toHaveBeenCalled();
 	});
 
@@ -378,6 +416,35 @@ describe("updating a bind mount as a member", () => {
 	});
 });
 
+describe("updating a mount without naming its service type", () => {
+	it.each(SERVICE_TYPES)(
+		"takes the %s service type from the stored row",
+		async (serviceType) => {
+			mocks.findMountById.mockResolvedValue(
+				storedBind({
+					serviceType,
+					applicationId: serviceType === "application" ? "svc-1" : null,
+					[`${serviceType}Id`]: "svc-1",
+				}),
+			);
+			await as("owner").update({ mountId: "mount-1", mountPath: "/other" });
+			expect(mocks.updateMount).toHaveBeenCalledTimes(1);
+			expect(mocks.updateMount.mock.calls[0]?.[1].serviceType).toBeUndefined();
+		},
+	);
+
+	it("still refuses to move a mount to another service type", async () => {
+		await expect(
+			as("owner").update({
+				mountId: "mount-1",
+				mountPath: "/other",
+				serviceType: "postgres",
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.updateMount).not.toHaveBeenCalled();
+	});
+});
+
 describe("updating a bind mount as an owner or an admin", () => {
 	it.each(["owner", "admin"])(
 		"lets the %s change the host path to any host path",
@@ -397,8 +464,11 @@ describe("updating a bind mount as an owner or an admin", () => {
 				as(role).update({ mountId: "mount-1", hostPath: "/etc", mode: "777" }),
 			).rejects.toMatchObject({ code: "FORBIDDEN" });
 			await expect(
-				as(role).update({ mountId: "mount-1", hostPath: "//", uid: 0 }),
+				as(role).update({ mountId: "mount-1", hostPath: "/", uid: 0 }),
 			).rejects.toMatchObject({ code: "FORBIDDEN" });
+			await expect(
+				as(role).update({ mountId: "mount-1", hostPath: "//", uid: 0 }),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
 			expect(mocks.updateMount).not.toHaveBeenCalled();
 		},
 	);

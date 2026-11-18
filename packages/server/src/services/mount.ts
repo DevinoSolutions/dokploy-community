@@ -38,7 +38,8 @@ const hasPermissionSettings = (m: Partial<Mount>) =>
 	!!m.mode;
 
 // A bind mount's host path is raw host territory: the recursive chown/chmod
-// never runs on a system or Dokploy directory, a socket or an unreadable path.
+// never runs on a system or Dokploy directory, a socket, a path with `..` or a
+// trailing slash, or a path that is not absolute.
 const assertSafePermissionTarget = (m: Partial<Mount>) => {
 	if (m.type !== "bind" || !m.hostPath || !hasPermissionSettings(m)) return;
 	const reason = getUnsafePermissionTargetReason(m.hostPath);
@@ -121,19 +122,26 @@ export const applyMountPermissions = async (mountId: string) => {
 		}
 	};
 
-	// Only a directory or a regular file, and never a symlink: the target
-	// cannot be swapped for a socket, a device or a link to another path.
-	const buildPermissionCommand = (target: string) => {
+	// Only a directory or a regular file, never a symlink: the target cannot be
+	// swapped for a socket, a device or a link to another path. A bind mount's
+	// path must also be its own real path, so no component of it is a link, and
+	// the recursion never follows one (-h -P; `--` ends the options).
+	const buildPermissionCommand = (target: string, realPathOnly = false) => {
 		const escapedTarget = shEscape(target);
-		return `if { [ -d ${escapedTarget} ] || [ -f ${escapedTarget} ]; } && [ ! -L ${escapedTarget} ]; then ${haveChown ? `chown -R ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R ${mount.mode} ${escapedTarget};` : ""} fi`;
+		const realPath = realPathOnly
+			? ` && [ "$(realpath -- ${escapedTarget})" = ${escapedTarget} ]`
+			: "";
+		return `if { [ -d ${escapedTarget} ] || [ -f ${escapedTarget} ]; } && [ ! -L ${escapedTarget} ]${realPath}; then ${haveChown ? `chown -h -R -P -- ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R -- ${mount.mode} ${escapedTarget};` : ""} fi`;
 	};
 
 	if (mount.type === "bind") {
 		const target = mount.hostPath;
 		if (!target) return;
 		assertValidTargetPath(target, "hostPath");
+		// The path is canonical here, so the value that was checked is the value
+		// the command gets
 		assertSafePermissionTarget(mount);
-		await run(buildPermissionCommand(target));
+		await run(buildPermissionCommand(target, true));
 		return;
 	}
 
@@ -355,18 +363,32 @@ export const updateMount = async (
 			message: `Invalid file path: ${mountData.filePath}`,
 		});
 	}
-	// The mount as it will be saved, checked before anything is written
+	// A bind mount saved earlier is not checked again unless the update changes
+	// its type, host path or permission settings: it keeps deploying and stays
+	// editable for its other fields.
 	const current = await findMountById(mountId);
-	const pick = <K extends "type" | "hostPath" | "uid" | "gid" | "mode">(
-		key: K,
-	) => (mountData[key] === undefined ? current[key] : mountData[key]);
-	assertSafePermissionTarget({
-		type: pick("type"),
-		hostPath: pick("hostPath"),
-		uid: pick("uid"),
-		gid: pick("gid"),
-		mode: pick("mode"),
-	});
+	const empty = (value: unknown) =>
+		value === undefined || value === null || value === "" ? null : value;
+	const permissionsChanged = (
+		["type", "hostPath", "uid", "gid", "mode"] as const
+	).some(
+		(key) =>
+			mountData[key] !== undefined &&
+			empty(mountData[key]) !== empty(current[key]),
+	);
+	if (permissionsChanged) {
+		// The mount as it will be saved, checked before anything is written
+		const pick = <K extends "type" | "hostPath" | "uid" | "gid" | "mode">(
+			key: K,
+		) => (mountData[key] === undefined ? current[key] : mountData[key]);
+		assertSafePermissionTarget({
+			type: pick("type"),
+			hostPath: pick("hostPath"),
+			uid: pick("uid"),
+			gid: pick("gid"),
+			mode: pick("mode"),
+		});
+	}
 	const mount = await db.transaction(async (tx) => {
 		const mount = await tx
 			.update(mounts)
@@ -391,7 +413,7 @@ export const updateMount = async (
 		await updateFileMount(mountId);
 	}
 
-	if (hasOwnership(mount)) {
+	if (hasOwnership(mount) && (mount.type !== "bind" || permissionsChanged)) {
 		await applyMountPermissions(mountId);
 	}
 	return mount;

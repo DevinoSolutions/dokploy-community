@@ -4,14 +4,16 @@ import { paths } from "@dokploy/server/constants";
 // A bind mount hands a path of the Docker host to a container, and its
 // uid/gid/mode make Dokploy run a recursive chown/chmod on that path as the
 // Dokploy process. Both reach the whole host, so they are a capability of the
-// owner and the admins (a member's container could plant a symlink in its own
-// service directory and bind that, so a member gets no bind mount at all), and
-// the permission change never runs on a path the host cannot afford to have
-// rewritten.
+// owner and the admins (a container can plant a symlink in its own service
+// directory and bind that, so there is no directory a member or a tenant admin
+// may bind on the Dokploy host), and the permission change never runs on a
+// path the host cannot afford to have rewritten.
 //
-// Every decision is made on the normalized path (`//`, `/./`, `/../` and a
-// trailing slash resolved), and a path that cannot be normalized to an
-// absolute one is refused rather than guessed.
+// A path that is not absolute is refused rather than guessed. The permission
+// change needs the path in its canonical form (no `//`, `/./`, `/../` or
+// trailing slash): the value that is checked is then the very value the shell
+// command gets, and `link/..` cannot mean one thing to the check and another
+// to the kernel.
 
 export const normalizeHostPath = (hostPath: string): string | null => {
 	if (typeof hostPath !== "string" || hostPath.includes("\0")) {
@@ -23,6 +25,11 @@ export const normalizeHostPath = (hostPath: string): string | null => {
 	const normalized = posix.normalize(hostPath);
 	return normalized.length > 1 ? normalized.replace(/\/+$/, "") : "/";
 };
+
+// The path as it is when it has no empty, `.` or `..` segment and no trailing
+// slash.
+export const isCanonicalHostPath = (hostPath: string): boolean =>
+	normalizeHostPath(hostPath) === hostPath;
 
 const isWithin = (target: string, root: string) =>
 	target === root || target.startsWith(`${root}/`);
@@ -44,6 +51,13 @@ const SYSTEM_TREES = [
 	"/run",
 	"/var/run",
 	"/var/lib/docker",
+	"/var/lib/containerd",
+	"/var/lib/kubelet",
+	"/var/lib/dpkg",
+	"/var/log",
+	"/var/spool",
+	"/snap",
+	"/lost+found",
 	"/root",
 ];
 
@@ -83,6 +97,12 @@ export const getUnsafePermissionTargetReason = (
 	if (target === null) {
 		return "the host path is not an absolute path";
 	}
+	if (target !== hostPath) {
+		return "the host path is not in its canonical form (no //, /./, /../ or trailing slash)";
+	}
+	if (target.split("/").includes(".ssh")) {
+		return "the host path holds SSH keys";
+	}
 	if (SOCKET_NAME.test(target)) {
 		return "the host path is a socket";
 	}
@@ -102,33 +122,12 @@ export const getUnsafePermissionTargetReason = (
 	return null;
 };
 
-// The directories Dokploy manages for one service on the host it runs on:
-// applications/<appName> (applications and databases) and compose/<appName>.
-export const isServiceOwnHostPath = (
-	hostPath: string,
-	appName: string,
-	serverId?: string | null,
-): boolean => {
-	const target = normalizeHostPath(hostPath);
-	if (target === null || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(appName)) {
-		return false;
-	}
-	const { APPLICATIONS_PATH, COMPOSE_PATH } = paths(!!serverId);
-	return [APPLICATIONS_PATH, COMPOSE_PATH].some((root) =>
-		isWithin(target, `${root}/${appName}`),
-	);
-};
-
 export type BindMountDecision =
 	| { ok: true; hostPath: string }
-	| { ok: false; message: string };
+	| { ok: false; code: "BAD_REQUEST" | "FORBIDDEN"; message: string };
 
 type BindMountRequest = {
 	hostPath: string;
-	// Dokploy name of the service the mount belongs to, and the server it runs
-	// on (null or undefined is the Dokploy host itself).
-	appName: string;
-	serverId?: string | null;
 	// The caller is an organization owner or admin.
 	privilegedRole: boolean;
 	// The caller's organization may reach the host the service runs on: always
@@ -150,32 +149,34 @@ export const evaluateBindMountHostPath = (
 ): BindMountDecision => {
 	const hostPath = normalizeHostPath(request.hostPath);
 	if (hostPath === null) {
-		return { ok: false, message: NOT_ABSOLUTE };
+		return { ok: false, code: "BAD_REQUEST", message: NOT_ABSOLUTE };
 	}
 	if (!request.privilegedRole) {
-		return { ok: false, message: MEMBER_REFUSAL };
-	}
-	if (isServiceOwnHostPath(hostPath, request.appName, request.serverId)) {
-		return { ok: true, hostPath };
+		return { ok: false, code: "FORBIDDEN", message: MEMBER_REFUSAL };
 	}
 	if (!request.hostReach) {
-		return { ok: false, message: HOST_REFUSAL };
+		return { ok: false, code: "FORBIDDEN", message: HOST_REFUSAL };
 	}
 	return { ok: true, hostPath };
 };
 
 // Whether the uid/gid/mode of a bind mount may be applied to the host path.
-// Dangerous paths are refused for everyone; beyond that the caller needs the
-// same standing as for binding the path.
+// The caller needs the same standing as for binding it, and the path must be
+// canonical and not a dangerous one, whoever the caller is.
 export const evaluateBindMountPermissions = (
 	request: BindMountRequest,
 ): BindMountDecision => {
+	const decision = evaluateBindMountHostPath(request);
+	if (!decision.ok) {
+		return decision;
+	}
 	const reason = getUnsafePermissionTargetReason(request.hostPath);
 	if (reason !== null) {
 		return {
 			ok: false,
+			code: isCanonicalHostPath(request.hostPath) ? "FORBIDDEN" : "BAD_REQUEST",
 			message: `Ownership and permissions are not applied to this host path: ${reason}.`,
 		};
 	}
-	return evaluateBindMountHostPath(request);
+	return decision;
 };

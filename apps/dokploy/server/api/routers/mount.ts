@@ -2,15 +2,8 @@ import {
 	createMount,
 	deleteMount,
 	findApplicationById,
-	findComposeById,
-	findLibsqlById,
-	findMariadbById,
-	findMongoById,
 	findMountById,
 	findMountsByApplicationId,
-	findMySqlById,
-	findPostgresById,
-	findRedisById,
 	getServiceContainer,
 	readFileMountContent,
 	updateMount,
@@ -20,15 +13,14 @@ import {
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 } from "@dokploy/server/services/permission";
-import {
-	evaluateBindMountHostPath,
-	evaluateBindMountPermissions,
-} from "@dokploy/server/utils/docker/bind-mount-policy";
-import { isPrivilegedVolumeRole } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
-import { canAccessLocalHost } from "@/server/api/utils/local-host-access";
+import {
+	assertBindMountAllowed,
+	getServiceHost,
+	hasPermissionSettings,
+} from "@/server/api/utils/bind-mount";
 import { assertVolumeNameForService } from "@/server/api/utils/volume-binding";
 import {
 	apiCreateMount,
@@ -38,46 +30,6 @@ import {
 	apiUpdateMount,
 } from "@/server/db/schema";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
-
-async function getServiceHost(
-	serviceId: string,
-	serviceType: ServiceType,
-): Promise<{
-	appName: string;
-	serverId: string | null;
-	organizationId: string | null;
-} | null> {
-	const service = await (async () => {
-		switch (serviceType) {
-			case "application":
-				return findApplicationById(serviceId);
-			case "postgres":
-				return findPostgresById(serviceId);
-			case "mariadb":
-				return findMariadbById(serviceId);
-			case "mongo":
-				return findMongoById(serviceId);
-			case "mysql":
-				return findMySqlById(serviceId);
-			case "redis":
-				return findRedisById(serviceId);
-			case "compose":
-				return findComposeById(serviceId);
-			case "libsql":
-				return findLibsqlById(serviceId);
-			default:
-				return null;
-		}
-	})();
-	if (!service) {
-		return null;
-	}
-	return {
-		appName: service.appName,
-		serverId: service.serverId ?? null,
-		organizationId: service.environment?.project?.organizationId ?? null,
-	};
-}
 
 async function getServiceOrganizationId(
 	serviceId: string,
@@ -92,61 +44,10 @@ type PermissionSettings = {
 	mode?: string | null;
 };
 
-const hasPermissionSettings = (m: PermissionSettings) =>
-	(m.uid !== undefined && m.uid !== null) ||
-	(m.gid !== undefined && m.gid !== null) ||
-	!!m.mode;
-
 const samePermissionSettings = (a: PermissionSettings, b: PermissionSettings) =>
 	(a.uid ?? null) === (b.uid ?? null) &&
 	(a.gid ?? null) === (b.gid ?? null) &&
 	(a.mode || null) === (b.mode || null);
-
-// A bind mount hands a host path to the container, and its uid/gid/mode make
-// Dokploy run chown/chmod -R on that path. Members get no bind mounts, not
-// even inside the service's own directories (a container can plant a symlink
-// there); the host is for owners and admins (of the organization that owns the
-// host, when the service runs on it).
-async function assertBindMountAllowed(
-	ctx: {
-		user: { role?: string | null };
-		session: { activeOrganizationId?: string | null };
-	},
-	{
-		serviceId,
-		serviceType,
-		hostPath,
-		withPermissions,
-	}: {
-		serviceId: string;
-		serviceType: ServiceType;
-		hostPath: string;
-		withPermissions: boolean;
-	},
-) {
-	const service = await getServiceHost(serviceId, serviceType);
-	if (!service) {
-		throw new TRPCError({ code: "NOT_FOUND", message: "Service not found" });
-	}
-	const privilegedRole = isPrivilegedVolumeRole(ctx.user.role);
-	const decision = (
-		withPermissions ? evaluateBindMountPermissions : evaluateBindMountHostPath
-	)({
-		hostPath,
-		appName: service.appName,
-		serverId: service.serverId,
-		privilegedRole,
-		hostReach:
-			privilegedRole &&
-			(await canAccessLocalHost(
-				service.serverId ?? undefined,
-				ctx.session.activeOrganizationId,
-			)),
-	});
-	if (!decision.ok) {
-		throw new TRPCError({ code: "FORBIDDEN", message: decision.message });
-	}
-}
 
 const MOUNT_SERVICE_KEYS = [
 	"applicationId",
