@@ -45,7 +45,6 @@
 		"@types/react-dom": "18.3.0"
 	},
 	"auditIgnoreExpiry": {
-		"GHSA-vfj7-8cjw-p6xm": "expires=2026-12-01 | braces only reached via micromatch in should-deploy.ts, which now runs with nobrace and validated patterns (micromatch() itself never calls braces; a pattern with { or } is refused on save unless already stored, and a stored one makes the whole list ignored at deploy); checked `pnpm why braces --prod` (micromatch via packages/server, plus the shadcn CLI's fast-glob, no request data), and that GitHub withdrew this advisory on 2026-10-23 and the npm bulk advisory endpoint no longer returns it for braces 3.0.3 (no patched release exists); drop when braces ships a fix",
 		"GHSA-fc5q-39xc-vjpf": "expires=2026-12-01 | runtime watchPaths now validated and matched with extglob/brace parsing disabled (see should-deploy.ts); checked that packages/server/src/utils/watch-paths/should-deploy.ts is the only source file importing a glob library (micromatch/picomatch/minimatch/glob/fast-glob/globby/tinyglobby/anymatch/chokidar), that `pnpm why picomatch --prod` reaches picomatch only through that micromatch and the shadcn CLI (dotenvx, fast-glob; no request data), and that every pattern the validator allows matches a 4,096-character path in under 100 ms; drop when picomatch ships a fix (micromatch/picomatch#194)"
 	},
 	"pnpm": {
@@ -108,7 +107,6 @@
 		},
 		"auditConfig": {
 			"ignoreGhsas": [
-				"GHSA-vfj7-8cjw-p6xm",
 				"GHSA-fc5q-39xc-vjpf"
 			]
 		},

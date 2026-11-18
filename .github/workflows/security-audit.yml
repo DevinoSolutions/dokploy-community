@@ -16,9 +16,9 @@
 #   dated audit mutes" step fails this job once the date passes (or when the entry is
 #   missing a reason, malformed or more than 30 days out). Remove the ignore
 #   and raise picomatch once a fixed release is out (micromatch/picomatch#194).
-# - GHSA-vfj7-8cjw-p6xm (braces, deep brace nesting): no patched release, only
-#   reached through the same micromatch, which now runs with nobrace; dated the
-#   same way. Every ignore needs an auditIgnoreExpiry entry.
+# GHSA-vfj7-8cjw-p6xm (braces) is no longer ignored: GitHub withdrew it on
+# 2026-10-23 and the npm advisory feed no longer reports it.
+# Every ignore needs an auditIgnoreExpiry entry; an undated one fails the job.
 name: Security audit
 
 on:
