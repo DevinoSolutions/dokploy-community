@@ -95,9 +95,11 @@ export interface PollDeps {
 	markRevoked: (connectionId: string) => Promise<void>;
 	/**
 	 * May the connection's token be used for this watch (T-13796: an unshared
-	 * connection serves only its owner's watches)? Absent = no such rule.
+	 * connection serves only its owner's watches)? Required: a poll without it
+	 * fails closed (`guardWatchAccess`), so a dropped wiring line pauses every
+	 * watch instead of silently serving them all.
 	 */
-	checkWatchAccess?: (watch: WatchRow) => Promise<WatchAccess>;
+	checkWatchAccess: (watch: WatchRow) => Promise<WatchAccess>;
 	/** Epoch ms until which this key (connection or watch) must not be called. */
 	blockedUntil: (key: string) => number | undefined;
 	block: (key: string, until: number) => void;
@@ -149,24 +151,56 @@ const statusAttempts = new Map<string, number>();
  * after the usual error back-off, so it resumes by itself once the connection
  * is shared again or its owner saves the watch. Nothing is deleted or reset.
  */
+export const WATCH_BLOCKED_NO_ACCESS_CHECK =
+	"Paused: Dokploy could not check whether the GitHub connection may serve this watch.";
+
+/**
+ * Fails CLOSED: with no `checkWatchAccess` wired the watch is blocked, never
+ * served. A blocked watch is looked at again after the error back-off (its own
+ * key, so the plain poll and the GitHub Actions connection poll both touch it
+ * once per back-off, not on every cycle); `woken` ("Check now") skips the wait.
+ */
 export const guardWatchAccess = async (
 	watch: WatchRow,
-	deps: Pick<PollDeps, "checkWatchAccess" | "patchWatch" | "block" | "now">,
+	deps: Pick<PollDeps, "patchWatch" | "block" | "blockedUntil" | "now"> & {
+		checkWatchAccess?: PollDeps["checkWatchAccess"];
+	},
+	options: { woken?: boolean } = {},
 ): Promise<boolean> => {
-	if (!deps.checkWatchAccess) return true;
-	const access = await deps.checkWatchAccess(watch);
-	if (access.allowed) return true;
+	const now = deps.now();
+	if (!options.woken) {
+		const until = deps.blockedUntil(accessKey(watch.watchId));
+		if (until !== undefined && until > now) return false;
+	}
+	const access: WatchAccess =
+		typeof deps.checkWatchAccess === "function"
+			? await deps.checkWatchAccess(watch)
+			: {
+					allowed: false,
+					reason: "not-shared",
+					message: WATCH_BLOCKED_NO_ACCESS_CHECK,
+				};
+	if (access.allowed) {
+		// Served again (shared again, or woken): drop the wait, or the next guard of this
+		// same tick (the connection poll runs two) would still see it.
+		if (deps.blockedUntil(accessKey(watch.watchId)) !== undefined) {
+			deps.block(accessKey(watch.watchId), 0);
+		}
+		return true;
+	}
 	await deps.patchWatch(watch.watchId, {
 		lastError: access.message,
-		lastCheckedAt: new Date(deps.now()),
+		lastCheckedAt: new Date(now),
 	});
-	deps.block(watchKey(watch.watchId), deps.now() + WATCH_ERROR_BACKOFF_MS);
+	deps.block(accessKey(watch.watchId), now + WATCH_ERROR_BACKOFF_MS);
 	return false;
 };
 
 export const connectionKey = (connectionId: string) =>
 	`connection:${connectionId}`;
 export const watchKey = (watchId: string) => `watch:${watchId}`;
+/** Back-off of the access guard only: it must not hide the token checks that run behind watchKey. */
+export const accessKey = (watchId: string) => `access:${watchId}`;
 
 /** New deployments, oldest first: ids above lastSeen, in id order. */
 export const selectNewDeployments = (
@@ -359,7 +393,7 @@ export const reportServiceGone = async (
 	try {
 		// A watch that lost its connection's access has no token to tell GitHub with.
 		if (
-			deps.checkWatchAccess &&
+			typeof deps.checkWatchAccess !== "function" ||
 			!(await deps.checkWatchAccess(watch)).allowed
 		) {
 			return;

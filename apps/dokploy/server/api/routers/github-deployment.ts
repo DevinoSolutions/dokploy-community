@@ -2,6 +2,7 @@ import {
 	beginGithubConnect,
 	canRemoveGithubConnection,
 	canUseGithubConnection,
+	countWatchesPausedByUnshare,
 	createGithubFetch,
 	deleteGithubConnection,
 	deleteGithubWatch,
@@ -19,6 +20,7 @@ import {
 	progressGithubConnect,
 	removeGhcrWatchConfigDirs,
 	setGithubConnectionShared,
+	setGithubWatchesCreator,
 	upsertGithubConnection,
 	upsertGithubWatch,
 	visibleGithubConnections,
@@ -147,7 +149,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 				method: "POST",
 				path: "/githubDeployment.toggleShare",
 				description:
-					"Share a GitHub connection with the organization, or take the share back. Only the member who connected it can. While shared, every member who can deploy a service may bind the connection to it, and its token then acts as the connected account for that service: it can carry the repo scope (full control of the account's private repositories, including their code), public_repo (read and write on its public repositories) and, if the owner opted in, read:packages (pull its private GHCR images). Share only an account the whole organization may use that way. Off by default.",
+					"Share a GitHub connection with the organization, or take the share back. Only the member who connected it can. Returns the connection and pausedWatches: how many watches stopped being served because the share was taken back (the ones whose creator is unknown or is neither the owner nor an owner or admin; 0 when sharing). The owner can serve them again with githubDeployment-takeOver, or share the connection again. While shared, every member who can deploy a service may bind the connection to it, and its token then acts as the connected account for that service: it can carry the repo scope (full control of the account's private repositories, including their code), public_repo (read and write on its public repositories) and, if the owner opted in, read:packages (pull its private GHCR images). Share only an account the whole organization may use that way. Off by default.",
 			},
 		})
 		.input(apiGithubDeploymentToggleShare)
@@ -174,11 +176,83 @@ export const githubDeploymentRouter = createTRPCRouter({
 				resourceId: connection.connectionId,
 				resourceName: `GitHub Deployments: ${connection.githubLogin}`,
 			});
-			return await setGithubConnectionShared(
+			// Counted against the state after the change: a watch pauses when the
+			// connection is no longer shared and its creator does not own it.
+			const pausedWatches = input.sharedWithOrganization
+				? 0
+				: await countWatchesPausedByUnshare(
+						input.connectionId,
+						ctx.session.activeOrganizationId,
+					);
+			const updated = await setGithubConnectionShared(
 				input.connectionId,
 				ctx.session.activeOrganizationId,
 				input.sharedWithOrganization,
 			);
+			return updated ? { ...updated, pausedWatches } : null;
+		}),
+
+	takeOver: withPermission("gitProviders", "create")
+		.meta({
+			openapi: {
+				method: "POST",
+				path: "/githubDeployment.takeOver",
+				description:
+					"Only the member who connected the GitHub account. Make this connection's token serve every watch that uses it on a service you can deploy (create access to the service and its deployments), including GitHub Actions watches, by recording you as the member who answers for them. Use it when a watch shows 'Paused' after the connection was unshared. Returns claimed (watches now served) and skipped (watches on services you have no access to, which stay as they were).",
+			},
+		})
+		.input(apiGithubDeploymentDisconnect)
+		.mutation(async ({ ctx, input }) => {
+			assertSelfHosted();
+			const organizationId = ctx.session.activeOrganizationId;
+			const connection = await findGithubConnectionInOrganization(
+				input.connectionId,
+				organizationId,
+			);
+			if (!connection) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "GitHub connection not found",
+				});
+			}
+			if (!ownsGithubConnection(connection, viewerOf(ctx))) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message:
+						"Only the member who connected this account can take over its watches",
+				});
+			}
+			const watches = await listGithubWatchesForConnection(
+				input.connectionId,
+				organizationId,
+			);
+			const claimable: string[] = [];
+			let skipped = 0;
+			for (const watch of watches) {
+				if (watch.createdByUserId === ctx.user.id) continue;
+				try {
+					await checkServicePermissionAndAccess(ctx, watch.serviceId, {
+						service: ["create"],
+						deployment: ["create"],
+					});
+					claimable.push(watch.watchId);
+				} catch {
+					skipped += 1;
+				}
+			}
+			const claimed = await setGithubWatchesCreator(
+				claimable,
+				organizationId,
+				ctx.user.id,
+			);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "gitProvider",
+				resourceId: connection.connectionId,
+				resourceName: `GitHub Deployments: ${connection.githubLogin}`,
+				metadata: { takeOver: { claimed, skipped } },
+			});
+			return { claimed, skipped };
 		}),
 
 	startConnect: withPermission("gitProviders", "create")
@@ -394,7 +468,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 			}
 			// Also on an unchanged connection: being allowed to deploy a service is
 			// not being allowed to spend another member's GitHub token.
-			await requireConnectionToUse(ctx, input.connectionId);
+			const connection = await requireConnectionToUse(ctx, input.connectionId);
 			// Two deployers: the dokploy-deploy action already pushes to this
 			// service. Both would write its image; refuse unless told to go on.
 			const { override, ...watchInput } = input;
@@ -424,6 +498,9 @@ export const githubDeploymentRouter = createTRPCRouter({
 				// it only while the connection is shared or this user owns it (or is an
 				// owner or admin). T-13796.
 				createdByUserId: ctx.user.id,
+				// Only the connection's owner saving the watch takes it over; anyone
+				// else saving an existing watch leaves its creator as it is.
+				claim: ownsGithubConnection(connection, viewerOf(ctx)),
 			});
 			// A watch that is off has no use for a login on any host.
 			if (!watch.enabled) {

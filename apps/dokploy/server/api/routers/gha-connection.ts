@@ -1,5 +1,6 @@
 import {
 	canUseGithubConnection,
+	checkGithubWatchAccess,
 	deleteGithubWatch,
 	findApplicationById,
 	findComposeById,
@@ -278,6 +279,24 @@ const persistConnection = async (
 			tx,
 		);
 	});
+
+/**
+ * "Check now" and "Deploy anyway" ask the poller to act with the connection's
+ * token. For a watch the token may not serve (T-13796) they refuse up front, with
+ * the same "Paused" reason the service shows, instead of queueing work that the
+ * poll would then drop.
+ */
+const assertWatchServed = async (
+	type: "application" | "compose",
+	serviceId: string,
+) => {
+	const watch = await findGithubWatch(type, serviceId);
+	if (!watch) return;
+	const access = await checkGithubWatchAccess(watch);
+	if (!access.allowed) {
+		throw new TRPCError({ code: "CONFLICT", message: access.message });
+	}
+};
 
 type ConnectCtx = {
 	session: { activeOrganizationId: string };
@@ -643,6 +662,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 					message: "This service does not follow GitHub Actions",
 				});
 			}
+			await assertWatchServed(input.serviceType, input.serviceId);
 			await touchConnectionActivity(row.ghaConnectionId);
 			// The poller looks at this connection on its next tick, whatever its cadence says.
 			wakeGhaConnection(row.ghaConnectionId);
@@ -786,6 +806,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 					message: "This service does not follow GitHub Actions",
 				});
 			}
+			await assertWatchServed(input.serviceType, input.serviceId);
 			const released = await overrideGate(
 				row.ghaConnectionId,
 				input.releaseId,

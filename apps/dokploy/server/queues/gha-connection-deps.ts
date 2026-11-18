@@ -500,7 +500,7 @@ export const pollGhaConnection = async (
 ) => {
 	// An unshared connection does not serve another member's watch (T-13796): the
 	// watch says so in its last error and is looked at again after the back-off.
-	if (!(await guardWatchAccess(watch, deps))) return;
+	if (!(await guardWatchAccess(watch, deps, { woken: options.woken }))) return;
 	const token = await deps.loadToken(watch.connectionId);
 	if (!token) {
 		await applyConnectionEvent(row.ghaConnectionId, { type: "token-revoked" });

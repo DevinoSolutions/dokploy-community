@@ -44,6 +44,7 @@ const deps = (
 		now: () => NOW,
 		loadToken: async () => "gho_secret",
 		markRevoked: async () => {},
+		checkWatchAccess: async () => ({ allowed: true as const }),
 		blockedUntil: () => undefined,
 		block: () => {},
 		patchWatch: async (_id, patch) => {

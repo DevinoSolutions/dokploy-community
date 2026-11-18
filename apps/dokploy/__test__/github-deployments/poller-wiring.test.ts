@@ -792,3 +792,34 @@ describe("the poller's stop handle", () => {
 		expect(() => stop()).not.toThrow();
 	});
 });
+
+describe("the poller's real dependencies (T-13796)", () => {
+	it("wire the connection access check, so a dropped line turns CI red", async () => {
+		const store = await import(
+			"@dokploy/server/services/github-deployments/store"
+		);
+		const real = poller.createGithubDeploymentsPollDeps();
+		expect(real.checkWatchAccess).toBe(store.checkGithubWatchAccess);
+	});
+
+	it("block a watch when the access check is missing, instead of serving it", async () => {
+		mocks.listEnabledGithubWatches.mockResolvedValue([
+			watchRow({ watchId: "w-no-check" }),
+		]);
+		mocks.appFindFirst.mockResolvedValue({ applicationId: "app-1" });
+		const { fetch, calls } = scriptedFetch([{ status: 200, json: [] }]);
+		const patchWatch = vi.fn(async () => {});
+		const { checkWatchAccess: _dropped, ...real } =
+			poller.createGithubDeploymentsPollDeps();
+		await poller.runGithubDeploymentsTick({
+			...real,
+			fetch,
+			patchWatch,
+		} as unknown as ReturnType<typeof poller.createGithubDeploymentsPollDeps>);
+		expect(calls).toHaveLength(0);
+		expect(patchWatch).toHaveBeenCalledWith(
+			"w-no-check",
+			expect.objectContaining({ lastError: expect.stringContaining("Paused") }),
+		);
+	});
+});

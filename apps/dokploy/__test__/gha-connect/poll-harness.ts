@@ -238,6 +238,7 @@ export const harness = (options: HarnessOptions = {}) => {
 		markRevoked: async (id) => {
 			events.push(`revoked ${id}`);
 		},
+		checkWatchAccess: async () => ({ allowed: true as const }),
 		blockedUntil: (key) => blocks.get(key),
 		block: (key, until) => {
 			blocks.set(key, until);

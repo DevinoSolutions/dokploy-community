@@ -382,7 +382,11 @@ describe.skipIf(!ready)("who a connection's token may serve", () => {
 			`INSERT INTO "github_deployment_connection" ("connectionId","organizationId","createdByUserId","githubLogin","githubUserId","accessToken","scopes") VALUES ('c1','org-a','owner-1','login','gh-1','tok','repo_deployment,read:packages')`,
 		);
 		await insertWatch("w-other", "c1", "member-2", "app-x");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		expect(await store.loadGhcrCredentials("application", "app-x")).toBeNull();
+		// The pull that follows fails with Docker's own message, so the log says why.
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("Paused"));
+		warn.mockRestore();
 		await store.setGithubConnectionShared("c1", "org-a", true);
 		expect(
 			await store.loadGhcrCredentials("application", "app-x"),
@@ -391,9 +395,9 @@ describe.skipIf(!ready)("who a connection's token may serve", () => {
 		});
 	});
 
-	it("records the saver on save, keeps it when the poller turns the watch on, and lets the owner claim it", async () => {
+	it("records the creator on create only: another member's save, or the poller's, leaves it; the owner's save claims it", async () => {
 		await insertConnection("c1", "owner-1", { shared: true });
-		const save = (user: string | null | undefined) =>
+		const save = (user: string | null | undefined, claim = false) =>
 			store.upsertGithubWatch({
 				organizationId: "org-a",
 				serviceType: "application",
@@ -404,11 +408,72 @@ describe.skipIf(!ready)("who a connection's token may serve", () => {
 				environment: "production",
 				enabled: true,
 				createdByUserId: user,
+				claim,
 			});
 		expect((await save("member-2")).createdByUserId).toBe("member-2");
-		// No saver given (the poller's own re-save): the recorded one stays.
+		// Another member editing the watch does not become its creator.
+		expect((await save("member-3")).createdByUserId).toBe("member-2");
+		// No creator given (the poller's own re-save): the recorded one stays.
 		expect((await save(undefined)).createdByUserId).toBe("member-2");
-		// The owner saving it claims it.
-		expect((await save("owner-1")).createdByUserId).toBe("owner-1");
+		// The connection's owner saving it claims it.
+		expect((await save("owner-1", true)).createdByUserId).toBe("owner-1");
+		// And it stays theirs when someone else saves it later.
+		expect((await save("member-3")).createdByUserId).toBe("owner-1");
+	});
+
+	it("records the saver when a watch is pointed at another connection", async () => {
+		await insertConnection("c1", "owner-1", { shared: true });
+		await insertConnection("c2", "owner-2", { shared: true });
+		const save = (connectionId: string, user: string) =>
+			store.upsertGithubWatch({
+				organizationId: "org-a",
+				serviceType: "application",
+				serviceId: "app-1",
+				connectionId,
+				owner: "o",
+				repo: "r",
+				environment: "production",
+				enabled: true,
+				createdByUserId: user,
+			});
+		expect((await save("c1", "member-2")).createdByUserId).toBe("member-2");
+		expect((await save("c2", "member-3")).createdByUserId).toBe("member-3");
+	});
+
+	it("counts the watches an unshare would pause: unknown creators and members, not the owner's or an admin's", async () => {
+		await insertConnection("c1", "owner-1", { shared: true });
+		await client?.exec(
+			`INSERT INTO "member" ("id","organization_id","user_id","role") VALUES ('m1','org-a','admin-1','admin'),('m2','org-a','member-2','member')`,
+		);
+		await insertWatch("w-own", "c1", "owner-1");
+		await insertWatch("w-admin", "c1", "admin-1");
+		await insertWatch("w-member", "c1", "member-2");
+		await insertWatch("w-null", "c1", null);
+		// While shared everything is served, yet the count says what unsharing does.
+		expect(await store.countWatchesPausedByUnshare("c1", "org-a")).toBe(2);
+		expect(await store.countWatchesPausedByUnshare("c1", "org-b")).toBe(0);
+		expect(await store.countWatchesPausedByUnshare("nope", "org-a")).toBe(0);
+	});
+
+	it("takes watches over for the owner, inside the organization only, and then nothing pauses", async () => {
+		await insertConnection("c1", "owner-1");
+		await insertWatch("w-null", "c1", null);
+		await insertWatch("w-member", "c1", "member-2");
+		expect(
+			await store.setGithubWatchesCreator(
+				["w-null", "w-member"],
+				"org-b",
+				"owner-1",
+			),
+		).toBe(0);
+		expect(await store.setGithubWatchesCreator([], "org-a", "owner-1")).toBe(0);
+		expect(
+			await store.setGithubWatchesCreator(
+				["w-null", "w-member"],
+				"org-a",
+				"owner-1",
+			),
+		).toBe(2);
+		expect(await store.countWatchesPausedByUnshare("c1", "org-a")).toBe(0);
 	});
 });

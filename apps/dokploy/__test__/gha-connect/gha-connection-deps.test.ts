@@ -1,6 +1,9 @@
 import type { GhaConnectionRow } from "@dokploy/server/services/gha-connect";
 import { resetConnectionPollState } from "@dokploy/server/services/gha-connect/poll";
-import { resetPollState } from "@dokploy/server/services/github-deployments/poll-core";
+import {
+	resetPollState,
+	WATCH_BLOCKED_NO_ACCESS_CHECK,
+} from "@dokploy/server/services/github-deployments/poll-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Reply } from "./gha-helpers";
 import { harness, NOW, watchRow } from "./poll-harness";
@@ -357,5 +360,67 @@ describe("pollGhaConnection", () => {
 	it("tells the stale rule about releases waiting at the gate, so a waiting release is not Stale", async () => {
 		mocks.listPendingReleases.mockResolvedValue([{ sha: "a".repeat(40) }]);
 		expect(await staleScenario()).toEqual([]);
+	});
+});
+
+describe("pollGhaConnection for a watch its connection no longer serves (T-13796)", () => {
+	const blocked = {
+		allowed: false as const,
+		reason: "not-shared" as const,
+		message: "Paused: the connection is no longer shared.",
+	};
+	const patchesOf = (h: ReturnType<typeof harness>) => h.patches;
+
+	it("reads nothing, does not touch the token or the connection state, and says why", async () => {
+		const h = harness({ deployments: null, routes: routes() });
+		const loadToken = vi.fn(async () => "gho_secret");
+		h.deps.loadToken = loadToken;
+		h.deps.checkWatchAccess = async () => blocked;
+		await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		expect(h.calls).toEqual([]);
+		expect(loadToken).not.toHaveBeenCalled();
+		expect(mocks.applyConnectionEvent).not.toHaveBeenCalled();
+		expect(patchesOf(h)).toEqual([
+			expect.objectContaining({ lastError: blocked.message }),
+		]);
+	});
+
+	it("is touched once per back-off, not on every cycle, and Check now looks again", async () => {
+		const h = harness({ deployments: null, routes: routes() });
+		const check = vi.fn(async () => blocked);
+		h.deps.checkWatchAccess = check;
+		for (let i = 0; i < 4; i++) {
+			await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		}
+		expect(check).toHaveBeenCalledTimes(1);
+		expect(patchesOf(h)).toHaveLength(1);
+		await deps.pollGhaConnection(watchRow(), row(), h.deps, { woken: true });
+		expect(check).toHaveBeenCalledTimes(2);
+		expect(h.calls).toEqual([]);
+	});
+
+	it("resumes without a new connection once access is back", async () => {
+		const h = harness({ deployments: null, routes: routes() });
+		let access: typeof blocked | { allowed: true } = blocked;
+		h.deps.checkWatchAccess = async () => access;
+		await deps.pollGhaConnection(watchRow(), row(), h.deps);
+		expect(h.calls).toEqual([]);
+		access = { allowed: true };
+		await deps.pollGhaConnection(watchRow(), row(), h.deps, { woken: true });
+		expect(hits(h, "/deployments?")).toBe(1);
+	});
+
+	it("is blocked, not served, when no access check is wired", async () => {
+		const h = harness({ deployments: null, routes: routes() });
+		const { checkWatchAccess: _dropped, ...withoutCheck } = h.deps;
+		await deps.pollGhaConnection(
+			watchRow(),
+			row(),
+			withoutCheck as unknown as typeof h.deps,
+		);
+		expect(h.calls).toEqual([]);
+		expect(patchesOf(h)).toEqual([
+			expect.objectContaining({ lastError: WATCH_BLOCKED_NO_ACCESS_CHECK }),
+		]);
 	});
 });

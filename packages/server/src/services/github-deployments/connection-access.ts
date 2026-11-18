@@ -79,9 +79,9 @@ export type WatchAccess =
 	  };
 
 export const WATCH_BLOCKED_NOT_SHARED =
-	"Paused: the GitHub connection of this watch is no longer shared with the organization. Share it again, or its owner can save the watch again to take it over (for a GitHub Actions connection: disconnect and connect it again).";
+	'Paused: the GitHub connection of this watch is no longer shared with the organization. Share it again, or its owner can take the watch over (Settings, Git, GitHub Deployments, "Take over watches").';
 export const WATCH_BLOCKED_CREATOR_UNKNOWN =
-	"Paused: the GitHub connection of this watch is not shared with the organization and the member who set the watch up is unknown. Its owner must save the watch again (for a GitHub Actions connection: disconnect and connect it again), or share the connection.";
+	'Paused: the GitHub connection of this watch is not shared with the organization and the member who set the watch up is unknown. Its owner must save the watch again or take it over (Settings, Git, GitHub Deployments, "Take over watches"), or share the connection.';
 
 export const evaluateWatchAccess = async (
 	connection: ConnectionAccessRecord,
