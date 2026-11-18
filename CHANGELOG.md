@@ -2,6 +2,15 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+Upgrade notes: no database migration and nothing to configure. Mounts that are already saved keep deploying as they are.
+
+**Security.**
+
+- Bind mounts of host paths are now an owner and admin capability (T-8806). A member can still add a bind mount inside the directories Dokploy manages for their own service, but can no longer bind any other host path (for example `/`, `/etc` or `/var/run/docker.sock`) into a container, or change the owner or permissions of one. This applies when a mount is created or edited, through the dashboard, the API and the MCP server alike. On a Dokploy host shared by several organizations, only the organization that owns the instance can bind paths of that host; every organization keeps its remote servers.
+- Setting an owner, group or mode on a bind mount no longer runs a recursive `chown`/`chmod` on a system or Dokploy directory (`/`, `/etc`, `/usr`, `/root`, `/home`, `/var/run`, the Dokploy base directories and the like), on a socket, or through a symbolic link, for anyone including owners. The path is normalized first (`//`, `/./`, `/../`, trailing slash), and a relative path is refused.
+
 ### New in v0.31.0-community.6
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.5 keeps working. This release includes everything in v0.31.0-community.5.

@@ -7,6 +7,7 @@ import {
 	type ServiceType,
 	shEscape,
 } from "@dokploy/server/db/schema";
+import { getUnsafePermissionTargetReason } from "@dokploy/server/utils/docker/bind-mount-policy";
 import { removeStagedFiles } from "@dokploy/server/utils/docker/staging";
 import {
 	createFile,
@@ -30,6 +31,25 @@ const hasOwnership = (m: Partial<Mount>) =>
 	m.gid !== undefined ||
 	(m.mode !== undefined && m.mode !== null && m.mode !== "");
 
+// The settings that make Dokploy run chown/chmod on the mount's path.
+const hasPermissionSettings = (m: Partial<Mount>) =>
+	(m.uid !== undefined && m.uid !== null) ||
+	(m.gid !== undefined && m.gid !== null) ||
+	!!m.mode;
+
+// A bind mount's host path is raw host territory: the recursive chown/chmod
+// never runs on a system or Dokploy directory, a socket or an unreadable path.
+const assertSafePermissionTarget = (m: Partial<Mount>) => {
+	if (m.type !== "bind" || !m.hostPath || !hasPermissionSettings(m)) return;
+	const reason = getUnsafePermissionTargetReason(m.hostPath);
+	if (reason !== null) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Ownership and permissions are not applied to this host path: ${reason}.`,
+		});
+	}
+};
+
 const assertValidId = (value: number, label: "uid" | "gid") => {
 	if (!Number.isInteger(value) || value < 0) {
 		throw new Error(`Invalid ${label}: must be a non-negative integer`);
@@ -44,7 +64,7 @@ const assertValidMode = (mode: string) => {
 	}
 };
 
-const SAFE_PATH_REGEX = /^[A-Za-z0-9_.\/ -]+$/;
+const SAFE_PATH_REGEX = /^[A-Za-z0-9_./ -]+$/;
 
 const assertValidTargetPath = (target: string, label: string) => {
 	if (!SAFE_PATH_REGEX.test(target)) {
@@ -101,15 +121,18 @@ export const applyMountPermissions = async (mountId: string) => {
 		}
 	};
 
+	// Only a directory or a regular file, and never a symlink: the target
+	// cannot be swapped for a socket, a device or a link to another path.
 	const buildPermissionCommand = (target: string) => {
 		const escapedTarget = shEscape(target);
-		return `if [ -e ${escapedTarget} ]; then ${haveChown ? `chown -R ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R ${mount.mode} ${escapedTarget};` : ""} fi`;
+		return `if { [ -d ${escapedTarget} ] || [ -f ${escapedTarget} ]; } && [ ! -L ${escapedTarget} ]; then ${haveChown ? `chown -R ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R ${mount.mode} ${escapedTarget};` : ""} fi`;
 	};
 
 	if (mount.type === "bind") {
 		const target = mount.hostPath;
 		if (!target) return;
 		assertValidTargetPath(target, "hostPath");
+		assertSafePermissionTarget(mount);
 		await run(buildPermissionCommand(target));
 		return;
 	}
@@ -160,6 +183,8 @@ export const createMount = async (input: z.infer<typeof apiCreateMount>) => {
 				message: `Invalid file path: ${input.filePath}`,
 			});
 		}
+		// Checked before insert: a refused path must not leave a saved row behind
+		assertSafePermissionTarget(input);
 		const { serviceId, ...rest } = input;
 		const value = await db
 			.insert(mounts)
@@ -330,6 +355,18 @@ export const updateMount = async (
 			message: `Invalid file path: ${mountData.filePath}`,
 		});
 	}
+	// The mount as it will be saved, checked before anything is written
+	const current = await findMountById(mountId);
+	const pick = <K extends "type" | "hostPath" | "uid" | "gid" | "mode">(
+		key: K,
+	) => (mountData[key] === undefined ? current[key] : mountData[key]);
+	assertSafePermissionTarget({
+		type: pick("type"),
+		hostPath: pick("hostPath"),
+		uid: pick("uid"),
+		gid: pick("gid"),
+		mode: pick("mode"),
+	});
 	const mount = await db.transaction(async (tx) => {
 		const mount = await tx
 			.update(mounts)

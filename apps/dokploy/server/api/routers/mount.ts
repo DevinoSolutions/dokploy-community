@@ -20,9 +20,15 @@ import {
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 } from "@dokploy/server/services/permission";
+import {
+	evaluateBindMountHostPath,
+	evaluateBindMountPermissions,
+} from "@dokploy/server/utils/docker/bind-mount-policy";
+import { isPrivilegedVolumeRole } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { canAccessLocalHost } from "@/server/api/utils/local-host-access";
 import { assertVolumeNameForService } from "@/server/api/utils/volume-binding";
 import {
 	apiCreateMount,
@@ -33,45 +39,111 @@ import {
 } from "@/server/db/schema";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
+async function getServiceHost(
+	serviceId: string,
+	serviceType: ServiceType,
+): Promise<{
+	appName: string;
+	serverId: string | null;
+	organizationId: string | null;
+} | null> {
+	const service = await (async () => {
+		switch (serviceType) {
+			case "application":
+				return findApplicationById(serviceId);
+			case "postgres":
+				return findPostgresById(serviceId);
+			case "mariadb":
+				return findMariadbById(serviceId);
+			case "mongo":
+				return findMongoById(serviceId);
+			case "mysql":
+				return findMySqlById(serviceId);
+			case "redis":
+				return findRedisById(serviceId);
+			case "compose":
+				return findComposeById(serviceId);
+			case "libsql":
+				return findLibsqlById(serviceId);
+			default:
+				return null;
+		}
+	})();
+	if (!service) {
+		return null;
+	}
+	return {
+		appName: service.appName,
+		serverId: service.serverId ?? null,
+		organizationId: service.environment?.project?.organizationId ?? null,
+	};
+}
+
 async function getServiceOrganizationId(
 	serviceId: string,
 	serviceType: ServiceType,
 ): Promise<string | null> {
-	switch (serviceType) {
-		case "application": {
-			const app = await findApplicationById(serviceId);
-			return app?.environment?.project?.organizationId ?? null;
-		}
-		case "postgres": {
-			const postgres = await findPostgresById(serviceId);
-			return postgres?.environment?.project?.organizationId ?? null;
-		}
-		case "mariadb": {
-			const mariadb = await findMariadbById(serviceId);
-			return mariadb?.environment?.project?.organizationId ?? null;
-		}
-		case "mongo": {
-			const mongo = await findMongoById(serviceId);
-			return mongo?.environment?.project?.organizationId ?? null;
-		}
-		case "mysql": {
-			const mysql = await findMySqlById(serviceId);
-			return mysql?.environment?.project?.organizationId ?? null;
-		}
-		case "redis": {
-			const redis = await findRedisById(serviceId);
-			return redis?.environment?.project?.organizationId ?? null;
-		}
-		case "compose": {
-			const compose = await findComposeById(serviceId);
-			return compose?.environment?.project?.organizationId ?? null;
-		}
-		case "libsql": {
-			const libsql = await findLibsqlById(serviceId);
-			return libsql?.environment?.project?.organizationId ?? null;
-		}
-		default:
-			return null;
+	return (await getServiceHost(serviceId, serviceType))?.organizationId ?? null;
+}
+
+type PermissionSettings = {
+	uid?: number | null;
+	gid?: number | null;
+	mode?: string | null;
+};
+
+const hasPermissionSettings = (m: PermissionSettings) =>
+	(m.uid !== undefined && m.uid !== null) ||
+	(m.gid !== undefined && m.gid !== null) ||
+	!!m.mode;
+
+const samePermissionSettings = (a: PermissionSettings, b: PermissionSettings) =>
+	(a.uid ?? null) === (b.uid ?? null) &&
+	(a.gid ?? null) === (b.gid ?? null) &&
+	(a.mode || null) === (b.mode || null);
+
+// A bind mount hands a host path to the container, and its uid/gid/mode make
+// Dokploy run chown/chmod -R on that path. Members only get the service's own
+// directories; the rest of the host is for owners and admins (of the
+// organization that owns the host, when the service runs on it).
+async function assertBindMountAllowed(
+	ctx: {
+		user: { role?: string | null };
+		session: { activeOrganizationId?: string | null };
+	},
+	{
+		serviceId,
+		serviceType,
+		hostPath,
+		withPermissions,
+	}: {
+		serviceId: string;
+		serviceType: ServiceType;
+		hostPath: string;
+		withPermissions: boolean;
+	},
+) {
+	const service = await getServiceHost(serviceId, serviceType);
+	if (!service) {
+		throw new TRPCError({ code: "NOT_FOUND", message: "Service not found" });
+	}
+	const privilegedRole = isPrivilegedVolumeRole(ctx.user.role);
+	const decision = (
+		withPermissions ? evaluateBindMountPermissions : evaluateBindMountHostPath
+	)({
+		hostPath,
+		appName: service.appName,
+		serverId: service.serverId,
+		privilegedRole,
+		hostReach:
+			privilegedRole &&
+			(await canAccessLocalHost(
+				service.serverId ?? undefined,
+				ctx.session.activeOrganizationId,
+			)),
+	});
+	if (!decision.ok) {
+		throw new TRPCError({ code: "FORBIDDEN", message: decision.message });
 	}
 }
 
@@ -100,6 +172,14 @@ export const mountRouter = createTRPCRouter({
 					serviceType: input.serviceType ?? "application",
 					serviceId: input.serviceId,
 					volumeName: input.volumeName,
+				});
+			}
+			if (input.type === "bind" && input.hostPath) {
+				await assertBindMountAllowed(ctx, {
+					serviceType: input.serviceType ?? "application",
+					serviceId: input.serviceId,
+					hostPath: input.hostPath,
+					withPermissions: hasPermissionSettings(input),
 				});
 			}
 			const mount = await createMount(input);
@@ -220,6 +300,31 @@ export const mountRouter = createTRPCRouter({
 					volumeName,
 					existingRow:
 						mount.type === "volume" && volumeName === mount.volumeName,
+				});
+			}
+			// What the mount will be once saved. Only a new or changed host path, or
+			// changed permission settings, need the caller's reach: a mount that was
+			// saved earlier keeps working as it is.
+			const bindHostPath =
+				input.hostPath === undefined ? mount.hostPath : input.hostPath;
+			const bindPermissions = {
+				uid: input.uid === undefined ? mount.uid : input.uid,
+				gid: input.gid === undefined ? mount.gid : input.gid,
+				mode: input.mode === undefined ? mount.mode : input.mode,
+			};
+			if (
+				serviceId &&
+				volumeType === "bind" &&
+				bindHostPath &&
+				(mount.type !== "bind" ||
+					bindHostPath !== mount.hostPath ||
+					!samePermissionSettings(bindPermissions, mount))
+			) {
+				await assertBindMountAllowed(ctx, {
+					serviceType: mount.serviceType,
+					serviceId,
+					hostPath: bindHostPath,
+					withPermissions: hasPermissionSettings(bindPermissions),
 				});
 			}
 			const { expectedContent, ...mountData } = input;
