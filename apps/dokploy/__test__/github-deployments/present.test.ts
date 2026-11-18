@@ -49,6 +49,7 @@ describe("what the API and MCP may show of a connection", () => {
 			serviceType: "compose",
 			serviceId: "svc",
 			connectionId: "c1",
+			createdByUserId: null,
 			owner: "o",
 			repo: "r",
 			environment: "production",

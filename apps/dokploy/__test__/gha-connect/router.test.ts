@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
 	findGithubWatch: vi.fn(),
 	loadConnectionToken: vi.fn(),
 	upsertGithubWatch: vi.fn(),
+	checkGithubWatchAccess: vi.fn(),
 	deleteGithubWatch: vi.fn(),
 	removeGhcrWatchConfigDirs: vi.fn(),
 	findGhaConnection: vi.fn(),
@@ -113,6 +114,7 @@ vi.mock("@dokploy/server", async () => ({
 	get IS_CLOUD() {
 		return mocks.isCloud;
 	},
+	checkGithubWatchAccess: mocks.checkGithubWatchAccess,
 	deleteGithubWatch: mocks.deleteGithubWatch,
 	findApplicationById: mocks.findApplicationById,
 	findComposeById: mocks.findComposeById,
@@ -239,6 +241,7 @@ beforeEach(() => {
 	mocks.findGhaConnection.mockResolvedValue(null);
 	mocks.loadConnectionToken.mockResolvedValue("gho_secret_token");
 	mocks.upsertGithubWatch.mockResolvedValue({ watchId: "w1" });
+	mocks.checkGithubWatchAccess.mockResolvedValue({ allowed: true });
 	mocks.createGhaConnection.mockImplementation(async (input) =>
 		storedRow({ ...input }),
 	);
@@ -333,6 +336,13 @@ describe("connect and whose GitHub token it may spend (the githubDeployment.watc
 			}),
 			expect.anything(),
 		);
+	});
+
+	it("records who connected the service as the creator of its watch (T-13796), in the same transaction", async () => {
+		await callerFor("member", "user-1").connect(connectInput);
+		expect(mocks.upsertGithubWatch.mock.calls[0]?.[0]).toMatchObject({
+			createdByUserId: "user-1",
+		});
 	});
 
 	it("creates the #577 watch disabled: nothing polls it until the connection poll takes over", async () => {
@@ -1568,5 +1578,68 @@ describe("snippet", () => {
 		await expect(
 			callerFor("owner").snippet({ ...input, trackedBranch: "dev; x" }),
 		).rejects.toBeInstanceOf(TRPCError);
+	});
+});
+
+describe("check now and deploy anyway on a watch its connection no longer serves (T-13796)", () => {
+	const paused = {
+		allowed: false,
+		reason: "not-shared",
+		message: "Paused: the connection is no longer shared.",
+	};
+
+	beforeEach(() => {
+		mocks.findGhaConnection.mockResolvedValue(gateStored());
+		mocks.findGithubWatch.mockResolvedValue({
+			watchId: "w1",
+			organizationId: "org-a",
+			connectionId: "gh-1",
+			createdByUserId: "member-2",
+		});
+		mocks.checkGithubWatchAccess.mockResolvedValue(paused);
+	});
+
+	it("checkNow refuses with the paused message, wakes nothing and touches nothing", async () => {
+		await expect(
+			callerFor("admin").checkNow({
+				serviceType: "compose",
+				serviceId: "compose-1",
+			}),
+		).rejects.toMatchObject({ code: "CONFLICT", message: paused.message });
+		expect(mocks.touchConnectionActivity).not.toHaveBeenCalled();
+		expect(mocks.applyConnectionEvent).not.toHaveBeenCalled();
+	});
+
+	it("deployAnyway refuses with the paused message and releases nothing", async () => {
+		await expect(
+			callerFor("owner").deployAnyway({
+				serviceType: "compose",
+				serviceId: "compose-1",
+				releaseId: "rel-1",
+			}),
+		).rejects.toMatchObject({ code: "CONFLICT", message: paused.message });
+		expect(mocks.overrideGate).not.toHaveBeenCalled();
+	});
+
+	it("both work again once the connection serves the watch", async () => {
+		mocks.checkGithubWatchAccess.mockResolvedValue({ allowed: true });
+		mocks.overrideGate.mockResolvedValue({
+			kind: "ok",
+			releaseId: "rel-1",
+			sha: "c".repeat(40),
+		});
+		await expect(
+			callerFor("admin").checkNow({
+				serviceType: "compose",
+				serviceId: "compose-1",
+			}),
+		).resolves.toBe(true);
+		await expect(
+			callerFor("owner").deployAnyway({
+				serviceType: "compose",
+				serviceId: "compose-1",
+				releaseId: "rel-1",
+			}),
+		).resolves.toMatchObject({ decision: "deploy" });
 	});
 });

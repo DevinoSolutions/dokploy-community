@@ -55,6 +55,8 @@ export const GithubDeploymentsConnection = () => {
 		api.githubDeployment.completeConnect.useMutation();
 	const { mutateAsync: disconnect } =
 		api.githubDeployment.disconnect.useMutation();
+	const { mutateAsync: takeOver, isPending: isTakingOver } =
+		api.githubDeployment.takeOver.useMutation();
 
 	const [open, setOpen] = useState(false);
 	const [flow, setFlow] = useState<Flow | null>(null);
@@ -146,11 +148,11 @@ export const GithubDeploymentsConnection = () => {
 							Connect a GitHub account so services can deploy from GitHub
 							Deployments, even when Dokploy is behind Tailscale or a private
 							network that GitHub Actions cannot reach. Dokploy asks GitHub for
-							new deployments; nothing connects inbound. The connection asks
-							for repo_deployment plus public_repo, which GitHub grants as read
-							and write access to the account's public repositories (classic
-							OAuth cannot narrow it). Private repositories need the repo
-							scope instead: full control of the account's private repositories,
+							new deployments; nothing connects inbound. The connection asks for
+							repo_deployment plus public_repo, which GitHub grants as read and
+							write access to the account's public repositories (classic OAuth
+							cannot narrow it). Private repositories need the repo scope
+							instead: full control of the account's private repositories,
 							including their code. You choose which when you connect. Anyone
 							you share a connection with can use it as that account.
 						</CardDescription>
@@ -194,6 +196,33 @@ export const GithubDeploymentsConnection = () => {
 													? "Connected"
 													: "Reconnect"}
 											</Badge>
+											{connection.isOwner && (
+												<Button
+													variant="outline"
+													size="sm"
+													disabled={isTakingOver}
+													title="Serve every watch on this connection (on services you can deploy) again, for example after the connection was unshared"
+													onClick={async () => {
+														try {
+															const result = await takeOver({
+																connectionId: connection.connectionId,
+															});
+															toast.success(
+																`Took over ${result.claimed} watch${result.claimed === 1 ? "" : "es"}${result.skipped > 0 ? `, ${result.skipped} skipped (no access to the service)` : ""}`,
+															);
+															await utils.githubDeployment.watches.invalidate();
+														} catch (error) {
+															toast.error(
+																error instanceof Error
+																	? error.message
+																	: "Could not take over the watches",
+															);
+														}
+													}}
+												>
+													Take over watches
+												</Button>
+											)}
 											{permissions?.gitProviders.delete && (
 												<DialogAction
 													title="Disconnect GitHub"
@@ -295,8 +324,8 @@ export const GithubDeploymentsConnection = () => {
 														setPrivateRepositories(value === true)
 													}
 												/>
-												This account's repositories are private (asks for the repo
-												scope)
+												This account's repositories are private (asks for the
+												repo scope)
 											</label>
 											<label
 												htmlFor="github-pull-packages"

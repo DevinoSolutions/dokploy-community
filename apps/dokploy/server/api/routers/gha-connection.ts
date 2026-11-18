@@ -1,5 +1,6 @@
 import {
 	canUseGithubConnection,
+	checkGithubWatchAccess,
 	deleteGithubWatch,
 	findApplicationById,
 	findComposeById,
@@ -209,6 +210,7 @@ const isUniqueViolation = (error: unknown): boolean => {
 
 const persistConnection = async (
 	organizationId: string,
+	userId: string,
 	plan: ConnectPlan,
 	input: ConnectServiceInput,
 	mirror: { registryProbeHost: string | null },
@@ -233,6 +235,8 @@ const persistConnection = async (
 				repo: input.repo,
 				environment: input.environment,
 				enabled: false,
+				// Who connected the service claims its watch (T-13796).
+				createdByUserId: userId,
 			},
 			tx,
 		);
@@ -275,6 +279,24 @@ const persistConnection = async (
 			tx,
 		);
 	});
+
+/**
+ * "Check now" and "Deploy anyway" ask the poller to act with the connection's
+ * token. For a watch the token may not serve (T-13796) they refuse up front, with
+ * the same "Paused" reason the service shows, instead of queueing work that the
+ * poll would then drop.
+ */
+const assertWatchServed = async (
+	type: "application" | "compose",
+	serviceId: string,
+) => {
+	const watch = await findGithubWatch(type, serviceId);
+	if (!watch) return;
+	const access = await checkGithubWatchAccess(watch);
+	if (!access.allowed) {
+		throw new TRPCError({ code: "CONFLICT", message: access.message });
+	}
+};
 
 type ConnectCtx = {
 	session: { activeOrganizationId: string };
@@ -436,7 +458,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 			const result = await connectGhaService(
 				input,
 				connectDeps(ctx, (plan, request, mirror) =>
-					persistConnection(organizationId, plan, request, mirror),
+					persistConnection(organizationId, ctx.user.id, plan, request, mirror),
 				),
 			);
 			if (!result.ok) {
@@ -640,6 +662,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 					message: "This service does not follow GitHub Actions",
 				});
 			}
+			await assertWatchServed(input.serviceType, input.serviceId);
 			await touchConnectionActivity(row.ghaConnectionId);
 			// The poller looks at this connection on its next tick, whatever its cadence says.
 			wakeGhaConnection(row.ghaConnectionId);
@@ -783,6 +806,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 					message: "This service does not follow GitHub Actions",
 				});
 			}
+			await assertWatchServed(input.serviceType, input.serviceId);
 			const released = await overrideGate(
 				row.ghaConnectionId,
 				input.releaseId,

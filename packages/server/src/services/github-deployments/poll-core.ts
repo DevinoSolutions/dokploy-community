@@ -1,5 +1,6 @@
 import { redactSecrets } from "../../utils/process/redactSecrets";
 import type { ReleaseEndVerdict } from "../gha-connect/registry-retry";
+import type { WatchAccess } from "./connection-access";
 import type { FetchLike } from "./device-flow";
 import {
 	createDeploymentStatus,
@@ -47,6 +48,11 @@ export interface WatchRow {
 	inflightStartedAt: Date | null;
 	/** Opt in to sending this Dokploy's dashboard link to GitHub as `log_url`. Off by default. */
 	postLogUrl: boolean;
+	/**
+	 * The member who last saved the watch (T-13796); null when unknown. Read by
+	 * `checkWatchAccess`, never sent anywhere.
+	 */
+	createdByUserId?: string | null;
 	/** Set when a gha_connection owns this watch (native GitHub Actions connection); absent for a plain watch. */
 	ghaConnectionId?: string | null;
 }
@@ -87,6 +93,13 @@ export interface PollDeps {
 	/** The connection's token, or null when it is gone or revoked. */
 	loadToken: (connectionId: string) => Promise<string | null>;
 	markRevoked: (connectionId: string) => Promise<void>;
+	/**
+	 * May the connection's token be used for this watch (T-13796: an unshared
+	 * connection serves only its owner's watches)? Required: a poll without it
+	 * fails closed (`guardWatchAccess`), so a dropped wiring line pauses every
+	 * watch instead of silently serving them all.
+	 */
+	checkWatchAccess: (watch: WatchRow) => Promise<WatchAccess>;
 	/** Epoch ms until which this key (connection or watch) must not be called. */
 	blockedUntil: (key: string) => number | undefined;
 	block: (key: string, until: number) => void;
@@ -131,9 +144,63 @@ export interface PollDeps {
 const startAttempts = new Map<string, number>();
 const statusAttempts = new Map<string, number>();
 
+/**
+ * Whether this watch may use its connection's token now. When it may not, the
+ * watch stops cleanly: nothing is sent to GitHub, `lastError` says why (the
+ * watch list and the service page show it) and the watch is looked at again
+ * after the usual error back-off, so it resumes by itself once the connection
+ * is shared again or its owner saves the watch. Nothing is deleted or reset.
+ */
+export const WATCH_BLOCKED_NO_ACCESS_CHECK =
+	"Paused: Dokploy could not check whether the GitHub connection may serve this watch.";
+
+/**
+ * Fails CLOSED: with no `checkWatchAccess` wired the watch is blocked, never
+ * served. A blocked watch is looked at again after the error back-off (its own
+ * key, so the plain poll and the GitHub Actions connection poll both touch it
+ * once per back-off, not on every cycle); `woken` ("Check now") skips the wait.
+ */
+export const guardWatchAccess = async (
+	watch: WatchRow,
+	deps: Pick<PollDeps, "patchWatch" | "block" | "blockedUntil" | "now"> & {
+		checkWatchAccess?: PollDeps["checkWatchAccess"];
+	},
+	options: { woken?: boolean } = {},
+): Promise<boolean> => {
+	const now = deps.now();
+	if (!options.woken) {
+		const until = deps.blockedUntil(accessKey(watch.watchId));
+		if (until !== undefined && until > now) return false;
+	}
+	const access: WatchAccess =
+		typeof deps.checkWatchAccess === "function"
+			? await deps.checkWatchAccess(watch)
+			: {
+					allowed: false,
+					reason: "not-shared",
+					message: WATCH_BLOCKED_NO_ACCESS_CHECK,
+				};
+	if (access.allowed) {
+		// Served again (shared again, or woken): drop the wait, or the next guard of this
+		// same tick (the connection poll runs two) would still see it.
+		if (deps.blockedUntil(accessKey(watch.watchId)) !== undefined) {
+			deps.block(accessKey(watch.watchId), 0);
+		}
+		return true;
+	}
+	await deps.patchWatch(watch.watchId, {
+		lastError: access.message,
+		lastCheckedAt: new Date(now),
+	});
+	deps.block(accessKey(watch.watchId), now + WATCH_ERROR_BACKOFF_MS);
+	return false;
+};
+
 export const connectionKey = (connectionId: string) =>
 	`connection:${connectionId}`;
 export const watchKey = (watchId: string) => `watch:${watchId}`;
+/** Back-off of the access guard only: it must not hide the token checks that run behind watchKey. */
+export const accessKey = (watchId: string) => `access:${watchId}`;
 
 /** New deployments, oldest first: ids above lastSeen, in id order. */
 export const selectNewDeployments = (
@@ -324,6 +391,13 @@ export const reportServiceGone = async (
 ): Promise<void> => {
 	if (watch.inflightDeploymentId === null) return;
 	try {
+		// A watch that lost its connection's access has no token to tell GitHub with.
+		if (
+			typeof deps.checkWatchAccess !== "function" ||
+			!(await deps.checkWatchAccess(watch)).allowed
+		) {
+			return;
+		}
 		const token = await deps.loadToken(watch.connectionId);
 		if (!token) return;
 		await createDeploymentStatus(deps, {
@@ -399,6 +473,7 @@ export const prepareTick = async (
 	const connBlock = deps.blockedUntil(connectionKey(watch.connectionId));
 	if (connBlock !== undefined && connBlock > now) return null;
 
+	if (!(await guardWatchAccess(watch, deps))) return null;
 	const token = await deps.loadToken(watch.connectionId);
 	if (!token) {
 		await deps.patchWatch(watch.watchId, {

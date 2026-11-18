@@ -28,6 +28,7 @@ import {
 } from "@dokploy/server/services/gha-connect";
 import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/provider";
 import {
+	checkGithubWatchAccess,
 	createGithubFetch,
 	type DeployPayload,
 	decideApplicationImage,
@@ -835,6 +836,7 @@ export const createGithubDeploymentsPollDeps = (): PollDeps => ({
 	now: () => Date.now(),
 	loadToken: loadConnectionToken,
 	markRevoked: markGithubConnectionRevoked,
+	checkWatchAccess: checkGithubWatchAccess,
 	blockedUntil: (key) => blocks.get(key),
 	block: (key, until) => {
 		blocks.set(key, until);
@@ -870,6 +872,7 @@ const toWatchRow = (
 	serviceType: record.serviceType,
 	serviceId: record.serviceId,
 	connectionId: record.connectionId,
+	createdByUserId: record.createdByUserId,
 	owner: record.owner,
 	repo: record.repo,
 	environment: record.environment,
