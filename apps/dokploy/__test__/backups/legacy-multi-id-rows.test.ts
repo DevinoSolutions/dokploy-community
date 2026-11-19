@@ -105,7 +105,7 @@ beforeEach(() => {
 	mocks.findServiceOrganizationId.mockResolvedValue("org-a");
 });
 
-const DUMP_IDS = {
+const DUMP_IDS: Record<string, string | null> = {
 	postgresId: null,
 	mysqlId: null,
 	mariadbId: null,
@@ -114,7 +114,7 @@ const DUMP_IDS = {
 	composeId: null,
 };
 
-const VOLUME_IDS = {
+const VOLUME_IDS: Record<string, string | null> = {
 	applicationId: null,
 	postgresId: null,
 	mysqlId: null,
@@ -156,7 +156,7 @@ const environmentWith = (services: Record<string, unknown[]>) => [
 	},
 ];
 
-const volumeRow = (ids: Partial<typeof VOLUME_IDS>) => ({
+const volumeRow = (ids: Partial<Record<string, string | null>>) => ({
 	volumeBackupId: "vb-1",
 	name: "data",
 	volumeName: "data",
@@ -173,7 +173,7 @@ const volumeRow = (ids: Partial<typeof VOLUME_IDS>) => ({
 	deployments: [],
 });
 
-const dumpRow = (ids: Partial<typeof DUMP_IDS>) => ({
+const dumpRow = (ids: Partial<Record<string, string | null>>) => ({
 	backupId: "backup-1",
 	schedule: "0 0 * * *",
 	enabled: true,
