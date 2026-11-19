@@ -91,6 +91,23 @@ new. The MCP scope is `dokploy:deploy` for all of them (an override is added for
 the new tool, whose name does not match the deploy pattern). The scope is only a
 ceiling for the token; the real gate is the permission below.
 
+## Lanes (pull lane, T-12497)
+
+The queue has two concurrency lanes per partition: the build lane (the cap above,
+`buildsConcurrency`) and a pull lane for deploys that provably build nothing (a
+prebuilt image: see `apps/dokploy/server/queues/deploy-lane.ts`). Everything in
+this document is about the build lane. The priority lane, the "one jump at a
+time" cooldown, `wentAheadOf` and the `first-in-line` / `priority-busy`
+prediction count build-lane jobs only; a pull job never jumps (flagging a waiting
+pull job stores no flag and reports `applied: false`) and never sets the
+cooldown. A pull job starts as soon as a pull slot is free (default 4 per
+partition, `DOKPLOY_PULL_LANE_CONCURRENCY`, 0 turns the lane off). Both lanes share one waiting list and one
+group lock, so a service still runs one deploy at a time and a newer job never
+starts before an older waiting job of its own service, whatever the lanes. The
+rejection of a second queue above (Options, point 2) stands: the lane is allowed
+only because a pull job does not use the build host the cap protects, which is
+why the classifier answers `build` on any doubt.
+
 ## Permission model
 
 New action `deployment: ["priority"]` in `access-control.ts`.
