@@ -6,6 +6,8 @@ import {
 } from "@dokploy/server";
 import type { apiFindAllByType } from "@dokploy/server/db/schema";
 import {
+	COMPOSE_FIRST_BACKUP_SERVICE_ID_KEYS,
+	COMPOSE_SECOND_VOLUME_BACKUP_SERVICE_KEYS,
 	getBackupServiceId,
 	getVolumeBackupServiceId,
 } from "@dokploy/server/services/backup-service-ids";
@@ -59,13 +61,19 @@ export const resolveDeploymentAllByTypeAuthTarget = async (
 		}
 		case "backup": {
 			const backup = await findBackupById(input.id);
-			const serviceId = getBackupServiceId(backup);
+			const serviceId = getBackupServiceId(
+				backup,
+				COMPOSE_FIRST_BACKUP_SERVICE_ID_KEYS,
+			);
 			if (serviceId) return { kind: "service", serviceId };
 			return { kind: "none" };
 		}
 		case "volumeBackup": {
 			const volumeBackup = await findVolumeBackupById(input.id);
-			const serviceId = getVolumeBackupServiceId(volumeBackup);
+			const serviceId = getVolumeBackupServiceId(
+				volumeBackup,
+				COMPOSE_SECOND_VOLUME_BACKUP_SERVICE_KEYS,
+			);
 			if (serviceId) return { kind: "service", serviceId };
 			return { kind: "none" };
 		}

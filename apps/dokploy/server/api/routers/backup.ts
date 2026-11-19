@@ -681,7 +681,17 @@ export const backupRouter = createTRPCRouter({
 				});
 			}
 
-			const serverId = getBackupServerId(backup);
+			// The first server found on any relation, not `getBackupServerId`: that
+			// helper picks the relation by `backupType`, which answers differently for
+			// legacy rows whose service id does not match their type.
+			const serverId =
+				backup.postgres?.serverId ??
+				backup.mysql?.serverId ??
+				backup.mariadb?.serverId ??
+				backup.mongo?.serverId ??
+				backup.libsql?.serverId ??
+				backup.compose?.serverId ??
+				null;
 
 			// Instance backups were gated on the owner/admin role above.
 			// Every service id on the row, like authorizeBackupAccess above: a row

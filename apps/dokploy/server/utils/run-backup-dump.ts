@@ -15,6 +15,14 @@ import {
 } from "@dokploy/server";
 import { runComposeBackup } from "@dokploy/server/utils/backups/compose";
 
+export type BackupDumpTarget =
+	| "postgres"
+	| "mysql"
+	| "mariadb"
+	| "mongo"
+	| "libsql"
+	| "compose";
+
 /**
  * Runs one database dump for a backup row, then applies its retention. The
  * per-service manual endpoints (`backup.manualBackup*`) and the backup policy
@@ -24,7 +32,7 @@ import { runComposeBackup } from "@dokploy/server/utils/backups/compose";
  * one) is refused.
  */
 export const runBackupDump = async (
-	target: string,
+	target: BackupDumpTarget | "web-server",
 	backup: Awaited<ReturnType<typeof findBackupById>>,
 ) => {
 	switch (target) {

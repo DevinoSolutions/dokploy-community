@@ -89,7 +89,7 @@ describe("runBackupDump", () => {
 		await expect(runBackupDump("web-server", backup)).rejects.toThrow(
 			'Unsupported database type "web-server"',
 		);
-		await expect(runBackupDump("sqlite", backup)).rejects.toThrow(
+		await expect(runBackupDump("sqlite" as never, backup)).rejects.toThrow(
 			'Unsupported database type "sqlite"',
 		);
 		expect(mocks.keepLatestNBackups).not.toHaveBeenCalled();

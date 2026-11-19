@@ -760,6 +760,7 @@ const dumpRowKey = (row: {
 	mariadbId: string | null;
 	mongoId: string | null;
 	libsqlId: string | null;
+	composeId: string | null;
 }): string => {
 	const type = row.databaseType as DumpServiceType;
 	return `db:${type}:${getBackupServiceId(row) ?? ""}`;

@@ -1,10 +1,13 @@
 import { backups, volumeBackups } from "@dokploy/server/db/schema";
 import {
 	BACKUP_SERVICE_ID_KEYS,
+	COMPOSE_FIRST_BACKUP_SERVICE_ID_KEYS,
+	COMPOSE_SECOND_VOLUME_BACKUP_SERVICE_KEYS,
 	getBackupServiceId,
 	getBackupServiceIds,
 	getVolumeBackupServiceId,
 	getVolumeBackupServiceIds,
+	LIBSQL_BEFORE_REDIS_VOLUME_BACKUP_SERVICE_KEYS,
 	VOLUME_BACKUP_SERVICE_KEYS,
 } from "@dokploy/server/services/backup-service-ids";
 import { getTableColumns } from "drizzle-orm";
@@ -98,5 +101,57 @@ describe("getVolumeBackupServiceIds", () => {
 			(column) => !nonServiceColumns.includes(column),
 		);
 		expect([...VOLUME_BACKUP_SERVICE_KEYS].sort()).toEqual(expected.sort());
+	});
+});
+
+describe("explicit key orders for multi-id rows", () => {
+	it("tries compose first with the compose-first dump order", () => {
+		const row = { postgresId: "pg-1", libsqlId: "libsql-1", composeId: "c-1" };
+		expect(getBackupServiceId(row)).toBe("pg-1");
+		expect(getBackupServiceId(row, COMPOSE_FIRST_BACKUP_SERVICE_ID_KEYS)).toBe(
+			"c-1",
+		);
+		expect(
+			getBackupServiceIds(row, COMPOSE_FIRST_BACKUP_SERVICE_ID_KEYS),
+		).toEqual(["c-1", "pg-1", "libsql-1"]);
+	});
+
+	it("tries compose right after the application with the compose-second volume order", () => {
+		const row = { applicationId: "app-1", redisId: "r-1", composeId: "c-1" };
+		expect(getVolumeBackupServiceId(row)).toBe("app-1");
+		expect(
+			getVolumeBackupServiceIds(row, COMPOSE_SECOND_VOLUME_BACKUP_SERVICE_KEYS),
+		).toEqual(["app-1", "c-1", "r-1"]);
+		const noApp = { redisId: "r-1", composeId: "c-1" };
+		expect(getVolumeBackupServiceId(noApp)).toBe("r-1");
+		expect(
+			getVolumeBackupServiceId(
+				noApp,
+				COMPOSE_SECOND_VOLUME_BACKUP_SERVICE_KEYS,
+			),
+		).toBe("c-1");
+	});
+
+	it("tries libsql before redis with the libsql-before-redis volume order", () => {
+		const row = { redisId: "r-1", libsqlId: "l-1" };
+		expect(getVolumeBackupServiceId(row)).toBe("r-1");
+		expect(
+			getVolumeBackupServiceId(
+				row,
+				LIBSQL_BEFORE_REDIS_VOLUME_BACKUP_SERVICE_KEYS,
+			),
+		).toBe("l-1");
+	});
+
+	it("keeps every named order a permutation of its key list", () => {
+		expect([...COMPOSE_FIRST_BACKUP_SERVICE_ID_KEYS].sort()).toEqual(
+			[...BACKUP_SERVICE_ID_KEYS].sort(),
+		);
+		expect([...COMPOSE_SECOND_VOLUME_BACKUP_SERVICE_KEYS].sort()).toEqual(
+			[...VOLUME_BACKUP_SERVICE_KEYS].sort(),
+		);
+		expect([...LIBSQL_BEFORE_REDIS_VOLUME_BACKUP_SERVICE_KEYS].sort()).toEqual(
+			[...VOLUME_BACKUP_SERVICE_KEYS].sort(),
+		);
 	});
 });

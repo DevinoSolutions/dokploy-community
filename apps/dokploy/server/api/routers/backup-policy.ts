@@ -17,6 +17,7 @@ import { DESTINATION_READ_COLUMNS } from "@dokploy/server/services/backup-read-v
 import {
 	getBackupServiceId,
 	getVolumeBackupServiceId,
+	LIBSQL_BEFORE_REDIS_VOLUME_BACKUP_SERVICE_KEYS,
 } from "@dokploy/server/services/backup-service-ids";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import {
@@ -832,7 +833,10 @@ export const backupPolicyRouter = createTRPCRouter({
 				},
 			});
 			for (const row of volumeRows) {
-				const serviceId = getVolumeBackupServiceId(row);
+				const serviceId = getVolumeBackupServiceId(
+					row,
+					LIBSQL_BEFORE_REDIS_VOLUME_BACKUP_SERVICE_KEYS,
+				);
 				if (!serviceId) continue;
 				const service = serviceById.get(serviceId);
 				if (!service) continue;
@@ -1180,7 +1184,10 @@ export const backupPolicyRouter = createTRPCRouter({
 				},
 			});
 			for (const row of volumeRows) {
-				const serviceId = getVolumeBackupServiceId(row);
+				const serviceId = getVolumeBackupServiceId(
+					row,
+					LIBSQL_BEFORE_REDIS_VOLUME_BACKUP_SERVICE_KEYS,
+				);
 				if (!serviceId || !serviceMetaById.has(serviceId)) continue;
 				volumeMetaById.set(row.volumeBackupId, {
 					serviceId,
