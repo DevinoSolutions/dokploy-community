@@ -106,6 +106,20 @@ export type BuildRunStatus = (typeof BUILD_RUN_STATUSES)[number];
 export const LIVE_BUILD_RUN_STATUSES = ["queued", "in_progress"] as const;
 
 /**
+ * A registered GitHub Actions row that nothing took over and that is still open: `status` running, build origin
+ * `github-actions`, `externalBuildOnly` true. The in-memory twin of `registeredOpenRow` (live-build-claim.ts, the SQL
+ * condition); change both together.
+ */
+export const isRegisteredOpenGithubRow = (row: {
+	status?: string | null;
+	buildOrigin?: string | null;
+	externalBuildOnly?: boolean | null;
+}) =>
+	row.status === "running" &&
+	row.buildOrigin === "github-actions" &&
+	row.externalBuildOnly === true;
+
+/**
  * A deployment row that exists while GitHub Actions still builds the image: registered by the workflow, not yet
  * taken over by a deploy call. Nothing runs on Dokploy for it, so the watchdog and the restart sweep leave it alone.
  */
@@ -155,21 +169,11 @@ export const describeLiveGithubBuild = (
 	now?: number,
 ): string | null => {
 	// The workflow's deploy call was accepted and waits in Dokploy's queue for a free slot.
-	if (
-		row.externalBuildOnly &&
-		row.deployQueuedAt &&
-		row.status === "running" &&
-		row.buildOrigin === "github-actions"
-	) {
+	if (isRegisteredOpenGithubRow(row) && row.deployQueuedAt) {
 		return "GitHub Actions build finished · deploy waiting in the Dokploy queue";
 	}
 	// The run is over and the workflow's deploy call has not arrived yet.
-	if (
-		row.externalBuildOnly &&
-		row.status === "running" &&
-		row.buildOrigin === "github-actions" &&
-		row.buildRunStatus === "completed"
-	) {
+	if (isRegisteredOpenGithubRow(row) && row.buildRunStatus === "completed") {
 		return "GitHub Actions run finished · waiting for the deploy";
 	}
 	// The deploy call took the row over (`externalBuildOnly` false, the run marked `completed`): Dokploy pulls the

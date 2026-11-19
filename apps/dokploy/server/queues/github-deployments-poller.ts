@@ -28,6 +28,12 @@ import {
 } from "@dokploy/server/services/gha-connect";
 import { deploySourceTypeOf } from "@dokploy/server/services/gha-connect/provider";
 import {
+	GHA_TITLE_TOKEN,
+	ghaTitleEndingWithHandleLike,
+	githubDeploymentHandle,
+	isGhaTitleEndingWithHandle,
+} from "@dokploy/server/services/gha-deployment-title";
+import {
 	checkGithubWatchAccess,
 	createGithubFetch,
 	type DeployPayload,
@@ -70,13 +76,9 @@ import { myQueue } from "./queueSetup";
  * wires them to this process. See docs/design/github-deployments-pull.md.
  */
 
-/**
- * The end of the Dokploy deployment title a GitHub deployment starts. It is the
- * handle the poller finds that deployment by, whatever the rest of the title
- * says, so it must stay unique per GitHub deployment id.
- */
-export const githubDeploymentHandle = (githubDeploymentId: number) =>
-	`[deployment #${githubDeploymentId}]`;
+// The title protocol (the handle at the end of the title and how it is matched) lives in
+// services/gha-deployment-title.ts, next to the code that reads it elsewhere.
+export { githubDeploymentHandle };
 
 /** An environment as one word of a title (the title parser reads one token after "GHA "). */
 const titleToken = (value: string | undefined): string | null => {
@@ -104,7 +106,7 @@ export const githubDeploymentTitle = (
 	const environment =
 		titleToken(deployment.environment) ?? titleToken(watch.environment);
 	return [
-		"GHA",
+		GHA_TITLE_TOKEN,
 		...(environment ? [environment] : []),
 		...(sha ? [sha] : []),
 		githubDeploymentHandle(deployment.id),
@@ -742,7 +744,7 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 		.where(
 			and(
 				owner,
-				like(deployments.title, `GHA %${handle}`),
+				like(deployments.title, ghaTitleEndingWithHandleLike(handle)),
 				notEndedBeforeClaim,
 			),
 		)
@@ -801,8 +803,7 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 		return queued.some(
 			(job) =>
 				(typeof job.data.titleLog === "string" &&
-					job.data.titleLog.startsWith("GHA ") &&
-					job.data.titleLog.endsWith(handle)) ||
+					isGhaTitleEndingWithHandle(job.data.titleLog, handle)) ||
 				(job.data as Record<string, unknown>)[serviceKey] === watch.serviceId,
 		)
 			? { state: "running" }

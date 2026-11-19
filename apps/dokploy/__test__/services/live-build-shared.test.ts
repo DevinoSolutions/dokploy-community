@@ -7,6 +7,7 @@ import {
 	GITHUB_RUN_STEP_UNREADABLE,
 	isGithubActionsDeployment,
 	isLiveGithubBuild,
+	isRegisteredOpenGithubRow,
 	parseBuildRunUrl,
 	pickServiceBuildOrigin,
 	withGithubActionsRunDetails,
@@ -70,6 +71,38 @@ describe("isLiveGithubBuild", () => {
 		["a row with no origin", { buildOrigin: null }],
 	])("is not %s", (_name, overrides) => {
 		expect(isLiveGithubBuild({ ...live, ...overrides })).toBe(false);
+	});
+});
+
+describe("isRegisteredOpenGithubRow (the in-memory twin of registeredOpenRow)", () => {
+	const open = {
+		status: "running",
+		buildOrigin: "github-actions",
+		externalBuildOnly: true,
+	};
+
+	it("is a running GitHub Actions row that nothing took over", () => {
+		expect(isRegisteredOpenGithubRow(open)).toBe(true);
+		// Whether a deploy waits for it in the queue does not matter here.
+		const queued = { ...open, deployQueuedAt: "2026-11-02T10:30:00.000Z" };
+		expect(isRegisteredOpenGithubRow(queued)).toBe(true);
+	});
+
+	it.each([
+		["a finished row", { status: "done" }],
+		["a failed row", { status: "error" }],
+		["a cancelled row", { status: "cancelled" }],
+		["a row with no status", { status: null }],
+		["a row with the status left out", { status: undefined }],
+		["a row Dokploy built", { buildOrigin: "dokploy" }],
+		["a prebuilt image row", { buildOrigin: "external" }],
+		["a row with no origin", { buildOrigin: null }],
+		["a row with the origin left out", { buildOrigin: undefined }],
+		["a row a deploy took over", { externalBuildOnly: false }],
+		["a row written before the column existed", { externalBuildOnly: null }],
+		["a row with the flag left out", { externalBuildOnly: undefined }],
+	])("is not %s", (_name, overrides) => {
+		expect(isRegisteredOpenGithubRow({ ...open, ...overrides })).toBe(false);
 	});
 });
 
@@ -201,6 +234,32 @@ describe("describeLiveGithubBuild", () => {
 			}),
 		).toBe("GitHub Actions run finished · waiting for the deploy");
 	});
+
+	it.each([
+		["a finished row", { status: "done" }],
+		["a row Dokploy built", { buildOrigin: "dokploy" }],
+		["a row with no origin", { buildOrigin: null }],
+		["a row with no flag", { externalBuildOnly: null }],
+		["a row with the flag left out", { externalBuildOnly: undefined }],
+	])(
+		"does not call %s a deploy waiting in the queue or for the call",
+		(_name, overrides) => {
+			const row = {
+				status: "running",
+				buildOrigin: "github-actions",
+				buildRunStatus: "completed",
+				externalBuildOnly: true,
+				deployQueuedAt: "2026-11-02T10:30:00.000Z",
+				...overrides,
+			};
+			expect(describeLiveGithubBuild(row)).not.toBe(
+				"GitHub Actions build finished · deploy waiting in the Dokploy queue",
+			);
+			expect(
+				describeLiveGithubBuild({ ...row, deployQueuedAt: null }),
+			).not.toBe("GitHub Actions run finished · waiting for the deploy");
+		},
+	);
 });
 
 describe("the deploy job carries the live row", () => {

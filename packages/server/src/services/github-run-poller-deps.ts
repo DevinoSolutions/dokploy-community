@@ -34,6 +34,10 @@ import {
 	type RunFetchResult,
 } from "./github-run-poller";
 import type { GithubRunJob } from "./github-run-progress";
+import {
+	registeredOpenRow,
+	registeredOpenRowNotQueued,
+} from "./live-build-claim";
 
 /**
  * The real database, hosts and GitHub behind the live-row poller (github-run-poller.ts).
@@ -44,9 +48,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 
 // Every registered row no deploy took over, also one whose run is over: it still has its takeover grace to run.
 const liveRowFilter = and(
-	eq(deployments.status, "running"),
-	eq(deployments.buildOrigin, "github-actions"),
-	eq(deployments.externalBuildOnly, true),
+	registeredOpenRow,
 	isNotNull(deployments.buildRunId),
 	isNotNull(deployments.buildRepository),
 );
@@ -391,13 +393,8 @@ const readLog = async (row: LiveRunRow): Promise<string> => {
 	}
 };
 
-const stillWaiting = and(
-	eq(deployments.status, "running"),
-	eq(deployments.buildOrigin, "github-actions"),
-	eq(deployments.externalBuildOnly, true),
-	// A row whose deploy was accepted is the queue's; only the backstop below may end it.
-	isNull(deployments.deployQueuedAt),
-);
+// A row whose deploy was accepted is the queue's; only the backstop below (`outcome.deployQueued`) may end it.
+const stillWaiting = registeredOpenRowNotQueued;
 // Progress is only written while the run is: a finished run stays finished.
 const runStillGoing = and(
 	stillWaiting,
@@ -455,13 +452,7 @@ export const createDefaultGithubRunPollerDeps = (): PollerDeps => ({
 			.where(
 				and(
 					eq(deployments.deploymentId, deploymentId),
-					outcome.deployQueued
-						? and(
-								eq(deployments.status, "running"),
-								eq(deployments.buildOrigin, "github-actions"),
-								eq(deployments.externalBuildOnly, true),
-							)
-						: stillWaiting,
+					outcome.deployQueued ? registeredOpenRow : stillWaiting,
 				),
 			)
 			.returning({ deploymentId: deployments.deploymentId });

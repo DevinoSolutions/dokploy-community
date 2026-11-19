@@ -6,7 +6,7 @@ import { deployments } from "@dokploy/server/db/schema";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
-import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 import { findApplicationById } from "./application";
 import {
 	canonicalBuildRunUrl,
@@ -22,6 +22,7 @@ import {
 	externalBuildOutcome,
 	GITHUB_LOG_PREFIX,
 } from "./github-run-progress";
+import { registeredOpenRowNotQueued } from "./live-build-claim";
 
 /**
  * Live GitHub Actions rows (T-12686). A deployment row used to appear only when the workflow called deploy AFTER the
@@ -400,11 +401,8 @@ export const finishExternalBuild = async (
 		.where(
 			and(
 				eq(deployments.deploymentId, deployment.deploymentId),
-				eq(deployments.status, "running"),
-				eq(deployments.buildOrigin, "github-actions"),
-				// Only a row no deploy took over; a row it closes keeps externalBuildOnly.
-				eq(deployments.externalBuildOnly, true),
-				isNull(deployments.deployQueuedAt),
+				// Only a row no deploy took over and none waits for; a row it closes keeps externalBuildOnly.
+				registeredOpenRowNotQueued,
 			),
 		)
 		.returning({ deploymentId: deployments.deploymentId });
