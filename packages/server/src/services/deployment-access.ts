@@ -1,5 +1,9 @@
 import { TRPCError } from "@trpc/server";
 import { findBackupById } from "./backup";
+import {
+	getBackupServiceId,
+	getVolumeBackupServiceId,
+} from "./backup-service-ids";
 import type { findDeploymentById } from "./deployment";
 import {
 	checkPermission,
@@ -104,13 +108,7 @@ export const assertDeploymentAccess = async (
 	if (deployment.backupId) {
 		matched = true;
 		const backup = await findBackupById(deployment.backupId);
-		const serviceId =
-			backup.postgresId ||
-			backup.mysqlId ||
-			backup.mariadbId ||
-			backup.mongoId ||
-			backup.libsqlId ||
-			backup.composeId;
+		const serviceId = getBackupServiceId(backup);
 		if (serviceId) {
 			await checkService(serviceId);
 		} else {
@@ -128,15 +126,7 @@ export const assertDeploymentAccess = async (
 	if (deployment.volumeBackupId) {
 		matched = true;
 		const volumeBackup = await findVolumeBackupById(deployment.volumeBackupId);
-		const serviceId =
-			volumeBackup.applicationId ||
-			volumeBackup.postgresId ||
-			volumeBackup.mysqlId ||
-			volumeBackup.mariadbId ||
-			volumeBackup.mongoId ||
-			volumeBackup.redisId ||
-			volumeBackup.libsqlId ||
-			volumeBackup.composeId;
+		const serviceId = getVolumeBackupServiceId(volumeBackup);
 		if (!serviceId) throw deny();
 		await checkService(serviceId);
 	}

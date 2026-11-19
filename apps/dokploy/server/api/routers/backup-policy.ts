@@ -4,20 +4,9 @@ import {
 	findBackupById,
 	findBackupPolicyById,
 	findComposeById,
-	findLibsqlByBackupId,
-	findMariadbByBackupId,
-	findMongoByBackupId,
-	findMySqlByBackupId,
-	findPostgresByBackupId,
-	keepLatestNBackups,
 	loadDockerCompose,
 	loadDockerComposeRemote,
 	removeBackupPolicy,
-	runLibsqlBackup,
-	runMariadbBackup,
-	runMongoBackup,
-	runMySqlBackup,
-	runPostgresBackup,
 	runVolumeBackup,
 	syncBackupPolicy,
 	toggleBackupPolicy,
@@ -25,6 +14,10 @@ import {
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { DESTINATION_READ_COLUMNS } from "@dokploy/server/services/backup-read-view";
+import {
+	getBackupServiceId,
+	getVolumeBackupServiceId,
+} from "@dokploy/server/services/backup-service-ids";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import {
 	checkServicePermissionAndAccess,
@@ -65,6 +58,7 @@ import {
 	registry,
 	volumeBackups,
 } from "@/server/db/schema";
+import { runBackupDump } from "@/server/utils/run-backup-dump";
 
 // Service types surfaced in the coverage table. `dumpCapable` marks the types
 // that support a database dump (postgres/mysql/mariadb/mongo/libsql). Redis,
@@ -477,46 +471,8 @@ export const backupPolicyRouter = createTRPCRouter({
 			// A policy only materializes dump rows for the five dump-capable
 			// database types; dispatch each through the same manual runner +
 			// retention path the per-service tab uses.
-			const runDump = async (
-				backup: Awaited<ReturnType<typeof findBackupById>>,
-			) => {
-				switch (backup.databaseType) {
-					case "postgres": {
-						const service = await findPostgresByBackupId(backup.backupId);
-						await runPostgresBackup(service, backup);
-						await keepLatestNBackups(backup, service?.serverId);
-						break;
-					}
-					case "mysql": {
-						const service = await findMySqlByBackupId(backup.backupId);
-						await runMySqlBackup(service, backup);
-						await keepLatestNBackups(backup, service?.serverId);
-						break;
-					}
-					case "mariadb": {
-						const service = await findMariadbByBackupId(backup.backupId);
-						await runMariadbBackup(service, backup);
-						await keepLatestNBackups(backup, service?.serverId);
-						break;
-					}
-					case "mongo": {
-						const service = await findMongoByBackupId(backup.backupId);
-						await runMongoBackup(service, backup);
-						await keepLatestNBackups(backup, service?.serverId);
-						break;
-					}
-					case "libsql": {
-						const service = await findLibsqlByBackupId(backup.backupId);
-						await runLibsqlBackup(service, backup);
-						await keepLatestNBackups(backup, service?.serverId);
-						break;
-					}
-					default:
-						throw new Error(
-							`Unsupported database type "${backup.databaseType}"`,
-						);
-				}
-			};
+			const runDump = (backup: Awaited<ReturnType<typeof findBackupById>>) =>
+				runBackupDump(backup.databaseType, backup);
 
 			for (const { backupId } of dumpRows) {
 				if (signal?.aborted) return;
@@ -528,13 +484,7 @@ export const backupPolicyRouter = createTRPCRouter({
 					// backup:create but restricted service access must not run
 					// (or read the DB name/error output of) services they cannot
 					// reach. Privileged members short-circuit inside the helper.
-					const serviceId =
-						backup.postgresId ||
-						backup.mysqlId ||
-						backup.mariadbId ||
-						backup.mongoId ||
-						backup.libsqlId ||
-						backup.composeId;
+					const serviceId = getBackupServiceId(backup);
 					if (serviceId) {
 						try {
 							await checkServicePermissionAndAccess(ctx, serviceId, {
@@ -559,15 +509,7 @@ export const backupPolicyRouter = createTRPCRouter({
 				if (signal?.aborted) return;
 				const label = volume.serviceName ?? volume.name;
 				// Same per-service gate as the dump rows above.
-				const serviceId =
-					volume.applicationId ||
-					volume.postgresId ||
-					volume.mysqlId ||
-					volume.mariadbId ||
-					volume.mongoId ||
-					volume.redisId ||
-					volume.libsqlId ||
-					volume.composeId;
+				const serviceId = getVolumeBackupServiceId(volume);
 				if (serviceId) {
 					try {
 						await checkServicePermissionAndAccess(ctx, serviceId, {
@@ -824,13 +766,7 @@ export const backupPolicyRouter = createTRPCRouter({
 				},
 			});
 			for (const row of dumpRows) {
-				const serviceId =
-					row.postgresId ||
-					row.mysqlId ||
-					row.mariadbId ||
-					row.mongoId ||
-					row.libsqlId ||
-					row.composeId;
+				const serviceId = getBackupServiceId(row);
 				if (!serviceId) continue;
 				const service = serviceById.get(serviceId);
 				if (!service) continue;
@@ -896,15 +832,7 @@ export const backupPolicyRouter = createTRPCRouter({
 				},
 			});
 			for (const row of volumeRows) {
-				const serviceId =
-					row.applicationId ||
-					row.postgresId ||
-					row.mysqlId ||
-					row.mariadbId ||
-					row.mongoId ||
-					row.libsqlId ||
-					row.redisId ||
-					row.composeId;
+				const serviceId = getVolumeBackupServiceId(row);
 				if (!serviceId) continue;
 				const service = serviceById.get(serviceId);
 				if (!service) continue;
@@ -1211,13 +1139,7 @@ export const backupPolicyRouter = createTRPCRouter({
 				},
 			});
 			for (const row of backupRows) {
-				const serviceId =
-					row.postgresId ||
-					row.mysqlId ||
-					row.mariadbId ||
-					row.mongoId ||
-					row.libsqlId ||
-					row.composeId;
+				const serviceId = getBackupServiceId(row);
 				if (!serviceId || !serviceMetaById.has(serviceId)) continue;
 				backupMetaById.set(row.backupId, {
 					serviceId,
@@ -1258,15 +1180,7 @@ export const backupPolicyRouter = createTRPCRouter({
 				},
 			});
 			for (const row of volumeRows) {
-				const serviceId =
-					row.applicationId ||
-					row.postgresId ||
-					row.mysqlId ||
-					row.mariadbId ||
-					row.mongoId ||
-					row.libsqlId ||
-					row.redisId ||
-					row.composeId;
+				const serviceId = getVolumeBackupServiceId(row);
 				if (!serviceId || !serviceMetaById.has(serviceId)) continue;
 				volumeMetaById.set(row.volumeBackupId, {
 					serviceId,

@@ -9,6 +9,11 @@ import {
 	isRelativeBackupFile,
 } from "@dokploy/server/db/validations/backup";
 import { DESTINATION_READ_COLUMNS } from "@dokploy/server/services/backup-read-view";
+import {
+	type BackupServiceIds,
+	getBackupServiceId,
+	getBackupServiceIds,
+} from "@dokploy/server/services/backup-service-ids";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, or } from "drizzle-orm";
@@ -102,34 +107,6 @@ export const findBackupsByDbId = async (
 	});
 	return result || [];
 };
-
-type BackupServiceIds = {
-	postgresId?: string | null;
-	mysqlId?: string | null;
-	mariadbId?: string | null;
-	mongoId?: string | null;
-	libsqlId?: string | null;
-	composeId?: string | null;
-};
-
-const BACKUP_SERVICE_ID_KEYS = [
-	"postgresId",
-	"mysqlId",
-	"mariadbId",
-	"mongoId",
-	"libsqlId",
-	"composeId",
-] as const;
-
-// Every service id set on a backup row. A well-formed service backup has
-// exactly one; callers that gate on the service must check all of them.
-export const getBackupServiceIds = (backup: BackupServiceIds) =>
-	BACKUP_SERVICE_ID_KEYS.map((key) => backup[key]).filter(
-		(id): id is string => !!id,
-	);
-
-export const getBackupServiceId = (backup: BackupServiceIds) =>
-	getBackupServiceIds(backup)[0] ?? null;
 
 const DATABASE_SERVICE_KEY = {
 	postgres: "postgresId",

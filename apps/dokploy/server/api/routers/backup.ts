@@ -2,28 +2,17 @@ import {
 	createBackup,
 	findBackupById,
 	findBackupsByDbId,
-	findComposeByBackupId,
 	findComposeById,
-	findLibsqlByBackupId,
 	findLibsqlById,
-	findMariadbByBackupId,
 	findMariadbById,
-	findMongoByBackupId,
 	findMongoById,
-	findMySqlByBackupId,
 	findMySqlById,
-	findPostgresByBackupId,
 	findPostgresById,
 	findServerById,
 	IS_CLOUD,
 	keepLatestNBackups,
 	removeBackupById,
 	removeScheduleBackup,
-	runLibsqlBackup,
-	runMariadbBackup,
-	runMongoBackup,
-	runMySqlBackup,
-	runPostgresBackup,
 	runWebServerBackup,
 	scheduleBackup,
 	updateBackupById,
@@ -31,8 +20,6 @@ import {
 import {
 	assertBackupFileBelongsToService,
 	assertInstanceBackupInOrganization,
-	getBackupServiceId,
-	getBackupServiceIds,
 	isInstanceBackup,
 	validateBackupServiceBinding,
 } from "@dokploy/server/services/backup";
@@ -41,6 +28,10 @@ import {
 	toBackupReadView,
 } from "@dokploy/server/services/backup-read-view";
 import {
+	getBackupServiceId,
+	getBackupServiceIds,
+} from "@dokploy/server/services/backup-service-ids";
+import {
 	findDestinationById,
 	findDestinationByIdForOrganization,
 } from "@dokploy/server/services/destination";
@@ -48,7 +39,6 @@ import {
 	checkServicePermissionAndAccess,
 	findServiceOrganizationId,
 } from "@dokploy/server/services/permission";
-import { runComposeBackup } from "@dokploy/server/utils/backups/compose";
 import {
 	getBackupDownloadUrl,
 	type RcloneFile,
@@ -91,6 +81,7 @@ import {
 	apiUpdateBackup,
 } from "@/server/db/schema";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
+import { runBackupDump } from "@/server/utils/run-backup-dump";
 
 type BackupAction = "create" | "read" | "update" | "delete" | "restore";
 type BackupCtx = {
@@ -232,24 +223,7 @@ export const backupRouter = createTRPCRouter({
 				const backup = await findBackupById(newBackup.backupId);
 
 				if (IS_CLOUD && backup.enabled) {
-					const databaseType = backup.databaseType;
-					let serverId = "";
-					if (databaseType === "postgres" && backup.postgres?.serverId) {
-						serverId = backup.postgres.serverId;
-					} else if (databaseType === "mysql" && backup.mysql?.serverId) {
-						serverId = backup.mysql.serverId;
-					} else if (databaseType === "mongo" && backup.mongo?.serverId) {
-						serverId = backup.mongo.serverId;
-					} else if (databaseType === "mariadb" && backup.mariadb?.serverId) {
-						serverId = backup.mariadb.serverId;
-					} else if (databaseType === "libsql" && backup.libsql?.serverId) {
-						serverId = backup.libsql.serverId;
-					} else if (
-						backup.backupType === "compose" &&
-						backup.compose?.serverId
-					) {
-						serverId = backup.compose.serverId;
-					}
+					const serverId = getBackupServerId(backup) ?? "";
 					const server = await findServerById(serverId);
 
 					if (server.serverStatus === "inactive") {
@@ -423,9 +397,7 @@ export const backupRouter = createTRPCRouter({
 				"postgresId",
 			);
 			try {
-				const postgres = await findPostgresByBackupId(backup.backupId);
-				await runPostgresBackup(postgres, backup);
-				await keepLatestNBackups(backup, postgres?.serverId);
+				await runBackupDump("postgres", backup);
 				await audit(ctx, {
 					action: "run",
 					resourceType: "backup",
@@ -453,9 +425,7 @@ export const backupRouter = createTRPCRouter({
 				"mysqlId",
 			);
 			try {
-				const mysql = await findMySqlByBackupId(backup.backupId);
-				await runMySqlBackup(mysql, backup);
-				await keepLatestNBackups(backup, mysql?.serverId);
+				await runBackupDump("mysql", backup);
 				await audit(ctx, {
 					action: "run",
 					resourceType: "backup",
@@ -479,9 +449,7 @@ export const backupRouter = createTRPCRouter({
 				"mariadbId",
 			);
 			try {
-				const mariadb = await findMariadbByBackupId(backup.backupId);
-				await runMariadbBackup(mariadb, backup);
-				await keepLatestNBackups(backup, mariadb?.serverId);
+				await runBackupDump("mariadb", backup);
 				await audit(ctx, {
 					action: "run",
 					resourceType: "backup",
@@ -505,9 +473,7 @@ export const backupRouter = createTRPCRouter({
 				"composeId",
 			);
 			try {
-				const compose = await findComposeByBackupId(backup.backupId);
-				await runComposeBackup(compose, backup);
-				await keepLatestNBackups(backup, compose?.serverId);
+				await runBackupDump("compose", backup);
 				await audit(ctx, {
 					action: "run",
 					resourceType: "backup",
@@ -531,9 +497,7 @@ export const backupRouter = createTRPCRouter({
 				"mongoId",
 			);
 			try {
-				const mongo = await findMongoByBackupId(backup.backupId);
-				await runMongoBackup(mongo, backup);
-				await keepLatestNBackups(backup, mongo?.serverId);
+				await runBackupDump("mongo", backup);
 				await audit(ctx, {
 					action: "run",
 					resourceType: "backup",
@@ -557,9 +521,7 @@ export const backupRouter = createTRPCRouter({
 				"libsqlId",
 			);
 			try {
-				const libsql = await findLibsqlByBackupId(backup.backupId);
-				await runLibsqlBackup(libsql, backup);
-				await keepLatestNBackups(backup, libsql?.serverId);
+				await runBackupDump("libsql", backup);
 				await audit(ctx, {
 					action: "run",
 					resourceType: "backup",
@@ -719,14 +681,7 @@ export const backupRouter = createTRPCRouter({
 				});
 			}
 
-			const serverId =
-				backup.postgres?.serverId ??
-				backup.mysql?.serverId ??
-				backup.mariadb?.serverId ??
-				backup.mongo?.serverId ??
-				backup.libsql?.serverId ??
-				backup.compose?.serverId ??
-				null;
+			const serverId = getBackupServerId(backup);
 
 			// Instance backups were gated on the owner/admin role above.
 			// Every service id on the row, like authorizeBackupAccess above: a row

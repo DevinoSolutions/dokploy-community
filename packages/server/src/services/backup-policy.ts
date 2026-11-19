@@ -29,6 +29,10 @@ import {
 	scheduleVolumeBackup,
 } from "../utils/volume-backups/utils";
 import { findBackupById } from "./backup";
+import {
+	getBackupServiceId,
+	getVolumeBackupServiceId,
+} from "./backup-service-ids";
 import { findMountsByApplicationId } from "./mount";
 
 export type BackupPolicy = typeof backupPolicies.$inferSelect;
@@ -758,14 +762,7 @@ const dumpRowKey = (row: {
 	libsqlId: string | null;
 }): string => {
 	const type = row.databaseType as DumpServiceType;
-	const serviceId =
-		row.postgresId ??
-		row.mysqlId ??
-		row.mariadbId ??
-		row.mongoId ??
-		row.libsqlId ??
-		"";
-	return `db:${type}:${serviceId}`;
+	return `db:${type}:${getBackupServiceId(row) ?? ""}`;
 };
 
 const volumeRowKey = (row: {
@@ -780,17 +777,7 @@ const volumeRowKey = (row: {
 	libsqlId: string | null;
 	composeId: string | null;
 }): string => {
-	const serviceId =
-		row.applicationId ??
-		row.postgresId ??
-		row.mysqlId ??
-		row.mariadbId ??
-		row.mongoId ??
-		row.redisId ??
-		row.libsqlId ??
-		row.composeId ??
-		"";
-	return `vol:${row.serviceType}:${serviceId}:${row.volumeName}`;
+	return `vol:${row.serviceType}:${getVolumeBackupServiceId(row) ?? ""}:${row.volumeName}`;
 };
 
 // ---------------------------------------------------------------------------
