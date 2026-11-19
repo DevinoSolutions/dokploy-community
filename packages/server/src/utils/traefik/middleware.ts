@@ -2,11 +2,13 @@ import { paths } from "@dokploy/server/constants";
 import type { Domain } from "@dokploy/server/services/domain";
 import { parse, stringify } from "yaml";
 import type { ApplicationNested } from "../builders";
+import { readConfinedRemote, writeTraefikConfigRemote } from "./application";
 import {
-	readConfinedRemote,
-	writeTraefikConfigRemote,
-} from "./application";
-import { isTraefikPathError, readConfinedFile, writeConfinedFile } from "./confine";
+	dynamicTraefikFile,
+	isTraefikPathError,
+	readConfinedFile,
+	writeConfinedFile,
+} from "./confine";
 import type { FileConfig } from "./file-types";
 
 export const addMiddleware = (config: FileConfig, middlewareName: string) => {
@@ -77,10 +79,10 @@ export const deleteAllMiddlewares = async (application: ApplicationNested) => {
 };
 
 export const loadMiddlewares = <T>() => {
-	const { DYNAMIC_TRAEFIK_PATH } = paths();
-	const yamlStr = readConfinedFile(DYNAMIC_TRAEFIK_PATH, "middlewares.yml");
+	const file = dynamicTraefikFile("middlewares.yml");
+	const yamlStr = readConfinedFile(file);
 	if (yamlStr === null) {
-		throw new Error(`File not found: ${DYNAMIC_TRAEFIK_PATH}/middlewares.yml`);
+		throw new Error(`File not found: ${file.target}`);
 	}
 	const config = parse(yamlStr) as T;
 	return config;
@@ -93,8 +95,7 @@ export const loadRemoteMiddlewares = async (serverId: string) => {
 	try {
 		const stdout = await readConfinedRemote(
 			serverId,
-			DYNAMIC_TRAEFIK_PATH,
-			"middlewares.yml",
+			dynamicTraefikFile("middlewares.yml", true),
 		);
 		if (stdout === null) {
 			throw new Error(`File not found: ${configPath}`);
@@ -107,9 +108,8 @@ export const loadRemoteMiddlewares = async (serverId: string) => {
 	}
 };
 export const writeMiddleware = (config: FileConfig) => {
-	const { DYNAMIC_TRAEFIK_PATH } = paths();
 	const newYamlContent = stringify(config);
-	writeConfinedFile(DYNAMIC_TRAEFIK_PATH, "middlewares.yml", newYamlContent);
+	writeConfinedFile(dynamicTraefikFile("middlewares.yml"), newYamlContent);
 };
 
 export const createPathMiddlewares = async (

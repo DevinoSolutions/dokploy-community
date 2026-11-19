@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,8 +14,10 @@ import {
 } from "vitest";
 
 // T-6771: every read and write of a Traefik config file (the app's
-// `<appName>.yml`, `middlewares.yml`, `traefik.yml`), local and on a remote
-// server, stays inside the Traefik directory and never follows a symlink.
+// `<appName>.yml`, `middlewares.yml`, `traefik.yml`, and the files of the
+// Traefik files editor), local and on a remote server, stays inside the Traefik
+// directory and never follows a symlink, including a link swapped in while the
+// request runs.
 
 const state = vi.hoisted(() => ({ main: "", dynamic: "" }));
 
@@ -81,18 +83,20 @@ import {
 	loadOrCreateConfig,
 	loadOrCreateConfigRemote,
 	readConfig,
+	readConfigInPath,
 	readRemoteConfig,
 	writeAppTraefikConfig,
 	writeConfig,
 	writeConfigRemote,
 	writeTraefikConfig,
+	writeTraefikConfigInPath,
 	writeTraefikConfigRemote,
 } from "@dokploy/server/utils/traefik/application";
 import {
+	dynamicTraefikFile,
 	readConfinedFile,
 	remoteConfinedReadCommand,
 	remoteConfinedWriteCommand,
-	resolveConfinedFile,
 	writeConfinedFile,
 } from "@dokploy/server/utils/traefik/confine";
 import {
@@ -109,7 +113,8 @@ import {
 
 const rejected = { code: "BAD_REQUEST" };
 // Windows runs the local checks where it can plant symlinks; the remote
-// commands need a POSIX sh and a Linux realpath, so they run on Linux only.
+// commands need a POSIX sh and /proc, and a real O_NOFOLLOW, so those run on
+// Linux only.
 const onWindows = process.platform === "win32";
 const canSymlink = (() => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "traefik-symlink-probe-"));
@@ -163,6 +168,24 @@ describe("confined Traefik config files", () => {
 	const plantLink = (name: string, target = victim, dir = dynamic) =>
 		fs.symlinkSync(target, path.join(dir, name));
 
+	// A second process that keeps swapping `<dynamic>/app.yml` between a regular
+	// file and a symlink to `linkTarget`, as an attacker with write access to the
+	// directory would. Real links, real timing.
+	const startSwapper = (linkTarget: string): ChildProcess => {
+		const t = path.join(dynamic, "app.yml");
+		return spawn(
+			"sh",
+			[
+				"-c",
+				`while :; do rm -f "$1"; ln -s "$2" "$1"; rm -f "$1"; echo regular > "$1"; done`,
+				"swapper",
+				t,
+				linkTarget,
+			],
+			{ stdio: "ignore" },
+		);
+	};
+
 	describe("a normal install", () => {
 		it("reads and writes an app config, the middlewares and the main config", () => {
 			writeConfig("my-app", "http: {}\n");
@@ -184,7 +207,7 @@ describe("confined Traefik config files", () => {
 		it("overwrites an existing file in place, keeping its inode", () => {
 			// traefik.yml is bind-mounted as a single file into the Traefik container
 			const file = path.join(main, "traefik.yml");
-			fs.writeFileSync(file, "old");
+			fs.writeFileSync(file, "old content that is longer");
 			const before = fs.statSync(file).ino;
 			writeMainConfig("new");
 			expect(fs.readFileSync(file, "utf8")).toBe("new");
@@ -223,7 +246,7 @@ describe("confined Traefik config files", () => {
 
 		it("rejects a file name that is not a single path component", () => {
 			for (const name of ["../x.yml", "a/b.yml", "..", ".", "", "a\\b.yml"]) {
-				expect(() => resolveConfinedFile(dynamic, name)).toThrow(
+				expect(() => dynamicTraefikFile(name)).toThrow(
 					expect.objectContaining(rejected),
 				);
 			}
@@ -235,6 +258,77 @@ describe("confined Traefik config files", () => {
 			);
 			expect(fs.existsSync(path.join(main, "escape.yml"))).toBe(false);
 		});
+	});
+
+	describe("the Traefik files editor, local", () => {
+		it("reads and writes a file of the directory, creating it when missing", async () => {
+			const file = path.join(dynamic, "edited.yml");
+			await writeTraefikConfigInPath(file, "a: 1\n");
+			expect(await readConfigInPath(file)).toBe("a: 1\n");
+			expect(
+				await readConfigInPath(path.join(dynamic, "absent.yml")),
+			).toBeNull();
+		});
+
+		it("refuses a path outside the directory, written as the attacker wrote it", async () => {
+			// Raw strings, not path.join: nothing normalises the traversal away.
+			const escapes = [
+				`${main}/../outside/victim.txt`,
+				`${dynamic}/../../outside/victim.txt`,
+				`${main}-evil/x.yml`,
+				victim,
+			];
+			for (const target of escapes) {
+				await expect(readConfigInPath(target)).rejects.toMatchObject(rejected);
+				await expect(
+					writeTraefikConfigInPath(target, "pwned"),
+				).rejects.toMatchObject(rejected);
+			}
+			expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
+		});
+
+		it.skipIf(!canSymlink)(
+			"refuses a symlinked file and a directory link leaving the tree",
+			async () => {
+				plantLink("link.yml");
+				plantLink("out-dir", outside, main);
+				for (const target of [
+					path.join(dynamic, "link.yml"),
+					`${main}/out-dir/victim.txt`,
+				]) {
+					await expect(readConfigInPath(target)).rejects.toMatchObject(
+						rejected,
+					);
+					await expect(
+						writeTraefikConfigInPath(target, "pwned"),
+					).rejects.toMatchObject(rejected);
+				}
+				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
+			},
+		);
+
+		it.skipIf(onWindows)(
+			"does not follow a link swapped in while the editor reads and writes",
+			async () => {
+				const swapper = startSwapper(victim);
+				try {
+					for (let i = 0; i < 300; i++) {
+						const text = await readConfigInPath(
+							path.join(dynamic, "app.yml"),
+						).catch(() => "refused");
+						expect(text).not.toBe("untouched");
+						await writeTraefikConfigInPath(
+							path.join(dynamic, "app.yml"),
+							"pwned",
+						).catch(() => undefined);
+					}
+				} finally {
+					swapper.kill("SIGKILL");
+				}
+				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
+			},
+			60_000,
+		);
 	});
 
 	describe.skipIf(!canSymlink)(
@@ -262,6 +356,13 @@ describe("confined Traefik config files", () => {
 				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 				expect(fs.readFileSync(path.join(dynamic, "other.yml"), "utf8")).toBe(
 					"other",
+				);
+			});
+
+			it("names the file in the error", () => {
+				plantLink("middlewares.yml");
+				expect(() => loadMiddlewares()).toThrow(
+					/middlewares\.yml is a symbolic link/,
 				);
 			});
 
@@ -314,54 +415,97 @@ describe("confined Traefik config files", () => {
 				expect(fs.existsSync(path.join(outside, "not-there.txt"))).toBe(false);
 			});
 
+			it("does not stop the app config of a second app", () => {
+				plantLink("app.yml");
+				writeConfig("other-app", "ok");
+				expect(readConfig("other-app")).toBe("ok");
+			});
+
 			it.skipIf(onWindows)(
 				"is not followed when it appears after the check",
 				() => {
 					// The check saw no file; by the time the file is opened a link sits there.
 					// O_NOFOLLOW makes the open fail instead of writing through it.
-					const racePath = path.join(dynamic, "race.yml");
+					const file = dynamicTraefikFile("race.yml");
 					plantLink("race.yml");
 					const realLstat = fs.lstatSync;
 					const realRealpath = fs.realpathSync;
 					vi.spyOn(fs, "realpathSync").mockImplementation(((p: fs.PathLike) =>
-						String(p) === racePath ? racePath : realRealpath(p)) as never);
+						String(p) === file.target
+							? file.target
+							: realRealpath(p)) as never);
 					vi.spyOn(fs, "lstatSync").mockImplementation(((
 						p: fs.PathLike,
 						options?: object,
 					) =>
-						String(p) === racePath
+						String(p) === file.target
 							? undefined
 							: realLstat(p, options as never)) as never);
 
-					expect(() => writeConfinedFile(dynamic, "race.yml", "pwned")).toThrow(
+					expect(() => writeConfinedFile(file, "pwned")).toThrow(
 						expect.objectContaining(rejected),
 					);
-					expect(() => readConfinedFile(dynamic, "race.yml")).toThrow(
+					expect(() => readConfinedFile(file)).toThrow(
 						expect.objectContaining(rejected),
 					);
 					expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 				},
 			);
 
-			it("does not stop the app config of a second app", () => {
-				plantLink("app.yml");
-				writeConfig("other-app", "ok");
-				expect(readConfig("other-app")).toBe("ok");
-			});
+			it.skipIf(onWindows)(
+				"survives a real concurrent swap of the file for a link",
+				() => {
+					const swapper = startSwapper(victim);
+					try {
+						for (let i = 0; i < 300; i++) {
+							let read: string | null = null;
+							try {
+								read = readConfig("app");
+							} catch {
+								// refused
+							}
+							expect(read).not.toBe("untouched");
+							try {
+								writeConfig("app", "pwned");
+							} catch {
+								// refused
+							}
+						}
+					} finally {
+						swapper.kill("SIGKILL");
+					}
+					expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
+				},
+				60_000,
+			);
 		},
 	);
 
 	describe.skipIf(!canSymlink)("local: symlinked directories", () => {
-		it("writes into the real directory when the dynamic directory itself is a link", () => {
-			const real = path.join(root, "real-dynamic");
+		it("accepts a dynamic directory that is a link staying inside the Traefik tree", () => {
+			const real = path.join(main, "real-dynamic");
 			fs.rmSync(dynamic, { recursive: true, force: true });
-			fs.mkdirSync(real, { recursive: true });
+			fs.mkdirSync(real);
 			fs.symlinkSync(real, dynamic);
 
 			writeConfig("app", "ok");
 			expect(fs.readFileSync(path.join(real, "app.yml"), "utf8")).toBe("ok");
 			expect(readConfig("app")).toBe("ok");
-			fs.rmSync(dynamic, { force: true });
+		});
+
+		it("refuses a dynamic directory that is a link leaving the Traefik tree", () => {
+			const real = path.join(root, "real-dynamic");
+			fs.rmSync(dynamic, { recursive: true, force: true });
+			fs.mkdirSync(real, { recursive: true });
+			fs.symlinkSync(real, dynamic);
+
+			expect(() => writeConfig("app", "pwned")).toThrow(
+				expect.objectContaining(rejected),
+			);
+			expect(() => readConfig("app")).toThrow(
+				expect.objectContaining(rejected),
+			);
+			expect(fs.readdirSync(real)).toEqual([]);
 			fs.rmSync(real, { recursive: true, force: true });
 		});
 
@@ -370,10 +514,13 @@ describe("confined Traefik config files", () => {
 			fs.rmSync(link, { force: true });
 			fs.symlinkSync(main, link);
 			state.main = link;
+			state.dynamic = path.join(link, "dynamic");
 			writeMainConfig("ok");
+			writeConfig("app", "ok");
 			expect(fs.readFileSync(path.join(main, "traefik.yml"), "utf8")).toBe(
 				"ok",
 			);
+			expect(fs.readFileSync(path.join(dynamic, "app.yml"), "utf8")).toBe("ok");
 			fs.rmSync(link, { force: true });
 		});
 	});
@@ -412,7 +559,7 @@ describe("confined Traefik config files", () => {
 			});
 
 			it("works for a directory name with spaces and a quote", async () => {
-				const odd = path.join(root, "it's a dir");
+				const odd = path.join(main, "it's a dir");
 				fs.mkdirSync(odd);
 				state.dynamic = odd;
 				await writeConfigRemote(serverId, "app", "ok");
@@ -420,24 +567,46 @@ describe("confined Traefik config files", () => {
 				expect(await readRemoteConfig(serverId, "app")).toBe("ok");
 			});
 
-			it("leaves no temp file behind and sets mode 644", async () => {
-				await writeConfigRemote(serverId, "app", "one");
+			it("writes in place: same inode, same mode, no temp file", async () => {
+				const file = path.join(dynamic, "app.yml");
+				fs.writeFileSync(file, "a much longer old content", { mode: 0o600 });
+				fs.chmodSync(file, 0o600);
+				const before = fs.statSync(file).ino;
+
 				await writeConfigRemote(serverId, "app", "two");
+
+				expect(fs.readFileSync(file, "utf8")).toBe("two");
+				expect(fs.statSync(file).ino).toBe(before);
+				expect(fs.statSync(file).mode & 0o777).toBe(0o600);
 				expect(fs.readdirSync(dynamic)).toEqual(["app.yml"]);
-				expect(fs.statSync(path.join(dynamic, "app.yml")).mode & 0o777).toBe(
-					0o644,
-				);
 			});
 
-			it("works when the dynamic directory itself is a link", async () => {
-				const real = path.join(root, "real-dynamic");
+			it("accepts a dynamic directory that is a link inside the tree, refuses one leaving it", async () => {
+				const inside = path.join(main, "real-dynamic");
 				fs.rmSync(dynamic, { recursive: true, force: true });
-				fs.mkdirSync(real, { recursive: true });
-				fs.symlinkSync(real, dynamic);
+				fs.mkdirSync(inside);
+				fs.symlinkSync(inside, dynamic);
 				await writeConfigRemote(serverId, "app", "ok");
-				expect(fs.readFileSync(path.join(real, "app.yml"), "utf8")).toBe("ok");
+				expect(fs.readFileSync(path.join(inside, "app.yml"), "utf8")).toBe(
+					"ok",
+				);
+
 				fs.rmSync(dynamic, { force: true });
-				fs.rmSync(real, { recursive: true, force: true });
+				fs.symlinkSync(outside, dynamic);
+				fs.writeFileSync(path.join(outside, "app.yml"), "outside");
+				await expect(
+					writeConfigRemote(serverId, "app", "pwned"),
+				).rejects.toMatchObject(rejected);
+				await expect(readRemoteConfig(serverId, "app")).rejects.toMatchObject(
+					rejected,
+				);
+				expect(fs.readFileSync(path.join(outside, "app.yml"), "utf8")).toBe(
+					"outside",
+				);
+				expect(fs.readdirSync(outside).sort()).toEqual([
+					"app.yml",
+					"victim.txt",
+				]);
 			});
 
 			it.each([
@@ -460,6 +629,9 @@ describe("confined Traefik config files", () => {
 				await expect(
 					loadOrCreateConfigRemote(serverId, "app"),
 				).rejects.toMatchObject(rejected);
+				await expect(
+					writeConfigRemote(serverId, "app", "pwned"),
+				).rejects.toThrow(/app\.yml is a symbolic link/);
 				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 				expect(fs.readFileSync(path.join(dynamic, "other.yml"), "utf8")).toBe(
 					"other",
@@ -494,57 +666,125 @@ describe("confined Traefik config files", () => {
 					writeConfigRemote(serverId, "../escape", "x"),
 				).rejects.toMatchObject(rejected);
 				expect(fs.existsSync(path.join(main, "escape.yml"))).toBe(false);
-				expect(() => remoteConfinedReadCommand(dynamic, "../x")).toThrow();
-				expect(() => remoteConfinedWriteCommand(dynamic, "a/b")).toThrow();
+				expect(() => dynamicTraefikFile("../x")).toThrow();
 			});
 
-			it("does not follow a link planted between the check and the write", async () => {
-				// A shim for `chmod` (it runs after the check and before the rename)
-				// swaps the target for a link to the victim, as an attacker would.
+			it("the editor reads and writes through the same confined commands", async () => {
+				const file = path.join(dynamic, "edited.yml");
+				await writeTraefikConfigInPath(file, "a: 1\n", serverId);
+				expect(await readConfigInPath(file, serverId)).toBe("a: 1\n");
+				plantLink("link.yml");
+				await expect(
+					readConfigInPath(path.join(dynamic, "link.yml"), serverId),
+				).rejects.toMatchObject(rejected);
+				await expect(
+					writeTraefikConfigInPath(
+						path.join(dynamic, "link.yml"),
+						"x",
+						serverId,
+					),
+				).rejects.toMatchObject(rejected);
+				await expect(
+					readConfigInPath(`${main}/../outside/victim.txt`, serverId),
+				).rejects.toMatchObject(rejected);
+				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
+			});
+
+			// A shim for `readlink` (the command that asks the kernel what the opened
+			// descriptor is) swaps the target for a link first, as an attacker would
+			// between the checks and the use.
+			const swapDuringCheck = (linkTarget: string) => {
 				const bin = path.join(root, "bin");
 				fs.mkdirSync(bin, { recursive: true });
 				fs.writeFileSync(
-					path.join(bin, "chmod"),
-					`#!/bin/sh\nrm -f "$RACE_TARGET"\nln -s "$RACE_VICTIM" "$RACE_TARGET"\nexec /bin/chmod "$@"\n`,
+					path.join(bin, "readlink"),
+					`#!/bin/sh\nrm -f "$RACE_TARGET"\nln -s "$RACE_LINK" "$RACE_TARGET"\nexec /bin/readlink "$@"\n`,
 					{ mode: 0o755 },
 				);
 				host.env = {
 					PATH: `${bin}:${process.env.PATH}`,
 					RACE_TARGET: path.join(dynamic, "app.yml"),
-					RACE_VICTIM: victim,
+					RACE_LINK: linkTarget,
 				};
+				return () => fs.rmSync(bin, { recursive: true, force: true });
+			};
 
-				await writeConfigRemote(serverId, "app", "payload");
-
-				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
-				expect(
-					fs.lstatSync(path.join(dynamic, "app.yml")).isSymbolicLink(),
-				).toBe(false);
-				expect(fs.readFileSync(path.join(dynamic, "app.yml"), "utf8")).toBe(
-					"payload",
+			it("does not print a file a link is swapped for between the check and the read", async () => {
+				fs.writeFileSync(path.join(dynamic, "app.yml"), "regular");
+				const cleanup = swapDuringCheck(victim);
+				await expect(readRemoteConfig(serverId, "app")).rejects.toMatchObject(
+					rejected,
 				);
-				fs.rmSync(bin, { recursive: true, force: true });
+				cleanup();
+				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 			});
 
-			it("runs the generated commands under a POSIX sh with no bash features", async () => {
+			it("does not write through a link swapped in between the check and the write", async () => {
+				fs.writeFileSync(path.join(dynamic, "app.yml"), "regular");
+				const cleanup = swapDuringCheck(victim);
+				await expect(
+					writeConfigRemote(serverId, "app", "payload"),
+				).rejects.toMatchObject(rejected);
+				cleanup();
+				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
+			});
+
+			it("does not drop the content into a directory the target is swapped for a link to", async () => {
+				fs.writeFileSync(path.join(dynamic, "app.yml"), "regular");
+				const cleanup = swapDuringCheck(outside);
+				await expect(
+					writeConfigRemote(serverId, "app", "payload"),
+				).rejects.toMatchObject(rejected);
+				cleanup();
+				expect(fs.readdirSync(outside)).toEqual(["victim.txt"]);
+				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
+			});
+
+			it("survives a real concurrent swap of the file for a link, on read and on write", async () => {
+				const swapper = startSwapper(victim);
+				const dirSwapper = startSwapper(outside);
+				try {
+					for (let i = 0; i < 150; i++) {
+						const text = await readRemoteConfig(serverId, "app").catch(
+							() => "refused",
+						);
+						expect(text).not.toBe("untouched");
+						await writeConfigRemote(serverId, "app", "payload").catch(
+							() => undefined,
+						);
+					}
+				} finally {
+					swapper.kill("SIGKILL");
+					dirSwapper.kill("SIGKILL");
+				}
+				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
+				expect(fs.readdirSync(outside)).toEqual(["victim.txt"]);
+			}, 120_000);
+
+			it("runs the generated commands under a POSIX sh with the documented exit codes", async () => {
 				const run = (command: string, stdin = "") =>
 					new Promise<number | null>((resolve) => {
 						const child = spawn("sh", ["-c", command]);
 						child.on("close", resolve);
 						child.stdin.end(stdin);
 					});
-				expect(
-					await run(remoteConfinedWriteCommand(dynamic, "p.yml"), "x"),
-				).toBe(0);
-				expect(await run(remoteConfinedReadCommand(dynamic, "p.yml"))).toBe(0);
-				expect(await run(remoteConfinedReadCommand(dynamic, "none.yml"))).toBe(
+				// the remote paths are the real temp ones here
+				const local = (name: string) => ({
+					root: main,
+					target: path.join(dynamic, name),
+				});
+				expect(await run(remoteConfinedWriteCommand(local("p.yml")), "x")).toBe(
+					0,
+				);
+				expect(await run(remoteConfinedReadCommand(local("p.yml")))).toBe(0);
+				expect(await run(remoteConfinedReadCommand(local("none.yml")))).toBe(
 					96,
 				);
 				plantLink("l.yml");
-				expect(await run(remoteConfinedReadCommand(dynamic, "l.yml"))).toBe(97);
-				expect(
-					await run(remoteConfinedWriteCommand(dynamic, "l.yml"), "x"),
-				).toBe(97);
+				expect(await run(remoteConfinedReadCommand(local("l.yml")))).toBe(97);
+				expect(await run(remoteConfinedWriteCommand(local("l.yml")), "x")).toBe(
+					97,
+				);
 			});
 		},
 	);

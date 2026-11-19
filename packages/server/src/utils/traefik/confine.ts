@@ -1,26 +1,30 @@
 import fs from "node:fs";
 import path from "node:path";
-import { TRPCError } from "@trpc/server";
+import { paths } from "@dokploy/server/constants";
 import { shSingleQuote } from "@dokploy/server/utils/builders/remote-build-cancel";
+import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 
 /**
  * Confinement of Traefik configuration files to the Traefik directory.
  *
  * The files Dokploy reads and writes for Traefik (`<dynamic>/<appName>.yml`,
- * `<dynamic>/middlewares.yml`, `traefik.yml`) are opened as the Dokploy
- * process, which is root on the host, and as the SSH user on a remote server.
- * Anything able to plant a symlink in that directory (a bind mount of it, an
- * older release, a compose bind) would otherwise turn the read and write
- * routes into an arbitrary file read and write. Every helper here resolves
- * symlinks, requires the real path to stay inside the real Traefik directory
- * and refuses a target that is itself a symlink.
+ * `<dynamic>/middlewares.yml`, `traefik.yml`, and the files of the Traefik
+ * files editor) are opened as the Dokploy process, which is root on the host,
+ * and as the SSH user on a remote server. Anything able to plant a symlink in
+ * that directory (a bind mount of it, an older release, a compose bind) would
+ * otherwise turn the read and write routes into an arbitrary file read and
+ * write.
  *
- * This is the one place the rule lives: the settings router's path-based
- * Traefik file endpoints use `realpathAllowingMissingSync` and
- * `isInsideDirectory` from here too, and the by-name helpers below
- * (`readConfinedFile`, `writeConfinedFile` and the remote command builders)
- * serve every other route and internal caller.
+ * A file is a `{ root, target }` pair: `root` is the Traefik base directory
+ * (`MAIN_TRAEFIK_PATH`), `target` the file. The real path of `target`, after
+ * symlinks, must stay inside the real path of `root` (which may itself be a
+ * link), `target` must not be a symlink, and the file is then opened without
+ * following a link at its last component, with the opened descriptor checked
+ * against the resolved path, so a swap after the check is refused rather than
+ * followed. A `dynamic` directory that is a link leaving the Traefik tree is
+ * refused, like in the Traefik files editor. Missing files and directories
+ * (a fresh install) are allowed.
  */
 
 /** A path that would leave the Traefik directory, or is a symlink. */
@@ -38,6 +42,9 @@ export class TraefikPathError extends TRPCError {
 
 export const invalidTraefikPath = (reason?: string) =>
 	new TraefikPathError(reason);
+
+const linkReason = (target: string) =>
+	`${path.basename(target)} is a symbolic link or leads outside the Traefik configuration directory, and Dokploy does not follow links there. Replace it with a regular file`;
 
 export const isInsideDirectory = (
 	pathApi: typeof path.posix,
@@ -65,7 +72,7 @@ export const realpathAllowingMissingSync = (target: string): string => {
 		}
 	}
 	if (fs.lstatSync(target, { throwIfNoEntry: false })) {
-		throw invalidTraefikPath();
+		throw invalidTraefikPath(linkReason(target));
 	}
 	const parent = path.dirname(target);
 	if (parent === target) {
@@ -86,50 +93,97 @@ export const assertTraefikFileName = (name: string) => {
 	}
 };
 
-/**
- * The real path of `<dir>/<name>`, after symlinks, for a read or a write.
- * The directory may be missing (a fresh install) and so may the file; both
- * are allowed. The result is inside the real directory, which may itself be
- * a symlink, and the file is not a symlink.
- */
-export const resolveConfinedFile = (dir: string, name: string): string => {
+export type TraefikFile = { root: string; target: string };
+
+/** `<dynamic>/<name>`, confined to the Traefik base directory. */
+export const dynamicTraefikFile = (
+	name: string,
+	isServer = false,
+): TraefikFile => {
 	assertTraefikFileName(name);
-	const base = path.resolve(dir);
-	const target = path.join(base, name);
-	const realBase = realpathAllowingMissingSync(base);
-	const realTarget = realpathAllowingMissingSync(target);
-	if (!isInsideDirectory(path, realBase, realTarget)) {
-		throw invalidTraefikPath();
+	const { MAIN_TRAEFIK_PATH, DYNAMIC_TRAEFIK_PATH } = paths(isServer);
+	const api = isServer ? path.posix : path;
+	return {
+		root: MAIN_TRAEFIK_PATH,
+		target: api.join(DYNAMIC_TRAEFIK_PATH, name),
+	};
+};
+
+/** `<traefik base>/<name>`, for `traefik.yml`. */
+export const mainTraefikFile = (name: string, isServer = false): TraefikFile => {
+	assertTraefikFileName(name);
+	const { MAIN_TRAEFIK_PATH } = paths(isServer);
+	const api = isServer ? path.posix : path;
+	return { root: MAIN_TRAEFIK_PATH, target: api.join(MAIN_TRAEFIK_PATH, name) };
+};
+
+/** A file the Traefik files editor names by path (already an absolute path). */
+export const editorTraefikFile = (
+	target: string,
+	isServer = false,
+): TraefikFile => ({ root: paths(isServer).MAIN_TRAEFIK_PATH, target });
+
+/**
+ * The real root and the real path of the file, after symlinks, for a read or a
+ * write. The file may be missing, and so may its directory.
+ */
+export const resolveConfinedFile = ({ root, target }: TraefikFile) => {
+	const realRoot = realpathAllowingMissingSync(path.resolve(root));
+	const realTarget = realpathAllowingMissingSync(path.resolve(target));
+	if (
+		!isInsideDirectory(path, realRoot, realTarget) ||
+		fs.lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()
+	) {
+		throw invalidTraefikPath(linkReason(target));
 	}
-	if (fs.lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) {
-		throw invalidTraefikPath("the file is a symbolic link");
-	}
-	return realTarget;
+	return { realRoot, realTarget };
 };
 
 // O_NOFOLLOW makes the open fail on a symlink at the last component, so a link
 // planted between the check and the open is not followed. It does not exist on
 // Windows, where Dokploy only runs for development.
-const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+const noFollow = () => fs.constants.O_NOFOLLOW ?? 0;
 
-// Opens the already resolved path without following a link at the last
-// component (a numeric flag, so not through readFileSync/writeFileSync's string
-// flags), and maps ELOOP to the same refusal as the check.
+// On Linux the kernel says what an open descriptor really is. A directory of
+// the path swapped for a link after the check (which O_NOFOLLOW does not cover)
+// shows up here, before anything is read or written.
+const assertDescriptorInside = (
+	fd: number,
+	realRoot: string,
+	realTarget: string,
+	target: string,
+) => {
+	if (process.platform !== "linux" || !fs.existsSync("/proc/self/fd")) {
+		return;
+	}
+	let actual: string;
+	try {
+		actual = fs.realpathSync(`/proc/self/fd/${fd}`);
+	} catch {
+		throw invalidTraefikPath("the file path could not be resolved");
+	}
+	if (actual !== realTarget || !isInsideDirectory(path, realRoot, actual)) {
+		throw invalidTraefikPath(linkReason(target));
+	}
+};
+
 const withOpenFile = <T>(
-	realPath: string,
+	file: TraefikFile,
 	flags: number,
 	use: (fd: number) => T,
 ): T => {
+	const { realRoot, realTarget } = resolveConfinedFile(file);
 	let fd: number;
 	try {
-		fd = fs.openSync(realPath, flags | NOFOLLOW, 0o666);
+		fd = fs.openSync(realTarget, flags | noFollow(), 0o666);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ELOOP") {
-			throw invalidTraefikPath("the file is a symbolic link");
+			throw invalidTraefikPath(linkReason(file.target));
 		}
 		throw error;
 	}
 	try {
+		assertDescriptorInside(fd, realRoot, realTarget, file.target);
 		return use(fd);
 	} finally {
 		fs.closeSync(fd);
@@ -137,10 +191,9 @@ const withOpenFile = <T>(
 };
 
 /** The file's text, or null when it does not exist. */
-export const readConfinedFile = (dir: string, name: string): string | null => {
-	const realPath = resolveConfinedFile(dir, name);
+export const readConfinedFile = (file: TraefikFile): string | null => {
 	try {
-		return withOpenFile(realPath, fs.constants.O_RDONLY, (fd) =>
+		return withOpenFile(file, fs.constants.O_RDONLY, (fd) =>
 			fs.readFileSync(fd, "utf8"),
 		);
 	} catch (error) {
@@ -155,20 +208,14 @@ export const readConfinedFile = (dir: string, name: string): string | null => {
  * Writes in place, creating the file when it is missing. In place, not a
  * temp file and a rename, because `traefik.yml` is bind-mounted as a single
  * file into the Traefik container: a rename would leave the running container
- * on the old inode. The open uses O_NOFOLLOW on the already resolved real
- * path, so a symlink planted after the check is refused, not followed.
+ * on the old inode. The file is opened without O_TRUNC and truncated only
+ * after the descriptor has been checked, so a refused open destroys nothing.
  */
-export const writeConfinedFile = (
-	dir: string,
-	name: string,
-	content: string,
-): void => {
-	const realPath = resolveConfinedFile(dir, name);
-	withOpenFile(
-		realPath,
-		fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC,
-		(fd) => fs.writeFileSync(fd, content, "utf8"),
-	);
+export const writeConfinedFile = (file: TraefikFile, content: string): void => {
+	withOpenFile(file, fs.constants.O_WRONLY | fs.constants.O_CREAT, (fd) => {
+		fs.ftruncateSync(fd, 0);
+		fs.writeFileSync(fd, content, "utf8");
+	});
 };
 
 /** Exit codes of the remote commands below. */
@@ -176,14 +223,14 @@ export const REMOTE_ABSENT = 96;
 export const REMOTE_REFUSED = 97;
 export const REMOTE_WRITE_FAILED = 95;
 
-const remoteVars = (dir: string, name: string) =>
-	[`d=${quote([dir])}`, `n=${quote([name])}`, 't="$d/$n"'].join("\n");
+const remoteVars = ({ root, target }: TraefikFile) =>
+	[`d=${quote([root])}`, `t=${quote([target])}`].join("\n");
 
-// Resolves `$t` (`<dir>/<name>`) on the remote host and refuses (exit 97) when
-// the resolved path leaves the resolved directory or the file is a symlink.
-// GNU `realpath -m` resolves every existing component and tolerates missing
-// ones; BusyBox and BSD realpath have no `-m` but tolerate a missing last
-// component, which is the "file does not exist yet" write.
+// Resolves `$t` on the remote host and refuses (exit 97) when the resolved path
+// leaves the resolved root or the file is a symlink. GNU `realpath -m`
+// resolves every existing component and tolerates missing ones; BusyBox and BSD
+// realpath have no `-m` but tolerate a missing last component, which is the
+// "file does not exist yet" write.
 const remoteChecks = [
 	'if realpath -m / >/dev/null 2>&1; then rp() { realpath -m "$1"; }; else rp() { realpath "$1"; }; fi',
 	`rd=$(rp "$d") || exit ${REMOTE_REFUSED}`,
@@ -195,54 +242,62 @@ const remoteChecks = [
 const inSh = (script: string) => `sh -c ${shSingleQuote(script)}`;
 
 /**
- * Prints `<dir>/<name>` from a remote host after the same checks as the local
- * helpers, all inside one command so nothing can change between the check and
- * the read. Exit 96: the file does not exist. Exit 97: refused.
+ * Prints the file from a remote host after the same checks as the local
+ * helpers, all inside one command. The file is opened once, on descriptor 3,
+ * and the kernel is asked what that descriptor is (`/proc/$$/fd/3`): a link
+ * swapped in after the checks makes the two differ and the command refuses,
+ * instead of printing what the link points to. Exit 96: the file does not
+ * exist. Exit 97: refused.
  */
-export const remoteConfinedReadCommand = (dir: string, name: string) => {
-	assertTraefikFileName(name);
-	return inSh(
+export const remoteConfinedReadCommand = (file: TraefikFile) =>
+	inSh(
 		[
-			remoteVars(dir, name),
+			remoteVars(file),
 			`if [ ! -e "$t" ] && [ ! -L "$t" ]; then exit ${REMOTE_ABSENT}; fi`,
 			remoteChecks,
-			'cat -- "$rt"',
+			`exec 3< "$rt" || exit ${REMOTE_REFUSED}`,
+			`[ "$(readlink -f /proc/$$/fd/3)" = "$rt" ] || exit ${REMOTE_REFUSED}`,
+			"cat <&3",
 		].join("\n"),
 	);
-};
 
 /**
- * Writes the text on stdin to `<dir>/<name>` on a remote host after the same
- * checks, in one command. It is written to a temp file in the same directory
- * and renamed over the target: rename replaces a symlink planted after the
- * check instead of following it. (Only for files in the dynamic directory;
- * `traefik.yml` is bind-mounted as a single file and must keep its inode.)
- * The temp name has no `.yml` suffix, so Traefik's file provider ignores it.
+ * Writes the text on stdin to the file on a remote host after the same checks,
+ * in one command, in place (same inode, mode and owner, which `traefik.yml`
+ * needs: it is bind-mounted as a single file into the Traefik container). A
+ * missing file is created with an exclusive create (`set -C`), which never
+ * follows a link. The existing file is then opened read-only on descriptor 3,
+ * the kernel is asked what that descriptor is (`/proc/$$/fd/3`), and only if
+ * it is the checked path is the file truncated and written, through the
+ * descriptor's own `/proc` entry. A link (to a file or to a directory)
+ * swapped in after the checks changes what the descriptor is, so nothing is
+ * written and nothing is created through it. Exit 95: the open or write failed.
  */
-export const remoteConfinedWriteCommand = (dir: string, name: string) => {
-	assertTraefikFileName(name);
-	return inSh(
+export const remoteConfinedWriteCommand = (file: TraefikFile) =>
+	inSh(
 		[
-			remoteVars(dir, name),
+			remoteVars(file),
 			remoteChecks,
 			`if [ -d "$rt" ]; then exit ${REMOTE_REFUSED}; fi`,
-			`tmp=$(mktemp "$(dirname "$rt")/.traefik-write.XXXXXX") || exit ${REMOTE_WRITE_FAILED}`,
-			"trap 'rm -f \"$tmp\"' EXIT",
-			`cat > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$rt" || exit ${REMOTE_WRITE_FAILED}`,
+			'if [ ! -e "$rt" ]; then ( set -C; : > "$rt" ) 2>/dev/null; fi',
+			`[ -r "$rt" ] || exit ${REMOTE_WRITE_FAILED}`,
+			`exec 3< "$rt" || exit ${REMOTE_WRITE_FAILED}`,
+			`[ "$(readlink -f /proc/$$/fd/3)" = "$rt" ] || exit ${REMOTE_REFUSED}`,
+			`cat > /proc/$$/fd/3 || exit ${REMOTE_WRITE_FAILED}`,
 		].join("\n"),
 	);
-};
 
 /** A failed remote command as a refusal, or null when it failed otherwise. */
-export const asRemoteRefusal = (error: unknown): TraefikPathError | null => {
+export const asRemoteRefusal = (
+	error: unknown,
+	target: string,
+): TraefikPathError | null => {
 	const { name, exitCode } = (error ?? {}) as {
 		name?: string;
 		exitCode?: unknown;
 	};
 	if (name === "ExecError" && exitCode === REMOTE_REFUSED) {
-		return invalidTraefikPath(
-			"the file is a symbolic link or resolves outside the Traefik configuration directory",
-		);
+		return invalidTraefikPath(linkReason(target));
 	}
 	return null;
 };

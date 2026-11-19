@@ -14,6 +14,7 @@ import { stringify } from "yaml";
 import type { z } from "zod";
 import { encodeBase64 } from "../utils/docker/utils";
 import { execAsyncRemote } from "../utils/process/execAsync";
+import { writeConfinedFile } from "../utils/traefik/confine";
 
 export type Certificate = typeof certificates.$inferSelect;
 
@@ -127,7 +128,9 @@ export const removeCertificateById = async (certificateId: string) => {
 };
 
 const createCertificateFiles = async (certificate: Certificate) => {
-	const { DYNAMIC_TRAEFIK_PATH } = paths(!!certificate.serverId);
+	const { MAIN_TRAEFIK_PATH, DYNAMIC_TRAEFIK_PATH } = paths(
+		!!certificate.serverId,
+	);
 	const certDir = resolveCertificateDir(certificate);
 	const crtPath = path.join(certDir, "chain.crt");
 	const keyPath = path.join(certDir, "privkey.key");
@@ -168,10 +171,15 @@ const createCertificateFiles = async (certificate: Certificate) => {
 			fs.mkdirSync(certDir, { recursive: true });
 		}
 
-		fs.writeFileSync(crtPath, certificate.certificateData);
-		fs.writeFileSync(keyPath, certificate.privateKey);
-
-		fs.writeFileSync(configFile, yamlConfig);
+		// Confined to the Traefik directory: a link planted at one of these names
+		// must not receive the private key (T-6771).
+		for (const [target, content] of [
+			[crtPath, certificate.certificateData],
+			[keyPath, certificate.privateKey],
+			[configFile, yamlConfig],
+		] as const) {
+			writeConfinedFile({ root: MAIN_TRAEFIK_PATH, target }, content);
+		}
 	}
 };
 
