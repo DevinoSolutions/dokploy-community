@@ -1,6 +1,6 @@
 import type { ApplicationNested, Domain, Redirect } from "@dokploy/server";
 import { createRouterConfig } from "@dokploy/server";
-import { writeFileRemote } from "@dokploy/server/utils/process/execAsync";
+import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { expect, test, vi } from "vitest";
 
 vi.mock("@dokploy/server/utils/process/execAsync", () => ({
@@ -202,11 +202,10 @@ test("Web entrypoint on http domain", async () => {
 	expect(router.rule).not.toContain("PathPrefix");
 });
 
-// Upstream v0.30.5 (#5246) replaced the `echo <base64> | base64 -d > path`
-// remote write with an SFTP `writeFileRemote`, so there is no shell command to
-// inspect any more. The regression this test guards is unchanged: the YAML the
-// writer hands to the transport must still carry the shell-sensitive quoting
-// verbatim.
+// The remote write sends the YAML on the command's stdin (T-6771), not inside
+// the command line, so quoting cannot mangle it. The regression this test
+// guards is unchanged: the YAML the writer hands to the transport must still
+// carry the shell-sensitive quoting verbatim.
 test("Remote Traefik writer preserves shell-sensitive YAML values", async () => {
 	const { writeTraefikConfigRemote } = await import("@dokploy/server");
 	const csp =
@@ -230,12 +229,14 @@ test("Remote Traefik writer preserves shell-sensitive YAML values", async () => 
 		"server-1",
 	);
 
-	const lastCall = vi.mocked(writeFileRemote).mock.calls.at(-1);
+	const lastCall = vi.mocked(execAsyncRemote).mock.calls.at(-1);
 	expect(lastCall).toBeDefined();
-	const [serverId, configPath, written] = lastCall ?? [];
+	const [serverId, command, , options] = lastCall ?? [];
+	const written = options?.stdin;
 
 	expect(serverId).toBe("server-1");
-	expect(configPath).toContain("middlewares.yml");
+	expect(command).toContain("middlewares.yml");
+	expect(command).not.toContain("unsafe-inline");
 	expect(written).toContain("'unsafe-inline'");
 	expect(written).toContain("'unsafe-eval'");
 	expect(written).toContain("frame-ancestors 'self'");

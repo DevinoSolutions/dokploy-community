@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 	existsSync: vi.fn(() => false),
 	mkdirSync: vi.fn(),
 	writeFileSync: vi.fn(),
+	writeConfinedFile: vi.fn(),
 }));
 
 vi.mock("node:fs", () => ({
@@ -39,7 +40,15 @@ vi.mock("@dokploy/server/db", () => ({
 }));
 
 vi.mock("@dokploy/server/constants", () => ({
-	paths: () => ({ CERTIFICATES_PATH, DYNAMIC_TRAEFIK_PATH }),
+	paths: () => ({
+		CERTIFICATES_PATH,
+		DYNAMIC_TRAEFIK_PATH,
+		MAIN_TRAEFIK_PATH: "/etc/dokploy/traefik",
+	}),
+}));
+
+vi.mock("@dokploy/server/utils/traefik/confine", () => ({
+	writeConfinedFile: mocks.writeConfinedFile,
 }));
 
 vi.mock("@dokploy/server/utils/filesystem/directory", () => ({
@@ -149,6 +158,7 @@ describe("certificate files stay inside CERTIFICATES_PATH", () => {
 		).rejects.toMatchObject({ code: "BAD_REQUEST" });
 		expect(mocks.mkdirSync).not.toHaveBeenCalled();
 		expect(mocks.writeFileSync).not.toHaveBeenCalled();
+		expect(mocks.writeConfinedFile).not.toHaveBeenCalled();
 	});
 
 	it("writes certificate files inside CERTIFICATES_PATH", async () => {
@@ -169,6 +179,16 @@ describe("certificate files stay inside CERTIFICATES_PATH", () => {
 		expect(mocks.mkdirSync).toHaveBeenCalledWith(
 			path.resolve(CERTIFICATES_PATH, "certificate-abc123"),
 			{ recursive: true },
+		);
+		// The files go through the confined writer (no symlink is followed).
+		const certDir = path.resolve(CERTIFICATES_PATH, "certificate-abc123");
+		expect(mocks.writeConfinedFile.mock.calls.map(([f]) => f.target)).toEqual([
+			path.join(certDir, "chain.crt"),
+			path.join(certDir, "privkey.key"),
+			path.join(DYNAMIC_TRAEFIK_PATH, "certificate-abc123.yml"),
+		]);
+		expect(mocks.writeConfinedFile.mock.calls[0]?.[0].root).toBe(
+			"/etc/dokploy/traefik",
 		);
 	});
 });

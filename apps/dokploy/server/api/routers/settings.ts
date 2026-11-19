@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import {
 	assertRunningTraefikImageKept,
@@ -82,6 +81,11 @@ import {
 	addWatchdogExclusion,
 	removeWatchdogExclusion,
 } from "@dokploy/server/services/web-server-settings";
+import {
+	invalidTraefikPath,
+	isInsideDirectory,
+	realpathAllowingMissingSync,
+} from "@dokploy/server/utils/traefik/confine";
 import {
 	apiAddDeploymentWatchdogExclusion,
 	apiRemoveDeploymentWatchdogExclusion,
@@ -167,52 +171,6 @@ import {
 	publicProcedure,
 	withPermission,
 } from "../trpc";
-
-const invalidTraefikPath = (reason?: string) =>
-	new TRPCError({
-		code: "BAD_REQUEST",
-		message: reason
-			? `Invalid path: ${reason}`
-			: "Invalid path: file must be inside the Traefik configuration directory",
-	});
-
-const isInsideDirectory = (
-	pathApi: typeof path.posix,
-	directory: string,
-	target: string,
-) => {
-	const prefix = directory.endsWith(pathApi.sep)
-		? directory
-		: `${directory}${pathApi.sep}`;
-	return target.startsWith(prefix);
-};
-
-/**
- * `fs.realpath` for a path that may not exist yet (a write that creates the
- * file): the nearest existing parent is resolved and the missing tail is
- * joined back. A dangling symlink is rejected, because writing to it would
- * create its target wherever it points.
- */
-const realpathAllowingMissing = async (target: string): Promise<string> => {
-	try {
-		return await fs.promises.realpath(target);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-			throw invalidTraefikPath("the file path could not be resolved");
-		}
-	}
-	if (await fs.promises.lstat(target).catch(() => null)) {
-		throw invalidTraefikPath();
-	}
-	const parent = path.dirname(target);
-	if (parent === target) {
-		throw invalidTraefikPath("the file path could not be resolved");
-	}
-	return path.join(
-		await realpathAllowingMissing(parent),
-		path.basename(target),
-	);
-};
 
 /**
  * The same on a remote host, in one SSH round trip. GNU `realpath -m` resolves
@@ -304,8 +262,8 @@ const resolveTraefikFilePath = async (
 	const [realBase, realTarget] = serverId
 		? await remoteRealpaths(serverId, base, resolved)
 		: [
-				await realpathAllowingMissing(base),
-				await realpathAllowingMissing(resolved),
+				realpathAllowingMissingSync(base),
+				realpathAllowingMissingSync(resolved),
 			];
 	if (!isInsideDirectory(pathApi, realBase, realTarget)) {
 		throw invalidTraefikPath();

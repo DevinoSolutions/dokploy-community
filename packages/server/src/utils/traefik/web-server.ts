@@ -1,14 +1,17 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { paths } from "@dokploy/server/constants";
 import type { webServerSettings } from "@dokploy/server/db/schema/web-server-settings";
 import { parse, stringify } from "yaml";
-import { execAsyncRemote } from "../process/execAsync";
 import {
 	loadOrCreateConfig,
+	readConfinedRemote,
 	removeTraefikConfig,
 	writeTraefikConfig,
 } from "./application";
+import {
+	isTraefikPathError,
+	mainTraefikFile,
+	readConfinedFile,
+	writeConfinedFile,
+} from "./confine";
 import type { FileConfig } from "./file-types";
 import { loadMiddlewares, writeMiddleware } from "./middleware";
 import type { MainTraefikConfig } from "./types";
@@ -89,9 +92,10 @@ export const updateServerTraefik = (
 export const updateLetsEncryptEmail = (newEmail: string | null) => {
 	try {
 		if (!newEmail) return;
-		const { MAIN_TRAEFIK_PATH } = paths();
-		const configPath = join(MAIN_TRAEFIK_PATH, "traefik.yml");
-		const configContent = readFileSync(configPath, "utf8");
+		const configContent = readConfinedFile(mainTraefikFile("traefik.yml"));
+		if (configContent === null) {
+			throw new Error("Main Traefik config (traefik.yml) not found");
+		}
 		const config = parse(configContent) as MainTraefikConfig;
 		if (config?.certificatesResolvers?.letsencrypt?.acme) {
 			config.certificatesResolvers.letsencrypt.acme.email = newEmail;
@@ -99,20 +103,14 @@ export const updateLetsEncryptEmail = (newEmail: string | null) => {
 			throw new Error("Invalid Let's Encrypt configuration structure.");
 		}
 		const newYamlContent = stringify(config);
-		writeFileSync(configPath, newYamlContent, "utf8");
+		writeConfinedFile(mainTraefikFile("traefik.yml"), newYamlContent);
 	} catch (error) {
 		throw error;
 	}
 };
 
 export const readMainConfig = () => {
-	const { MAIN_TRAEFIK_PATH } = paths();
-	const configPath = join(MAIN_TRAEFIK_PATH, "traefik.yml");
-	if (existsSync(configPath)) {
-		const yamlStr = readFileSync(configPath, "utf8");
-		return yamlStr;
-	}
-	return null;
+	return readConfinedFile(mainTraefikFile("traefik.yml"));
 };
 
 export const getCertificateResolvers = async (
@@ -121,10 +119,10 @@ export const getCertificateResolvers = async (
 	try {
 		let yamlStr: string | null = null;
 		if (serverId) {
-			const { MAIN_TRAEFIK_PATH } = paths(true);
-			const configPath = join(MAIN_TRAEFIK_PATH, "traefik.yml");
-			const { stdout } = await execAsyncRemote(serverId, `cat ${configPath}`);
-			yamlStr = stdout || null;
+			yamlStr = await readConfinedRemote(
+				serverId,
+				mainTraefikFile("traefik.yml", true),
+			);
 		} else {
 			yamlStr = readMainConfig();
 		}
@@ -144,10 +142,9 @@ export const getCertificateResolvers = async (
 
 export const writeMainConfig = (traefikConfig: string) => {
 	try {
-		const { MAIN_TRAEFIK_PATH } = paths();
-		const configPath = join(MAIN_TRAEFIK_PATH, "traefik.yml");
-		writeFileSync(configPath, traefikConfig, "utf8");
+		writeConfinedFile(mainTraefikFile("traefik.yml"), traefikConfig);
 	} catch (e) {
+		if (isTraefikPathError(e)) throw e;
 		console.error("Error saving the YAML config file:", e);
 	}
 };
