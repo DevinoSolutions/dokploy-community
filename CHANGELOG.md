@@ -2,6 +2,14 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.31.0-community.9
+
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.8 keeps working. This release includes everything in v0.31.0-community.8.
+
+**Changed.**
+
+- Internal cleanup only, with no change you can see (T-19565). The GitHub Actions deployment-row checks and the deployment title format now live in one shared module (#645), and the backups code uses one service-id resolver and one dump runner (#644).
+
 ### New in v0.31.0-community.8
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.7 keeps working. This release includes everything in v0.31.0-community.7. Update Server and Reload Server now refuse while a deploy is running, so finish or cancel running deploys before using them.
