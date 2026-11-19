@@ -36,7 +36,12 @@ const {
 	canContinueLiveBuild,
 	claimLiveGithubBuild,
 	notWaitingForGithubRun,
+	registeredOpenRow,
+	registeredOpenRowNotQueued,
 } = await import("@dokploy/server/services/live-build-claim");
+const { isRegisteredOpenGithubRow } = await import(
+	"@dokploy/server/services/build-origin-shared"
+);
 
 const live = (overrides: Record<string, unknown> = {}) => ({
 	deploymentId: "dep-1",
@@ -303,5 +308,62 @@ describe("notWaitingForGithubRun (the watchdog and restart exemption)", () => {
 		const { sql, params } = new PgDialect().sqlToQuery(notWaitingForGithubRun);
 		expect(sql).toBe('"deployment"."externalBuildOnly" = $1');
 		expect(params).toEqual([false]);
+	});
+});
+
+describe("registeredOpenRow (the SQL twin of isRegisteredOpenGithubRow)", () => {
+	// Every conjunct is a distinct row state the callers rely on: a state dropped here would let a finished row,
+	// a row Dokploy built or a row a deploy took over be ended by the poller or a deploy request.
+	it("keeps in only a running GitHub Actions row nothing took over", () => {
+		if (!registeredOpenRow) throw new Error("no condition");
+		const { sql, params } = new PgDialect().sqlToQuery(registeredOpenRow);
+		expect(sql).toBe(
+			'("deployment"."status" = $1 and "deployment"."buildOrigin" = $2 and "deployment"."externalBuildOnly" = $3)',
+		);
+		expect(params).toEqual(["running", "github-actions", true]);
+	});
+
+	it("leaves a row whose deploy waits in the queue to the caller (the queue backstop may end it)", () => {
+		if (!registeredOpenRow) throw new Error("no condition");
+		const { sql } = new PgDialect().sqlToQuery(registeredOpenRow);
+		expect(sql).not.toContain("deployQueuedAt");
+	});
+});
+
+describe("registeredOpenRowNotQueued (the rows the run poller owns)", () => {
+	it("adds that no deploy was accepted for the row", () => {
+		if (!registeredOpenRowNotQueued) throw new Error("no condition");
+		const { sql, params } = new PgDialect().sqlToQuery(
+			registeredOpenRowNotQueued,
+		);
+		expect(sql).toBe(
+			'(("deployment"."status" = $1 and "deployment"."buildOrigin" = $2 and "deployment"."externalBuildOnly" = $3) and "deployment"."deployQueuedAt" is null)',
+		);
+		expect(params).toEqual(["running", "github-actions", true]);
+	});
+});
+
+describe("the in-memory and the SQL condition name the same row states", () => {
+	// The twins cannot be compared by running one against the other, so pin both to the same three states.
+	it("both are made of status, build origin and externalBuildOnly, and nothing else", () => {
+		if (!registeredOpenRow) throw new Error("no condition");
+		const { sql } = new PgDialect().sqlToQuery(registeredOpenRow);
+		const columns = [...sql.matchAll(/"deployment"\."(\w+)"/g)].map(
+			(match) => match[1] as string,
+		);
+		expect(columns).toEqual(["status", "buildOrigin", "externalBuildOnly"]);
+		const row = {
+			status: "running",
+			buildOrigin: "github-actions",
+			externalBuildOnly: true,
+		};
+		expect(isRegisteredOpenGithubRow(row)).toBe(true);
+		for (const column of columns) {
+			const broken = {
+				...row,
+				[column]: column === "externalBuildOnly" ? false : "other",
+			};
+			expect(isRegisteredOpenGithubRow(broken)).toBe(false);
+		}
 	});
 });

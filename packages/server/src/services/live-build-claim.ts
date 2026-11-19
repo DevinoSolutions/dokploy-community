@@ -1,7 +1,8 @@
 import { db } from "@dokploy/server/db";
 import { deployments } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
+import { isRegisteredOpenGithubRow } from "./build-origin-shared";
 
 // Kept apart from external-build.ts: the deploy flows (application.ts, compose.ts) import this, and external-build.ts
 // imports them, so a shared file would be an import cycle.
@@ -17,6 +18,29 @@ const serviceColumn = (kind: "application" | "compose") =>
  * before the column existed, passes.
  */
 export const notWaitingForGithubRun = eq(deployments.externalBuildOnly, false);
+
+/**
+ * A registered GitHub Actions row nothing took over and that is still open: the workflow registered it while GitHub
+ * builds, it is `running`, and no deploy made it a normal row (`externalBuildOnly` is still true). The SQL twin of
+ * `isRegisteredOpenGithubRow` (build-origin-shared.ts, the in-memory condition); change both together.
+ *
+ * It does not say whether a deploy waits for the row in Dokploy's queue (`deployQueuedAt`): use
+ * `registeredOpenRowNotQueued` for the rows the run poller owns, and this one for the rows either owner may end.
+ */
+export const registeredOpenRow = and(
+	eq(deployments.status, "running"),
+	eq(deployments.buildOrigin, "github-actions"),
+	eq(deployments.externalBuildOnly, true),
+);
+
+/**
+ * An open registered row with no deploy accepted for it: the only rows the run poller (and `finishExternalBuild`)
+ * may follow and end. A row whose deploy was accepted (`deployQueuedAt`) is the queue's.
+ */
+export const registeredOpenRowNotQueued = and(
+	registeredOpenRow,
+	isNull(deployments.deployQueuedAt),
+);
 
 /** What `claimLiveGithubBuild` needs to know about the deploy that wants the row. */
 export type LiveBuildClaim = {
@@ -53,9 +77,7 @@ export const canContinueLiveBuild = (
 	row: ClaimableRow,
 	claim: Pick<LiveBuildClaim, "kind" | "serviceId" | "logHost">,
 ): boolean =>
-	row.status === "running" &&
-	row.buildOrigin === "github-actions" &&
-	row.externalBuildOnly === true &&
+	isRegisteredOpenGithubRow(row) &&
 	Boolean(row.logPath) &&
 	(claim.kind === "application" ? row.applicationId : row.composeId) ===
 		claim.serviceId &&
@@ -63,12 +85,7 @@ export const canContinueLiveBuild = (
 
 /** A registered row nothing took over and that is still open: the only state a deploy request or a poller may end. */
 const openRegisteredRow = (deploymentId: string) =>
-	and(
-		eq(deployments.deploymentId, deploymentId),
-		eq(deployments.status, "running"),
-		eq(deployments.buildOrigin, "github-actions"),
-		eq(deployments.externalBuildOnly, true),
-	);
+	and(eq(deployments.deploymentId, deploymentId), registeredOpenRow);
 
 /**
  * Takes over the registered row of the deploy that is about to run: `externalBuildOnly` becomes false and the run
@@ -92,9 +109,7 @@ export const claimLiveGithubBuild = async (
 		// backstop: nothing else will ever take it over, so it ends here and the deploy writes a row of its own.
 		if (
 			row.deployQueuedAt &&
-			row.status === "running" &&
-			row.buildOrigin === "github-actions" &&
-			row.externalBuildOnly &&
+			isRegisteredOpenGithubRow(row) &&
 			(claim.kind === "application" ? row.applicationId : row.composeId) ===
 				claim.serviceId
 		) {

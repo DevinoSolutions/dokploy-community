@@ -9,6 +9,11 @@ import {
 	isRegistryAccessError,
 } from "./gha-connect/registry-retry";
 import { findRegistryRetriesDone } from "./gha-connect/store";
+import {
+	GHA_TITLE_LIKE,
+	isGhaTitle,
+	parseGithubDeploymentHandle,
+} from "./gha-deployment-title";
 
 /**
  * Puts the reason a deploy failed on a vault reference that could not be
@@ -91,7 +96,7 @@ export const recordRegistryAccessFailure = async (
 			.where(
 				and(
 					eq(deployments.deploymentId, deploymentId),
-					like(deployments.title, "GHA %"),
+					like(deployments.title, GHA_TITLE_LIKE),
 				),
 			);
 	} catch (writeError) {
@@ -101,8 +106,6 @@ export const recordRegistryAccessFailure = async (
 		);
 	}
 };
-
-const DEPLOYMENT_HANDLE = /\[deployment #(\d+)\]\s*$/;
 
 /**
  * Whether this failed deploy is one the connection poll will retry (T-15783): a
@@ -120,10 +123,10 @@ export const willRetryRegistryFailure = async (
 ): Promise<boolean> => {
 	const message = error instanceof Error ? error.message : String(error);
 	if (!isRegistryAccessError(message)) return false;
-	const handle = DEPLOYMENT_HANDLE.exec(title ?? "");
-	if (!handle?.[1] || !title?.startsWith("GHA ")) return false;
+	const githubDeploymentId = parseGithubDeploymentHandle(title);
+	if (githubDeploymentId === null || !isGhaTitle(title)) return false;
 	try {
-		const done = await findRegistryRetriesDone(serviceId, Number(handle[1]));
+		const done = await findRegistryRetriesDone(serviceId, githubDeploymentId);
 		return (
 			done !== null &&
 			decideRegistryRetry({ registryAccess: true, retriesDone: done }).kind ===

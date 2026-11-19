@@ -18,7 +18,11 @@ import {
 	not,
 	or,
 } from "drizzle-orm";
+import { GITHUB_DEPLOYMENT_HANDLE_LIKE } from "../gha-deployment-title";
 import { evaluateWatchAccess, type WatchAccess } from "./connection-access";
+
+// The title ending that marks a deployment this feature started now lives with the rest of the title protocol.
+export { GITHUB_DEPLOYMENT_HANDLE_LIKE };
 
 /**
  * Database access for the GitHub Deployments pull flow.
@@ -594,13 +598,6 @@ export const loadGhcrCredentials = async (
 
 /** A GitHub Actions deployment of a service this recent counts as "the action deploys it". */
 export const OTHER_DEPLOYER_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/**
- * The title ending that marks a Dokploy deployment started by the poller
- * ("... [deployment #<GitHub deployment id>]"). Those rows are this feature's
- * own, not a second deployer.
- */
-export const GITHUB_DEPLOYMENT_HANDLE_LIKE = "% [deployment #%]";
 
 /**
  * Another deployer on this service: a deployment row of the last 24 hours that
