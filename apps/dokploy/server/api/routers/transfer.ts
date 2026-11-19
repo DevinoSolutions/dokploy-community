@@ -14,6 +14,7 @@ import { apiTransferPreflight, apiTransferService } from "@/server/db/schema";
 
 type TransferContext = Parameters<typeof checkServicePermissionAndAccess>[0] & {
 	user: { role?: string | null };
+	session: Parameters<typeof getAccessibleServerIds>[0];
 };
 
 // Who may start a transfer, and what the caller may do on the hosts it
