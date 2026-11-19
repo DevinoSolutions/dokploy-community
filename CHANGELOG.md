@@ -2,9 +2,9 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
-### Unreleased
+### New in v0.31.0-community.8
 
-Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.7 keeps working.
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.7 keeps working. This release includes everything in v0.31.0-community.7. Update Server and Reload Server now refuse while a deploy is running, so finish or cancel running deploys before using them.
 
 **Security.**
 
