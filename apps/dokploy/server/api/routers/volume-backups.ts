@@ -19,6 +19,11 @@ import {
 } from "@dokploy/server/db/schema";
 import { toVolumeBackupReadView } from "@dokploy/server/services/backup-read-view";
 import {
+	getVolumeBackupServiceId,
+	VOLUME_BACKUP_SERVICE_KEYS,
+	type VolumeBackupServiceIds,
+} from "@dokploy/server/services/backup-service-ids";
+import {
 	findDestinationById,
 	findDestinationByIdForOrganization,
 } from "@dokploy/server/services/destination";
@@ -39,17 +44,6 @@ import { assertVolumeNameForService } from "@/server/api/utils/volume-binding";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
 import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
 
-const VOLUME_BACKUP_SERVICE_KEYS = [
-	"applicationId",
-	"postgresId",
-	"mysqlId",
-	"mariadbId",
-	"mongoId",
-	"redisId",
-	"libsqlId",
-	"composeId",
-] as const;
-
 const VOLUME_BACKUP_SERVICE_TYPES = {
 	applicationId: "application",
 	postgresId: "postgres",
@@ -61,18 +55,10 @@ const VOLUME_BACKUP_SERVICE_TYPES = {
 	composeId: "compose",
 } as const;
 
-const getVolumeBackupServiceId = (
-	vb: Partial<
-		Record<(typeof VOLUME_BACKUP_SERVICE_KEYS)[number], string | null>
-	>,
-) => VOLUME_BACKUP_SERVICE_KEYS.map((key) => vb[key]).find(Boolean) || null;
-
 // A volume backup always belongs to a service. A row that points at none
 // cannot be tied to an organization, so by-id routes report it as missing
 // instead of skipping the service permission.
-const requireVolumeBackupServiceId = (
-	vb: Parameters<typeof getVolumeBackupServiceId>[0],
-) => {
+const requireVolumeBackupServiceId = (vb: VolumeBackupServiceIds) => {
 	const serviceId = getVolumeBackupServiceId(vb);
 	if (!serviceId) {
 		throw new TRPCError({

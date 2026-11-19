@@ -208,6 +208,54 @@ describe("resolveDeploymentAllByTypeAuthTarget", () => {
 			}
 		});
 
+		// Legacy rows can name several services. allByType has always authorized
+		// them against the compose service first; pin that, since it decides
+		// whose permission is checked.
+		it("authorizes a row that names compose and a database against compose", async () => {
+			const none = {
+				composeId: null,
+				postgresId: null,
+				mysqlId: null,
+				mariadbId: null,
+				mongoId: null,
+				libsqlId: null,
+			};
+			for (const column of [
+				"postgresId",
+				"mysqlId",
+				"mariadbId",
+				"mongoId",
+				"libsqlId",
+			] as const) {
+				mocks.findBackupById.mockResolvedValueOnce({
+					...none,
+					composeId: "compose-multi",
+					[column]: "db-multi",
+				});
+				const target = await resolveDeploymentAllByTypeAuthTarget({
+					id: "backup-multi",
+					type: "backup",
+				});
+				expect(target).toEqual({ kind: "service", serviceId: "compose-multi" });
+			}
+		});
+
+		it("falls back to the first database id, postgres first, when compose is unset", async () => {
+			mocks.findBackupById.mockResolvedValueOnce({
+				composeId: null,
+				postgresId: null,
+				mysqlId: "my-multi",
+				mariadbId: "maria-multi",
+				mongoId: null,
+				libsqlId: "libsql-multi",
+			});
+			const target = await resolveDeploymentAllByTypeAuthTarget({
+				id: "backup-multi",
+				type: "backup",
+			});
+			expect(target).toEqual({ kind: "service", serviceId: "my-multi" });
+		});
+
 		it("returns 'none' when a backup has no attached service", async () => {
 			mocks.findBackupById.mockResolvedValue({
 				composeId: null,
@@ -255,6 +303,76 @@ describe("resolveDeploymentAllByTypeAuthTarget", () => {
 				});
 				expect(target).toEqual({ kind: "service", serviceId: id });
 			}
+		});
+
+		// Same for volume rows, which the API lets name several services:
+		// application first, then compose, then the databases.
+		it("authorizes a row that names an application and compose against the application", async () => {
+			mocks.findVolumeBackupById.mockResolvedValueOnce({
+				applicationId: "app-multi",
+				composeId: "compose-multi",
+				postgresId: null,
+				mysqlId: null,
+				mariadbId: null,
+				mongoId: null,
+				redisId: null,
+				libsqlId: null,
+			});
+			const target = await resolveDeploymentAllByTypeAuthTarget({
+				id: "volumeBackup-multi",
+				type: "volumeBackup",
+			});
+			expect(target).toEqual({ kind: "service", serviceId: "app-multi" });
+		});
+
+		it("authorizes a row that names compose and a database against compose", async () => {
+			const none = {
+				applicationId: null,
+				composeId: null,
+				postgresId: null,
+				mysqlId: null,
+				mariadbId: null,
+				mongoId: null,
+				redisId: null,
+				libsqlId: null,
+			};
+			for (const column of [
+				"postgresId",
+				"mysqlId",
+				"mariadbId",
+				"mongoId",
+				"redisId",
+				"libsqlId",
+			] as const) {
+				mocks.findVolumeBackupById.mockResolvedValueOnce({
+					...none,
+					composeId: "compose-multi",
+					[column]: "db-multi",
+				});
+				const target = await resolveDeploymentAllByTypeAuthTarget({
+					id: "volumeBackup-multi",
+					type: "volumeBackup",
+				});
+				expect(target).toEqual({ kind: "service", serviceId: "compose-multi" });
+			}
+		});
+
+		it("falls back to redis before libsql when neither application nor compose is set", async () => {
+			mocks.findVolumeBackupById.mockResolvedValueOnce({
+				applicationId: null,
+				composeId: null,
+				postgresId: null,
+				mysqlId: null,
+				mariadbId: null,
+				mongoId: null,
+				redisId: "redis-multi",
+				libsqlId: "libsql-multi",
+			});
+			const target = await resolveDeploymentAllByTypeAuthTarget({
+				id: "volumeBackup-multi",
+				type: "volumeBackup",
+			});
+			expect(target).toEqual({ kind: "service", serviceId: "redis-multi" });
 		});
 
 		it("returns 'none' when a volume backup has no attached service", async () => {

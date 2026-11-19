@@ -5,6 +5,12 @@ import {
 	findVolumeBackupById,
 } from "@dokploy/server";
 import type { apiFindAllByType } from "@dokploy/server/db/schema";
+import {
+	COMPOSE_FIRST_BACKUP_SERVICE_ID_KEYS,
+	COMPOSE_SECOND_VOLUME_BACKUP_SERVICE_KEYS,
+	getBackupServiceId,
+	getVolumeBackupServiceId,
+} from "@dokploy/server/services/backup-service-ids";
 import type { z } from "zod";
 
 /**
@@ -55,27 +61,19 @@ export const resolveDeploymentAllByTypeAuthTarget = async (
 		}
 		case "backup": {
 			const backup = await findBackupById(input.id);
-			const serviceId =
-				backup.composeId ||
-				backup.postgresId ||
-				backup.mysqlId ||
-				backup.mariadbId ||
-				backup.mongoId ||
-				backup.libsqlId;
+			const serviceId = getBackupServiceId(
+				backup,
+				COMPOSE_FIRST_BACKUP_SERVICE_ID_KEYS,
+			);
 			if (serviceId) return { kind: "service", serviceId };
 			return { kind: "none" };
 		}
 		case "volumeBackup": {
 			const volumeBackup = await findVolumeBackupById(input.id);
-			const serviceId =
-				volumeBackup.applicationId ||
-				volumeBackup.composeId ||
-				volumeBackup.postgresId ||
-				volumeBackup.mysqlId ||
-				volumeBackup.mariadbId ||
-				volumeBackup.mongoId ||
-				volumeBackup.redisId ||
-				volumeBackup.libsqlId;
+			const serviceId = getVolumeBackupServiceId(
+				volumeBackup,
+				COMPOSE_SECOND_VOLUME_BACKUP_SERVICE_KEYS,
+			);
 			if (serviceId) return { kind: "service", serviceId };
 			return { kind: "none" };
 		}
