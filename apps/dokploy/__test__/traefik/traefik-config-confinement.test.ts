@@ -72,6 +72,8 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => {
 							);
 						}
 					});
+					// a refusal exits before reading stdin: EPIPE is expected
+					child.stdin.on("error", () => {});
 					child.stdin.end(options?.stdin ?? "");
 				}),
 		),
@@ -168,19 +170,20 @@ describe("confined Traefik config files", () => {
 	const plantLink = (name: string, target = victim, dir = dynamic) =>
 		fs.symlinkSync(target, path.join(dir, name));
 
-	// A second process that keeps swapping `<dynamic>/app.yml` between a regular
-	// file and a symlink to `linkTarget`, as an attacker with write access to the
-	// directory would. Real links, real timing.
-	const startSwapper = (linkTarget: string): ChildProcess => {
+	// One process that keeps swapping `<dynamic>/app.yml` between a regular file
+	// and a symlink to each of `linkTargets` in turn, as an attacker with write
+	// access to the directory would. Real links, real timing. A single process,
+	// so its own `echo` can never write through a link another swapper made.
+	const startSwapper = (...linkTargets: string[]): ChildProcess => {
 		const t = path.join(dynamic, "app.yml");
 		return spawn(
 			"sh",
 			[
 				"-c",
-				`while :; do rm -f "$1"; ln -s "$2" "$1"; rm -f "$1"; echo regular > "$1"; done`,
+				`t="$1"; shift; while :; do for l in "$@"; do rm -f "$t"; ln -s "$l" "$t" 2>/dev/null; rm -f "$t"; echo regular > "$t"; done; done`,
 				"swapper",
 				t,
-				linkTarget,
+				...linkTargets,
 			],
 			{ stdio: "ignore" },
 		);
@@ -741,8 +744,7 @@ describe("confined Traefik config files", () => {
 			});
 
 			it("survives a real concurrent swap of the file for a link, on read and on write", async () => {
-				const swapper = startSwapper(victim);
-				const dirSwapper = startSwapper(outside);
+				const swapper = startSwapper(victim, outside);
 				try {
 					for (let i = 0; i < 150; i++) {
 						const text = await readRemoteConfig(serverId, "app").catch(
@@ -755,7 +757,6 @@ describe("confined Traefik config files", () => {
 					}
 				} finally {
 					swapper.kill("SIGKILL");
-					dirSwapper.kill("SIGKILL");
 				}
 				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 				expect(fs.readdirSync(outside)).toEqual(["victim.txt"]);
@@ -766,6 +767,8 @@ describe("confined Traefik config files", () => {
 					new Promise<number | null>((resolve) => {
 						const child = spawn("sh", ["-c", command]);
 						child.on("close", resolve);
+						// a refusal exits before reading stdin: EPIPE is expected
+						child.stdin.on("error", () => {});
 						child.stdin.end(stdin);
 					});
 				// the remote paths are the real temp ones here
