@@ -57,9 +57,11 @@ const guard = await import("@dokploy/server/utils/docker/cleanup-guard");
 const cancel = await import("@dokploy/server/services/deployment-cancel");
 const watchdog = await import("@/server/queues/deployment-watchdog");
 const { InMemoryQueue } = await import("@/server/queues/in-memory-queue");
-const { createQueuedDeployControl, installQueuedDeployControl } = await import(
-	"@/server/queues/queued-deploy-control"
-);
+const {
+	createQueuedDeployControl,
+	installQueuedDeployControl,
+	RESTORE_GRACE_MS: restoreGraceMs,
+} = await import("@/server/queues/queued-deploy-control");
 
 const RUN = "https://github.com/acme/web/actions/runs/42";
 const START = Date.parse("2026-11-02T10:00:00Z");
@@ -763,6 +765,7 @@ describe.skipIf(!ready)(
 			const h = await harness();
 			const { deploymentId } = await register();
 			await claimModule.requestLiveBuildDeploy(reference(deploymentId));
+			await ageDeployRequest(deploymentId);
 
 			expect(
 				await cancel.cancelBuildServerDeploymentById(deploymentId, h.control),
@@ -786,6 +789,198 @@ describe.skipIf(!ready)(
 				externalBuildOnly: true,
 			});
 			expect(await h.queue.getJobs(["waiting"])).toHaveLength(1);
+		});
+
+		/** A deploy asked for a minute ago: past the moment in which its job may still be on its way into the queue. */
+		const ageDeployRequest = (deploymentId: string) =>
+			(client as NonNullable<typeof client>).exec(
+				`UPDATE "deployment" SET "deployQueuedAt" = '${new Date(Date.now() - 60_000).toISOString()}' WHERE "deploymentId" = '${deploymentId}'`,
+			);
+
+		it("refuses while the restore of the waiting jobs is not over, and leaves the row and the queue alone", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			await queueDeploy(h, deploymentId);
+			await ageDeployRequest(deploymentId);
+			const starting = createQueuedDeployControl({
+				getJobs: (states) => h.queue.getJobs(states),
+				removeWaitingJob: (id) => h.queue.removeWaitingJob(id),
+				restoreSettled: () => false,
+			});
+
+			await expect(
+				cancel.cancelBuildServerDeploymentById(deploymentId, starting),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				message: expect.stringContaining("still starting"),
+			});
+			expect((await rowsOfService())[0]).toMatchObject({
+				status: "running",
+				externalBuildOnly: true,
+			});
+			expect(await h.queue.getJobs(["waiting"])).toHaveLength(1);
+		});
+
+		it("does not hold back a row with no deploy on the way while the restore is not over", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			const starting = createQueuedDeployControl({
+				getJobs: (states) => h.queue.getJobs(states),
+				removeWaitingJob: (id) => h.queue.removeWaitingJob(id),
+				restoreSettled: () => false,
+			});
+
+			expect(
+				await cancel.cancelBuildServerDeploymentById(deploymentId, starting),
+			).toMatchObject({ status: "cancelled" });
+		});
+
+		it("stops waiting for a restore that never reports back after the grace period", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			await queueDeploy(h, deploymentId);
+			let clock = 1_000_000;
+			const control = createQueuedDeployControl(
+				{
+					getJobs: (states) => h.queue.getJobs(states),
+					removeWaitingJob: (id) => h.queue.removeWaitingJob(id),
+					restoreSettled: () => false,
+				},
+				{ now: () => clock },
+			);
+			expect(await control.removeDeployOf(deploymentId)).toBe("starting");
+			clock += restoreGraceMs + 1;
+			expect(await control.removeDeployOf(deploymentId)).toBe("removed");
+		});
+
+		it("refuses while the job of a deploy asked for a moment ago may still be on its way into the queue", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			// requestLiveBuildDeploy ran, the route has not added the job yet.
+			await claimModule.requestLiveBuildDeploy(reference(deploymentId));
+
+			await expect(
+				cancel.cancelBuildServerDeploymentById(deploymentId, h.control),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				message: expect.stringContaining("being queued"),
+			});
+			expect((await rowsOfService())[0]).toMatchObject({
+				status: "running",
+				externalBuildOnly: true,
+			});
+
+			// The job arrives: the retry removes it.
+			await h.queue.add({
+				applicationId: "app-1",
+				titleLog: "Deploy",
+				descriptionLog: "",
+				type: "redeploy",
+				applicationType: "application",
+				deploymentId,
+			});
+			expect(
+				await cancel.cancelBuildServerDeploymentById(deploymentId, h.control),
+			).toMatchObject({ status: "cancelled" });
+			h.releaseBlocker();
+			await pause(300);
+			expect(h.started).toEqual(["blocker"]);
+		});
+
+		it("a job that starts between the lookup and the removal is not taken for a missing one", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			await queueDeploy(h, deploymentId);
+			await ageDeployRequest(deploymentId);
+			let first = true;
+			const racing = createQueuedDeployControl({
+				getJobs: async (states) => {
+					const snapshot = await h.queue.getJobs(states);
+					if (first) {
+						first = false;
+						// The slot frees up right after the first look at the queue; the deploy starts and takes its row.
+						h.releaseBlocker();
+						await pause(150);
+					}
+					return snapshot;
+				},
+				removeWaitingJob: (id) => h.queue.removeWaitingJob(id),
+			});
+
+			await expect(
+				cancel.cancelBuildServerDeploymentById(deploymentId, racing),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				message: expect.stringContaining("already started"),
+			});
+			expect(h.started).toContain(deploymentId);
+			const rows = await rowsOfService();
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({
+				status: "running",
+				externalBuildOnly: false,
+			});
+		});
+
+		it("answers started, and touches nothing, when the queue refuses to remove a job it listed", async () => {
+			const { deploymentId } = await register();
+			await claimModule.requestLiveBuildDeploy(reference(deploymentId));
+			await ageDeployRequest(deploymentId);
+			const removeWaitingJob = vi.fn(() => false);
+			const control = createQueuedDeployControl({
+				getJobs: async () => [{ id: "job-1", data: { deploymentId } } as never],
+				removeWaitingJob,
+			});
+
+			await expect(
+				cancel.cancelBuildServerDeploymentById(deploymentId, control),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				message: expect.stringContaining("already started"),
+			});
+			expect(removeWaitingJob).toHaveBeenCalledWith("job-1");
+			expect((await rowsOfService())[0]).toMatchObject({
+				status: "running",
+				externalBuildOnly: true,
+				errorMessage: null,
+			});
+		});
+
+		it("takes the queued path when the deploy is asked for between the read of the row and its UPDATE", async () => {
+			const { deploymentId } = await register();
+			const removeDeployOf = vi.fn(async () => "removed" as const);
+			const query = (
+				holder.db as unknown as {
+					query: {
+						deployments: {
+							findFirst: (...args: unknown[]) => Promise<unknown>;
+						};
+					};
+				}
+			).query.deployments;
+			const original = query.findFirst.bind(query);
+			const spy = vi
+				.spyOn(query, "findFirst")
+				.mockImplementationOnce(async (...args: unknown[]) => {
+					const stale = await original(...args);
+					await claimModule.requestLiveBuildDeploy(reference(deploymentId));
+					return stale;
+				});
+			try {
+				expect(
+					await cancel.cancelBuildServerDeploymentById(deploymentId, {
+						removeDeployOf,
+					}),
+				).toMatchObject({ status: "cancelled" });
+			} finally {
+				spy.mockRestore();
+			}
+
+			expect(removeDeployOf).toHaveBeenCalledWith(deploymentId);
+			expect((await rowsOfService())[0]).toMatchObject({
+				status: "cancelled",
+				errorMessage: cancel.QUEUED_DEPLOY_CANCELLED_MESSAGE,
+			});
 		});
 
 		it("does not ask the queue for a row with no deploy on the way: the cancel is the same as before", async () => {

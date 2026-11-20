@@ -12,7 +12,7 @@ Upgrade notes: no database migration. Pull-only deploys get their own queue slot
 
 **Fixed.**
 
-- Cancelling a GitHub Actions build row whose deploy is already queued now also removes that queued deploy (T-19913). Before, Cancel closed the row as cancelled while the deploy waiting in the queue still ran later and deployed the service anyway, writing a deployment of its own. If the deploy has already started, Cancel is refused with a message and the row is left untouched; cancel the deployment again once it is running. A row with no deploy asked for is cancelled exactly as before.
+- Cancelling a GitHub Actions build row whose deploy is already queued now also removes that queued deploy (T-19913). Before, Cancel closed the row as cancelled while the deploy waiting in the queue still ran later and deployed the service anyway, writing a deployment of its own. If the deploy has already started, Cancel is refused with a message and the row is left untouched; cancel the deployment again once it is running. While Dokploy is still restoring its waiting deploys after a restart, or a deploy was queued a moment ago, Cancel asks you to try again instead of guessing. A row with no deploy asked for is cancelled exactly as before.
 
 ### New in v0.31.0-community.8
 

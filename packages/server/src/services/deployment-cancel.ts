@@ -1024,8 +1024,15 @@ export const cancelBuildServerDeploymentsForService = async (
 export type QueuedDeployControl = {
 	removeDeployOf: (
 		deploymentId: string,
-	) => Promise<"removed" | "started" | "none">;
+	) => Promise<"removed" | "started" | "none" | "starting">;
 };
+
+/**
+ * How long after a deploy was asked for (`deployQueuedAt`) a row with no job in the queue is still taken for "the job is
+ * about to be added" (the deploy routes mark the row first and queue afterwards, with reads in between). Past it the job
+ * is lost and the row is closed, so a lost job can never make the row uncancellable.
+ */
+export const QUEUED_DEPLOY_ENQUEUE_GRACE_MS = 30_000;
 
 // The same key as `QUEUED_DEPLOY_CONTROL_SLOT` in the app's queued-deploy-control.ts.
 const QUEUED_DEPLOY_CONTROL_SLOT = Symbol.for("dokploy.queuedDeployControl");
@@ -1073,6 +1080,7 @@ const closeRegisteredRowByUser = (
 const cancelRegisteredRowWithQueuedDeploy = async (
 	deploymentId: string,
 	queue: QueuedDeployControl | undefined,
+	deployQueuedAt: string | null,
 ): Promise<CancelOutcome> => {
 	if (!queue) {
 		throw new TRPCError({
@@ -1082,6 +1090,24 @@ const cancelRegisteredRowWithQueuedDeploy = async (
 		});
 	}
 	const removal = await queue.removeDeployOf(deploymentId);
+	if (removal === "starting") {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message:
+				"Dokploy is still starting and has not put its waiting deploys back in the queue yet, so this cancel did nothing. Try again in a moment.",
+		});
+	}
+	if (removal === "none") {
+		// The deploy routes mark the row before they queue the job: a row asked for a moment ago may not have its job yet.
+		const askedAt = deployQueuedAt ? Date.parse(deployQueuedAt) : Number.NaN;
+		if (Date.now() - askedAt < QUEUED_DEPLOY_ENQUEUE_GRACE_MS) {
+			throw new TRPCError({
+				code: "CONFLICT",
+				message:
+					"The deploy for this GitHub Actions build is being queued right now, so this cancel did nothing. Try again in a moment.",
+			});
+		}
+	}
 	if (removal === "started") {
 		throw new TRPCError({
 			code: "CONFLICT",
@@ -1140,7 +1166,8 @@ export const cancelBuildServerDeploymentById = async (
 	// build on GitHub keeps going). Only this explicit cancel does it: the automatic stops skip these rows. A row
 	// whose deploy is already queued is the queue's: that deploy leaves the queue with it.
 	if (row.externalBuildOnly) {
-		if (!row.deployQueuedAt) {
+		let queuedAt = row.deployQueuedAt;
+		if (!queuedAt) {
 			const [claimed] = await closeRegisteredRowByUser(
 				row.deploymentId,
 				isNull(deployments.deployQueuedAt),
@@ -1170,10 +1197,15 @@ export const cancelBuildServerDeploymentById = async (
 			) {
 				return { status: "not-running" };
 			}
+			queuedAt = now.deployQueuedAt;
 		}
 		// A row that already ended has nothing to cancel (the branch above finds that out in its UPDATE).
 		if (row.status !== "running") return { status: "not-running" };
-		return cancelRegisteredRowWithQueuedDeploy(row.deploymentId, queue);
+		return cancelRegisteredRowWithQueuedDeploy(
+			row.deploymentId,
+			queue,
+			queuedAt,
+		);
 	}
 
 	if (row.applicationId && row.buildServerId) {
