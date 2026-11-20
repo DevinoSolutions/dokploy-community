@@ -1030,9 +1030,11 @@ export type QueuedDeployControl = {
 /**
  * How long after a deploy was asked for (`deployQueuedAt`) a row with no job in the queue is still taken for "the job is
  * about to be added" (the deploy routes mark the row first and queue afterwards, with reads in between). Past it the job
- * is lost and the row is closed, so a lost job can never make the row uncancellable.
+ * is lost and the row is closed, so a lost job can never make the row uncancellable. 90 s: a manual deploy can wait up to
+ * 60 s for a previous deploy of the same service (serializeManualDeploy) between marking the row and adding the job, plus
+ * the reads around it.
  */
-export const QUEUED_DEPLOY_ENQUEUE_GRACE_MS = 30_000;
+export const QUEUED_DEPLOY_ENQUEUE_GRACE_MS = 90_000;
 
 // The same key as `QUEUED_DEPLOY_CONTROL_SLOT` in the app's queued-deploy-control.ts.
 const QUEUED_DEPLOY_CONTROL_SLOT = Symbol.for("dokploy.queuedDeployControl");
@@ -1100,7 +1102,9 @@ const cancelRegisteredRowWithQueuedDeploy = async (
 	if (removal === "none") {
 		// The deploy routes mark the row before they queue the job: a row asked for a moment ago may not have its job yet.
 		const askedAt = deployQueuedAt ? Date.parse(deployQueuedAt) : Number.NaN;
-		if (Date.now() - askedAt < QUEUED_DEPLOY_ENQUEUE_GRACE_MS) {
+		// A clock that stepped backwards makes the age negative: that counts as just queued (refused), never as old.
+		const age = Math.max(0, Date.now() - askedAt);
+		if (age < QUEUED_DEPLOY_ENQUEUE_GRACE_MS) {
 			throw new TRPCError({
 				code: "CONFLICT",
 				message:

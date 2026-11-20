@@ -791,10 +791,10 @@ describe.skipIf(!ready)(
 			expect(await h.queue.getJobs(["waiting"])).toHaveLength(1);
 		});
 
-		/** A deploy asked for a minute ago: past the moment in which its job may still be on its way into the queue. */
+		/** A deploy asked for five minutes ago: past the moment in which its job may still be on its way into the queue. */
 		const ageDeployRequest = (deploymentId: string) =>
 			(client as NonNullable<typeof client>).exec(
-				`UPDATE "deployment" SET "deployQueuedAt" = '${new Date(Date.now() - 60_000).toISOString()}' WHERE "deploymentId" = '${deploymentId}'`,
+				`UPDATE "deployment" SET "deployQueuedAt" = '${new Date(Date.now() - 5 * 60_000).toISOString()}' WHERE "deploymentId" = '${deploymentId}'`,
 			);
 
 		it("refuses while the restore of the waiting jobs is not over, and leaves the row and the queue alone", async () => {
@@ -885,6 +885,26 @@ describe.skipIf(!ready)(
 			h.releaseBlocker();
 			await pause(300);
 			expect(h.started).toEqual(["blocker"]);
+		});
+
+		it("treats a deploy request dated in the future (the clock stepped back) as just queued", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			await claimModule.requestLiveBuildDeploy(reference(deploymentId));
+			await (client as NonNullable<typeof client>).exec(
+				`UPDATE "deployment" SET "deployQueuedAt" = '${new Date(Date.now() + 60 * 60_000).toISOString()}' WHERE "deploymentId" = '${deploymentId}'`,
+			);
+
+			await expect(
+				cancel.cancelBuildServerDeploymentById(deploymentId, h.control),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				message: expect.stringContaining("being queued"),
+			});
+			expect((await rowsOfService())[0]).toMatchObject({
+				status: "running",
+				externalBuildOnly: true,
+			});
 		});
 
 		it("a job that starts between the lookup and the removal is not taken for a missing one", async () => {
