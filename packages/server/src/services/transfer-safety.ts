@@ -34,12 +34,20 @@ const q = (value: string) => quote([value]);
 // image pull or ssh link must not hang the request.
 export const CHECK_TIMEOUT_MS = 60_000;
 
-const runOn = (serverId: string | null, command: string) =>
+// The volume check runs `docker run alpine`, which may have to pull the image
+// the first time a server sees it.
+export const VOLUME_CHECK_TIMEOUT_MS = 300_000;
+
+const runOn = (
+	serverId: string | null,
+	command: string,
+	timeoutMs = CHECK_TIMEOUT_MS,
+) =>
 	serverId
 		? execAsyncRemote(serverId, command, undefined, {
-				signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+				signal: AbortSignal.timeout(timeoutMs),
 			})
-		: execAsync(command, { timeout: CHECK_TIMEOUT_MS });
+		: execAsync(command, { timeout: timeoutMs });
 
 // The first line of what a host said, cut short: it is shown to the caller.
 const detail = (error: unknown) =>
@@ -92,8 +100,13 @@ export const assertTransferTargetAllowed = async (
 	}
 };
 
-type VolumeState = "missing" | "empty" | "non-empty";
+// "not-directory" is a path that exists and is not a directory once symbolic
+// links are followed (a regular file, a socket): a bind mount of a single file.
+type VolumeState = "missing" | "empty" | "non-empty" | "not-directory";
 
+// A directory path is followed through symbolic links (`stat -L`), as `tar -C`
+// and the transfer's own `[ -d ]` do: a dangling link is missing, a file or a
+// socket is "not-directory".
 // Only an explicit "no such volume" / "no such file" is missing. Any other
 // failure (docker daemon down, permission denied, a listing that errors) exits
 // non-zero, which the caller reads as "could not check" and refuses.
@@ -103,15 +116,21 @@ export const volumeStateCommand = (volume: string) =>
 	`err=$(docker volume inspect ${q(volume)} 2>&1 >/dev/null); rc=$?; if [ $rc -eq 0 ]; then docker run --rm -v ${q(volume)}:/data:ro alpine sh -c 'if ! out=$(find /data -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; fi; if [ -n "$out" ]; then echo non-empty; else echo empty; fi'; elif printf %s "$err" | grep -qi 'no such volume'; then echo missing; else echo "$err" >&2; exit 1; fi`;
 
 export const directoryStateCommand = (directory: string) =>
-	`kind=$(stat -c %F -- ${q(directory)} 2>&1); rc=$?; if [ $rc -ne 0 ]; then case "$kind" in *'No such file or directory'*) echo missing;; *) echo "$kind" >&2; exit 1;; esac; elif [ "$kind" != directory ]; then echo "not a directory" >&2; exit 1; elif ! out=$(find ${q(directory)} -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; elif [ -n "$out" ]; then echo non-empty; else echo empty; fi`;
+	`kind=$(stat -L -c %F -- ${q(directory)} 2>&1); rc=$?; if [ $rc -ne 0 ]; then case "$kind" in *'No such file or directory'*) echo missing;; *) echo "$kind" >&2; exit 1;; esac; elif [ "$kind" != directory ]; then echo not-directory; elif ! out=$(find ${q(directory)} -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; elif [ -n "$out" ]; then echo non-empty; else echo empty; fi`;
 
 const readState = async (
 	serverId: string | null,
 	command: string,
+	timeoutMs?: number,
 ): Promise<VolumeState> => {
-	const { stdout } = await runOn(serverId, command);
+	const { stdout } = await runOn(serverId, command, timeoutMs);
 	const answer = stdout.trim();
-	if (answer === "missing" || answer === "empty" || answer === "non-empty") {
+	if (
+		answer === "missing" ||
+		answer === "empty" ||
+		answer === "non-empty" ||
+		answer === "not-directory"
+	) {
 		return answer;
 	}
 	throw new Error(`unexpected answer ${show(answer)}`);
@@ -121,9 +140,13 @@ const stateOrBlocker = async (
 	serverId: string | null,
 	command: string,
 	label: string,
+	timeoutMs?: number,
 ): Promise<{ state: VolumeState | null; blocker: string | null }> => {
 	try {
-		return { state: await readState(serverId, command), blocker: null };
+		return {
+			state: await readState(serverId, command, timeoutMs),
+			blocker: null,
+		};
 	} catch (error) {
 		return {
 			state: null,
@@ -246,6 +269,7 @@ export const inspectTransferPlan = async (
 			input.targetServerId,
 			volumeStateCommand(name),
 			`volume ${show(name)}`,
+			VOLUME_CHECK_TIMEOUT_MS,
 		);
 		if (blocker) {
 			blockers.push(blocker);
@@ -281,15 +305,17 @@ export const inspectTransferPlan = async (
 			);
 			continue;
 		}
-		// Only "missing" on the source skips the target: the transfer copies
-		// nothing then. A source that cannot be read refuses.
+		// Only a directory on the source is copied. A path that is missing, a
+		// dangling link, a file or a socket is skipped by the transfer ("nothing
+		// to copy"), so the target is not looked at. A source that cannot be read
+		// refuses.
 		let existsOnSource = false;
 		try {
-			existsOnSource =
-				(await readState(
-					input.sourceServerId,
-					directoryStateCommand(hostPath),
-				)) !== "missing";
+			const sourceState = await readState(
+				input.sourceServerId,
+				directoryStateCommand(hostPath),
+			);
+			existsOnSource = sourceState === "empty" || sourceState === "non-empty";
 		} catch (error) {
 			blockers.push(
 				`Could not check bind mount ${show(hostPath)} on the source server (${detail(error)}), so the transfer is refused.`,
@@ -305,6 +331,11 @@ export const inspectTransferPlan = async (
 			: { state: null, blocker: null };
 		if (blocker) {
 			blockers.push(blocker);
+		}
+		if (state === "not-directory") {
+			blockers.push(
+				`Bind mount ${show(hostPath)} is a directory on the source server, but the target server has a file there, so the transfer is refused.`,
+			);
 		}
 		const overwrite = approved.has(hostPath);
 		bindMounts.push({
@@ -462,11 +493,18 @@ export const assertTargetStillClear = async ({
 			kind === "volume"
 				? volumeStateCommand(name)
 				: directoryStateCommand(name),
+			kind === "volume" ? VOLUME_CHECK_TIMEOUT_MS : undefined,
 		);
 	} catch (error) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message: `Transfer refused: could not check ${kind} ${show(name)} on the target server (${detail(error)}).`,
+		});
+	}
+	if (state === "not-directory") {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Transfer refused: the target server has a file at ${show(name)}, where a directory is to be copied.`,
 		});
 	}
 	if (state === "non-empty") {

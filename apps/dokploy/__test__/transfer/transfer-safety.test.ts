@@ -207,7 +207,7 @@ describe("what the target already holds", () => {
 			input({ volumes: ["pgdata"], targetServerId: null }),
 		);
 		expect(mocks.execAsync).toHaveBeenCalledWith(volumeStateCommand("pgdata"), {
-			timeout: 60_000,
+			timeout: 300_000,
 		});
 		expect(plan.needsOverwrite).toEqual(["pgdata"]);
 	});
@@ -565,10 +565,22 @@ describe("a check that fails is a refusal, never a pass", () => {
 		expect(text.length).toBeLessThan(400);
 	});
 
-	it("every check is bounded in time", async () => {
+	it("every check is bounded in time, the volume one longer for an image pull", async () => {
 		targetHolds({ pgdata: "empty" });
 		await inspectTransferPlan(
 			input({ volumes: ["pgdata"], targetServerId: null }),
+		);
+		expect(mocks.execAsync).toHaveBeenCalledWith(expect.any(String), {
+			timeout: 300_000,
+		});
+		mocks.execAsync.mockClear();
+		targetHolds({ "/srv/shared/uploads": "empty" });
+		await inspectTransferPlan(
+			input({
+				bindMounts: ["/srv/shared/uploads"],
+				sourceServerId: null,
+				targetServerId: null,
+			}),
 		);
 		expect(mocks.execAsync).toHaveBeenCalledWith(expect.any(String), {
 			timeout: 60_000,
@@ -668,11 +680,18 @@ describe.skipIf(process.platform === "win32")(
 			expect(result.stdout).not.toBe("missing");
 		});
 
-		it("a path that is a file is an error", async () => {
-			const result = await run(directoryStateCommand("/srv/x"), {
-				stat: 'echo "regular file"',
-			});
-			expect(result.code).not.toBe(0);
+		it("a file or a socket is not-directory, not an error", async () => {
+			for (const kind of ["regular file", "regular empty file", "socket"]) {
+				expect(
+					await run(directoryStateCommand("/srv/x"), {
+						stat: `echo "${kind}"`,
+					}),
+				).toEqual({ code: 0, stdout: "not-directory" });
+			}
+		});
+
+		it("follows symbolic links, as tar and the transfer do", () => {
+			expect(directoryStateCommand("/srv/x")).toContain("stat -L -c %F");
 		});
 
 		it("an empty directory is empty, a full one is non-empty", async () => {
@@ -735,5 +754,117 @@ describe("assertTargetStillClear", () => {
 		await expect(
 			assertTargetStillClear(args({ overwriteTargets: ["pgdata"] })),
 		).resolves.toBeUndefined();
+	});
+});
+
+// The same command against a real filesystem and the real stat and find.
+describe.skipIf(process.platform === "win32")(
+	"the directory state command on real paths",
+	() => {
+		it("says what each shape of path is", async () => {
+			const { spawnSync } = await import("node:child_process");
+			const { mkdtemp, mkdir, writeFile, symlink, rm } = await import(
+				"node:fs/promises"
+			);
+			const { tmpdir } = await import("node:os");
+			const { join } = await import("node:path");
+			const root = await mkdtemp(join(tmpdir(), "transfer-paths-"));
+			try {
+				await mkdir(join(root, "empty"));
+				await mkdir(join(root, "full"));
+				await writeFile(join(root, "full", ".hidden"), "x");
+				await writeFile(join(root, "file"), "x");
+				await symlink(join(root, "full"), join(root, "link-to-dir"));
+				await symlink(join(root, "empty"), join(root, "link-to-empty"));
+				await symlink(join(root, "file"), join(root, "link-to-file"));
+				await symlink(join(root, "gone"), join(root, "dangling"));
+				const state = (name: string) => {
+					const result = spawnSync(
+						"/bin/sh",
+						["-c", directoryStateCommand(join(root, name))],
+						{ encoding: "utf8" },
+					);
+					return { code: result.status, out: result.stdout.trim() };
+				};
+				expect(state("empty")).toEqual({ code: 0, out: "empty" });
+				expect(state("full")).toEqual({ code: 0, out: "non-empty" });
+				expect(state("nothing")).toEqual({ code: 0, out: "missing" });
+				expect(state("file")).toEqual({ code: 0, out: "not-directory" });
+				// A link to a directory is followed, as tar -C does.
+				expect(state("link-to-dir")).toEqual({ code: 0, out: "non-empty" });
+				expect(state("link-to-empty")).toEqual({ code: 0, out: "empty" });
+				expect(state("link-to-file")).toEqual({
+					code: 0,
+					out: "not-directory",
+				});
+				// A dangling link has nothing to copy: missing, as [ -d ] says.
+				expect(state("dangling")).toEqual({ code: 0, out: "missing" });
+				// Below a file is an error, not missing.
+				expect(state("file/sub").code).not.toBe(0);
+			} finally {
+				await rm(root, { recursive: true, force: true });
+			}
+		});
+	},
+);
+
+describe("a bind mount that is not a directory", () => {
+	const answers = (source: string, target: string) =>
+		mocks.execAsyncRemote.mockImplementation(
+			async (serverId: string | null) => ({
+				stdout: `${serverId === "server-source" ? source : target}\n`,
+				stderr: "",
+			}),
+		);
+
+	it("is skipped on the source, as before: nothing to copy, target not looked at", async () => {
+		answers("not-directory", "non-empty");
+		const plan = await inspectTransferPlan(
+			input({ bindMounts: ["/srv/app/config.yml"] }),
+		);
+		expect(plan.blockers).toEqual([]);
+		expect(plan.needsOverwrite).toEqual([]);
+		expect(plan.bindMounts).toEqual([
+			{
+				hostPath: "/srv/app/config.yml",
+				existsOnSource: false,
+				targetState: null,
+				overwrite: false,
+			},
+		]);
+		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
+		expect(() => assertTransferPlanAllowed(plan)).not.toThrow();
+	});
+
+	it("a directory on the source over a file on the target is refused", async () => {
+		answers("non-empty", "not-directory");
+		const plan = await inspectTransferPlan(
+			input({ bindMounts: ["/srv/shared/uploads"] }),
+		);
+		expect(plan.blockers.join(" ")).toContain("the target server has a file");
+		expect(() => assertTransferPlanAllowed(plan)).toThrow();
+	});
+
+	it("is refused at the copy when the target holds a file there", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: "not-directory\n",
+			stderr: "",
+		});
+		await expect(
+			assertTargetStillClear({
+				targetServerId: "server-target",
+				kind: "directory",
+				name: "/srv/shared/uploads",
+				overwriteTargets: [],
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+	});
+
+	it("a source that cannot be read is still refused", async () => {
+		mocks.execAsyncRemote.mockRejectedValue(new Error("ssh: connection reset"));
+		const plan = await inspectTransferPlan(
+			input({ bindMounts: ["/srv/app/config.yml"] }),
+		);
+		expect(plan.blockers.join(" ")).toContain("on the source server");
 	});
 });
