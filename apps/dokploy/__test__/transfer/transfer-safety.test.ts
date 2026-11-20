@@ -868,3 +868,37 @@ describe("a bind mount that is not a directory", () => {
 		expect(plan.blockers.join(" ")).toContain("on the source server");
 	});
 });
+
+// These run on every platform: `find` does not follow a symbolic link given on
+// the command line unless it is told to (-H), so without it a link to a
+// populated directory lists nothing and reads as "empty", and a transfer would
+// merge into live data without overwriteTargets. The shell tests above only
+// run on Linux; this keeps the flag from being dropped on a Windows dev box.
+describe("every listing follows a link given as the path", () => {
+	const finds = (command: string) => command.match(/\bfind\b[^;|]*/g) ?? [];
+
+	it("the directory state command lists with find -H", () => {
+		const command = directoryStateCommand("/srv/link-to-data");
+		expect(finds(command)).toHaveLength(1);
+		for (const find of finds(command)) {
+			expect(find).toMatch(/^find -H /);
+		}
+		expect(command).toContain("stat -L -c %F");
+	});
+
+	it("the volume state command lists with find -H", () => {
+		const command = volumeStateCommand("pgdata");
+		expect(finds(command)).toHaveLength(1);
+		for (const find of finds(command)) {
+			expect(find).toMatch(/^find -H /);
+		}
+	});
+
+	it("a hostile path is still one quoted word after find -H", () => {
+		const hostile = "/srv/x; touch /tmp/pwn";
+		const tokens = parse(directoryStateCommand(hostile));
+		const at = tokens.indexOf("-H");
+		expect(at).toBeGreaterThan(0);
+		expect(tokens[at + 1]).toBe(hostile);
+	});
+});

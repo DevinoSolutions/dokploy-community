@@ -113,10 +113,10 @@ type VolumeState = "missing" | "empty" | "non-empty" | "not-directory";
 // `docker volume inspect` goes first because `docker run -v name:` would create
 // a volume that does not exist; the volume is only read (`:ro`).
 export const volumeStateCommand = (volume: string) =>
-	`err=$(docker volume inspect ${q(volume)} 2>&1 >/dev/null); rc=$?; if [ $rc -eq 0 ]; then docker run --rm -v ${q(volume)}:/data:ro alpine sh -c 'if ! out=$(find /data -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; fi; if [ -n "$out" ]; then echo non-empty; else echo empty; fi'; elif printf %s "$err" | grep -qi 'no such volume'; then echo missing; else echo "$err" >&2; exit 1; fi`;
+	`err=$(docker volume inspect ${q(volume)} 2>&1 >/dev/null); rc=$?; if [ $rc -eq 0 ]; then docker run --rm -v ${q(volume)}:/data:ro alpine sh -c 'if ! out=$(find -H /data -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; fi; if [ -n "$out" ]; then echo non-empty; else echo empty; fi'; elif printf %s "$err" | grep -qi 'no such volume'; then echo missing; else echo "$err" >&2; exit 1; fi`;
 
 export const directoryStateCommand = (directory: string) =>
-	`kind=$(stat -L -c %F -- ${q(directory)} 2>&1); rc=$?; if [ $rc -ne 0 ]; then case "$kind" in *'No such file or directory'*) echo missing;; *) echo "$kind" >&2; exit 1;; esac; elif [ "$kind" != directory ]; then echo not-directory; elif ! out=$(find ${q(directory)} -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; elif [ -n "$out" ]; then echo non-empty; else echo empty; fi`;
+	`kind=$(stat -L -c %F -- ${q(directory)} 2>&1); rc=$?; if [ $rc -ne 0 ]; then case "$kind" in *'No such file or directory'*) echo missing;; *) echo "$kind" >&2; exit 1;; esac; elif [ "$kind" != directory ]; then echo not-directory; elif ! out=$(find -H ${q(directory)} -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; elif [ -n "$out" ]; then echo non-empty; else echo empty; fi`;
 
 const readState = async (
 	serverId: string | null,
