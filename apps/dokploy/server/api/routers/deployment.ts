@@ -61,6 +61,8 @@ import {
 	deployments,
 	server,
 } from "@/server/db/schema";
+import { describeQueueStatus } from "@/server/queues/queue-status";
+import { RESTORE_GRACE_MS } from "@/server/queues/queued-deploy-control";
 import { myQueue } from "@/server/queues/queueSetup";
 import { fetchDeployApiJobs, type QueueJobRow } from "@/server/utils/deploy";
 import { resolveDeploymentAllByTypeAuthTarget } from "@/server/utils/deployment-all-by-type-target";
@@ -349,6 +351,66 @@ export const deploymentRouter = createTRPCRouter({
 			})),
 		);
 	}),
+
+	// Where one service's deploy is in the local queue: waiting for a slot, running,
+	// or not there (T-12497). A deploy that waits has no deployment row, so this is
+	// the only way for a client to tell "queued" from "running" (see
+	// docs/deploy-queue-status.md for the contract of the GitHub Actions deploy action).
+	queueStatus: protectedProcedure
+		.meta({
+			openapi: {
+				method: "GET",
+				path: "/deployment.queueStatus",
+				description:
+					"Where the deploy of one application or compose is in the Dokploy deploy queue. Pass applicationId or composeId, and the deploymentId of the GitHub Actions deployment you registered so that the answer is always about the deploy that continues it. state: 'queued' (waiting for a slot; lane, position and ahead say where in the list of waiting jobs, waitingSinceMs how long; position is list order, not a start forecast), 'running' (startedAt is when it started; without a deploymentId, queuedBehind above 0 means newer deploys of the service wait behind it and the running one may not be yours), or 'none' (not in the queue: not started yet, finished, or removed; read the deployment itself for the outcome). lane 'pull' is a deploy of a prebuilt image, which has its own slots and does not wait behind builds. heldReason 'intake-closed-for-update' says Dokploy is updating and the deploy starts after the restart. restoring true means Dokploy just started and may not list its waiting deploys yet: poll again before treating 'none' as final. Give the queued wait its own long limit and start the run limit at startedAt.",
+			},
+		})
+		.input(
+			z.object({
+				applicationId: z.string().min(1).optional(),
+				composeId: z.string().min(1).optional(),
+				deploymentId: z.string().min(1).optional(),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			if (Boolean(input.applicationId) === Boolean(input.composeId)) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Pass either applicationId or composeId.",
+				});
+			}
+			const serviceId = (input.applicationId ?? input.composeId) as string;
+			// Same gate as reading the service's deployments: permission, access list
+			// and organization. Everything below only describes this one service, so
+			// nothing of another organization's queue can come back.
+			await checkServicePermissionAndAccess(ctx, serviceId, {
+				deployment: ["read"],
+			});
+			// Bounded like the queued-deploy cancel: a restore that never reports back
+			// (the call is missing) must not leave clients polling for ever.
+			const restoring =
+				!myQueue.restoreSettled() && process.uptime() * 1000 < RESTORE_GRACE_MS;
+			if (IS_CLOUD) {
+				// Cloud deploys do not wait in a local queue.
+				return describeQueueStatus([], input, {
+					now: Date.now(),
+					intakeClosed: false,
+					restoring: false,
+				});
+			}
+			// One snapshot, and nothing read from the live queue afterwards: whether a
+			// job runs comes from the snapshot itself (see QueueStatusJob).
+			const jobs = await myQueue.getJobs();
+			return describeQueueStatus(
+				jobs.map((job) => ({ job })),
+				input,
+				{
+					now: Date.now(),
+					intakeClosed: myQueue.intakeClosed(),
+					restoring,
+				},
+			);
+		}),
 
 	// Flag a deploy that is already waiting so it goes ahead of the jobs before
 	// it (see docs/deploy-queue-priority.md). The id is the one queueList shows.

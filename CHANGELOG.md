@@ -2,6 +2,14 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.9 keeps working.
+
+**Added.**
+
+- `deployment.queueStatus` (MCP `deployment-queueStatus`, `GET /api/deployment.queueStatus`) says where one service's deploy is in the deploy queue (T-12497). Pass the application or compose id and the registered GitHub Actions deployment, so the answer is always about that deploy. It answers `queued`, `running` or `none`, with the lane (`pull` or `build`), the place in line, how long the deploy waited and when it started, why a waiting deploy is held while Dokploy updates, and whether the boot restore is still reading waiting deploys back. A deploy that waits has no deployment row, so until now a client could not tell "waiting for a slot" from "running"; the GitHub Actions deploy action can now give the wait its own long limit and start its run limit when the deploy starts (the contract is in docs/deploy-queue-status.md). It needs `deployment:read` on the service and answers for that one service only.
+
 ### New in v0.31.0-community.9
 
 Upgrade notes: no database migration and nothing to configure unless you want to change the pull lane. This release includes everything in v0.31.0-community.8. The transfer API gains an optional `overwriteTargets` list and a read-only `transfer.preflight` query; the Transfer dialog now checks first and, when the target already holds data, lists it and asks for a confirmation before writing over it. Pull-only deploys get their own queue slots, 4 per server by default. Set `DOKPLOY_PULL_LANE_CONCURRENCY` (0 to 16) to change that; `0` switches the lane off and the queue behaves exactly as before. An image-only rollback to v0.31.0-community.8 keeps working.
