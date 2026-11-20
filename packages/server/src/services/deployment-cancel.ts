@@ -2,7 +2,10 @@ import { appendFile } from "node:fs/promises";
 import { IS_CLOUD } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { applications, compose, deployments } from "@dokploy/server/db/schema";
-import { notWaitingForGithubRun } from "@dokploy/server/services/live-build-claim";
+import {
+	endQueuedLiveBuild,
+	notWaitingForGithubRun,
+} from "@dokploy/server/services/live-build-claim";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { resolveComposeRolling } from "@dokploy/server/utils/builders/compose-rolling";
 import {
@@ -31,7 +34,8 @@ import {
 	hasRunningRemoteBuild,
 	takeReleaseCancel,
 } from "@dokploy/server/utils/process/remote-build-registry";
-import { and, eq, notInArray } from "drizzle-orm";
+import { TRPCError } from "@trpc/server";
+import { and, eq, isNull, notInArray, type SQL } from "drizzle-orm";
 
 /**
  * Cancelling a deployment whose build runs on a build server.
@@ -1008,13 +1012,114 @@ export const cancelBuildServerDeploymentsForService = async (
 };
 
 /**
+ * What the cancel of a registered GitHub Actions row needs from the deploy queue once a deploy was asked for it
+ * (T-19913). The queue lives in the app, not in this package: the app installs this control when it creates the queue
+ * (queueSetup.ts, through `apps/dokploy/server/queues/queued-deploy-control.ts`), in a slot on `globalThis` that every
+ * copy of this module shares. A caller may also hand one in.
+ *
+ * `removeDeployOf` takes the deploy job that carries the registered deployment out of the queue while it still waits:
+ * `removed` (it will never run), `started` (it is running or just started, so it was left alone) or `none` (no job
+ * of the queue carries it).
+ */
+export type QueuedDeployControl = {
+	removeDeployOf: (
+		deploymentId: string,
+	) => Promise<"removed" | "started" | "none">;
+};
+
+// The same key as `QUEUED_DEPLOY_CONTROL_SLOT` in the app's queued-deploy-control.ts.
+const QUEUED_DEPLOY_CONTROL_SLOT = Symbol.for("dokploy.queuedDeployControl");
+
+const installedQueuedDeployControl = (): QueuedDeployControl | undefined =>
+	(globalThis as unknown as Record<symbol, QueuedDeployControl | undefined>)[
+		QUEUED_DEPLOY_CONTROL_SLOT
+	];
+
+/** What the user is told when a registered row is cancelled while its deploy waits in the queue. */
+export const QUEUED_DEPLOY_CANCELLED_MESSAGE =
+	"Cancelled by user. The deploy that was waiting for this GitHub Actions build was removed from the queue; the run itself is not stopped.";
+
+const closeRegisteredRowByUser = (
+	deploymentId: string,
+	...extra: Array<SQL | undefined>
+) =>
+	db
+		.update(deployments)
+		.set({
+			status: "cancelled",
+			finishedAt: new Date().toISOString(),
+			errorMessage:
+				"Cancelled by user. The GitHub Actions run itself is not stopped.",
+			buildRunStatus: "completed",
+			buildRunStep: null,
+		})
+		.where(
+			and(
+				eq(deployments.deploymentId, deploymentId),
+				eq(deployments.status, "running"),
+				eq(deployments.externalBuildOnly, true),
+				...extra,
+			),
+		)
+		.returning({ deploymentId: deployments.deploymentId });
+
+/**
+ * The user's cancel of a registered row whose deploy was already asked for (`deployQueuedAt`): the deploy waits in
+ * Dokploy's queue and would take the row over, or write a row of its own, once it starts, so closing the row alone
+ * would show "cancelled" and still deploy. The queued job leaves the queue first (one synchronous step in the queue,
+ * so it cannot start in between), then the row is closed. A deploy that is already running is not stopped here: the
+ * cancel is refused and the normal cancel of the running deployment applies.
+ */
+const cancelRegisteredRowWithQueuedDeploy = async (
+	deploymentId: string,
+	queue: QueuedDeployControl | undefined,
+): Promise<CancelOutcome> => {
+	if (!queue) {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message:
+				"A deploy is waiting for this deployment in the queue, and this cancel cannot take it out of the queue. Remove the queued deploy first.",
+		});
+	}
+	const removal = await queue.removeDeployOf(deploymentId);
+	if (removal === "started") {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message:
+				"The deploy for this GitHub Actions build has already started, so this cancel did nothing. Cancel the deployment again in a moment: once the deploy has taken it over, the normal cancel of a running deployment stops it.",
+		});
+	}
+	// `removed`: the job is out of the queue. `none`: no job carries the row any more. No deploy takes the row either way.
+	const closed = await endQueuedLiveBuild(
+		deploymentId,
+		"cancelled",
+		QUEUED_DEPLOY_CANCELLED_MESSAGE,
+	);
+	if (closed) {
+		return { status: "cancelled", result: "NONE", genericStopNeeded: false };
+	}
+	// The queue's own hook for a removed job may have closed the row a moment earlier: still this cancel.
+	if (removal !== "removed") return { status: "not-running" };
+	const settled = await db.query.deployments.findFirst({
+		where: eq(deployments.deploymentId, deploymentId),
+		columns: { status: true, externalBuildOnly: true },
+	});
+	return settled?.status === "cancelled" && settled.externalBuildOnly
+		? { status: "cancelled", result: "NONE", genericStopNeeded: false }
+		: { status: "not-running" };
+};
+
+/**
  * `deployment.killProcess` for a deployment that builds on a build server, or
  * a compose deployment that is inside its rolling replace. Returns `null` when
  * it is neither (so the caller keeps its existing behaviour), otherwise the
- * outcome.
+ * outcome. `queue` (default: the one the app installed) is how a registered
+ * GitHub Actions row whose deploy waits in the queue takes that deploy out of
+ * it (see `QueuedDeployControl`).
  */
 export const cancelBuildServerDeploymentById = async (
 	deploymentId: string,
+	queue: QueuedDeployControl | undefined = installedQueuedDeployControl(),
 ): Promise<CancelOutcome | null> => {
 	const row = await db.query.deployments.findFirst({
 		where: eq(deployments.deploymentId, deploymentId),
@@ -1025,34 +1130,50 @@ export const cancelBuildServerDeploymentById = async (
 			applicationId: true,
 			composeId: true,
 			externalBuildOnly: true,
+			deployQueuedAt: true,
+			status: true,
 		},
 	});
 	if (!row) return null;
 
 	// A row registered while GitHub builds runs nothing on Dokploy, so the user's cancel only closes the row (the
-	// build on GitHub keeps going). Only this explicit cancel does it: the automatic stops skip these rows.
+	// build on GitHub keeps going). Only this explicit cancel does it: the automatic stops skip these rows. A row
+	// whose deploy is already queued is the queue's: that deploy leaves the queue with it.
 	if (row.externalBuildOnly) {
-		const [claimed] = await db
-			.update(deployments)
-			.set({
-				status: "cancelled",
-				finishedAt: new Date().toISOString(),
-				errorMessage:
-					"Cancelled by user. The GitHub Actions run itself is not stopped.",
-				buildRunStatus: "completed",
-				buildRunStep: null,
-			})
-			.where(
-				and(
-					eq(deployments.deploymentId, row.deploymentId),
-					eq(deployments.status, "running"),
-					eq(deployments.externalBuildOnly, true),
-				),
-			)
-			.returning({ deploymentId: deployments.deploymentId });
-		return claimed
-			? { status: "cancelled", result: "NONE", genericStopNeeded: false }
-			: { status: "not-running" };
+		if (!row.deployQueuedAt) {
+			const [claimed] = await closeRegisteredRowByUser(
+				row.deploymentId,
+				isNull(deployments.deployQueuedAt),
+			);
+			if (claimed) {
+				return {
+					status: "cancelled",
+					result: "NONE",
+					genericStopNeeded: false,
+				};
+			}
+			// Not closed: it ended, or a deploy was asked for since the row was read.
+			const now = await db.query.deployments.findFirst({
+				where: eq(deployments.deploymentId, row.deploymentId),
+				columns: {
+					status: true,
+					externalBuildOnly: true,
+					deployQueuedAt: true,
+				},
+			});
+			if (
+				!(
+					now?.status === "running" &&
+					now.externalBuildOnly &&
+					now.deployQueuedAt
+				)
+			) {
+				return { status: "not-running" };
+			}
+		}
+		// A row that already ended has nothing to cancel (the branch above finds that out in its UPDATE).
+		if (row.status !== "running") return { status: "not-running" };
+		return cancelRegisteredRowWithQueuedDeploy(row.deploymentId, queue);
 	}
 
 	if (row.applicationId && row.buildServerId) {

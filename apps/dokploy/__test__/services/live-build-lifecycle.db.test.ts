@@ -4,6 +4,7 @@ import path from "node:path";
 import { drizzle } from "drizzle-orm/pglite";
 import {
 	afterAll,
+	afterEach,
 	beforeAll,
 	beforeEach,
 	describe,
@@ -55,6 +56,10 @@ const watchdogData = await import(
 const guard = await import("@dokploy/server/utils/docker/cleanup-guard");
 const cancel = await import("@dokploy/server/services/deployment-cancel");
 const watchdog = await import("@/server/queues/deployment-watchdog");
+const { InMemoryQueue } = await import("@/server/queues/in-memory-queue");
+const { createQueuedDeployControl, installQueuedDeployControl } = await import(
+	"@/server/queues/queued-deploy-control"
+);
 
 const RUN = "https://github.com/acme/web/actions/runs/42";
 const START = Date.parse("2026-11-02T10:00:00Z");
@@ -534,6 +539,285 @@ describe.skipIf(!ready)("M4: the stops that target the running build", () => {
 		expect((await rowsOfService())[0]?.status).toBe("running");
 	});
 });
+describe.skipIf(!ready)(
+	"M5: cancelling a registered row whose deploy is already queued (T-19913)",
+	() => {
+		const pause = (ms: number) =>
+			new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+		// What queueSetup.ts installs for the real server: no test here may leave it behind.
+		afterEach(() => {
+			delete (globalThis as Record<symbol, unknown>)[
+				Symbol.for("dokploy.queuedDeployControl")
+			];
+		});
+
+		/**
+		 * The real queue on the real database, one slot. By default a job of another service holds the slot, so the
+		 * deploy waits; with `blocker: false` the deploy starts at once and waits on `releaseDeploy` before it takes
+		 * its row over (a deploy that is running but has not claimed the row yet). The queue's drop hook closes the row
+		 * of a removed job exactly like queueSetup.ts does; the processor stands in for processDeploymentJob: it takes
+		 * the registered row over, and when it cannot it writes a row of its own.
+		 */
+		const harness = async (options: { blocker?: boolean } = {}) => {
+			const started: string[] = [];
+			let releaseBlocker: () => void = () => {};
+			const blocked = new Promise<void>((resolve) => {
+				releaseBlocker = resolve;
+			});
+			let releaseDeploy: () => void = () => {};
+			const deployGate =
+				options.blocker === false
+					? new Promise<void>((resolve) => {
+							releaseDeploy = resolve;
+						})
+					: Promise.resolve();
+			const queue = new InMemoryQueue({
+				resolveConcurrency: () => 1,
+				onWaitingDropped: (jobs) => {
+					for (const data of jobs) {
+						const id = (data as { deploymentId?: string }).deploymentId;
+						if (id) {
+							void claimModule.endQueuedLiveBuild(
+								id,
+								"cancelled",
+								claimModule.QUEUED_DEPLOY_REMOVED_MESSAGE,
+							);
+						}
+					}
+				},
+			});
+			queue.process(async (job) => {
+				const data = job.data as {
+					applicationId: string;
+					deploymentId?: string;
+				};
+				started.push(data.deploymentId ?? data.applicationId);
+				if (data.applicationId === "blocker") {
+					await blocked;
+					return;
+				}
+				await deployGate;
+				const claimed = data.deploymentId
+					? await claimModule.claimLiveGithubBuild(claimOf(data.deploymentId))
+					: null;
+				if (!claimed) {
+					await (
+						holder.db as never as {
+							insert: (t: unknown) => {
+								values: (v: unknown) => Promise<unknown>;
+							};
+						}
+					)
+						.insert(deployments)
+						.values({
+							applicationId: data.applicationId,
+							title: "deploy that created its own row",
+							logPath: "x",
+							status: "running",
+						});
+				}
+			});
+			if (options.blocker !== false) {
+				await queue.add({
+					applicationId: "blocker",
+					titleLog: "holds the only slot",
+					descriptionLog: "",
+					type: "deploy",
+					applicationType: "application",
+				});
+				await pause(0);
+			}
+			return {
+				queue,
+				started,
+				releaseBlocker,
+				releaseDeploy,
+				control: createQueuedDeployControl(queue),
+			};
+		};
+
+		const queueDeploy = async (
+			h: Awaited<ReturnType<typeof harness>>,
+			deploymentId: string,
+		) => {
+			await claimModule.requestLiveBuildDeploy(reference(deploymentId));
+			await h.queue.add({
+				applicationId: "app-1",
+				titleLog: "Deploy",
+				descriptionLog: "",
+				type: "redeploy",
+				applicationType: "application",
+				deploymentId,
+			});
+		};
+
+		it("takes the queued deploy out of the queue with the row: nothing deploys and no row of its own appears", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			await queueDeploy(h, deploymentId);
+
+			const outcome = await cancel.cancelBuildServerDeploymentById(
+				deploymentId,
+				h.control,
+			);
+			expect(outcome).toMatchObject({ status: "cancelled" });
+			expect(await h.queue.getJobs(["waiting"])).toHaveLength(0);
+
+			// The slot frees up: whatever still waits in the queue now starts.
+			h.releaseBlocker();
+			await pause(300);
+
+			expect(h.started).toEqual(["blocker"]);
+			const rows = await rowsOfService();
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({
+				deploymentId,
+				status: "cancelled",
+				externalBuildOnly: true,
+				buildRunStatus: "completed",
+			});
+			expect(rows[0]?.finishedAt).toBeTruthy();
+			expect(rows[0]?.errorMessage).toContain("removed from the queue");
+			// Cancelling again finds nothing running.
+			expect(
+				await cancel.cancelBuildServerDeploymentById(deploymentId, h.control),
+			).toEqual({ status: "not-running" });
+		});
+
+		it("refuses the cancel when the deploy is already running, and leaves the row and the deploy alone", async () => {
+			const h = await harness({ blocker: false });
+			const { deploymentId } = await register();
+			await queueDeploy(h, deploymentId);
+			await pause(50);
+			// The job started (it is not waiting any more) but has not taken the row over yet.
+			expect(h.started).toEqual([deploymentId]);
+			expect(await h.queue.getJobs(["waiting"])).toHaveLength(0);
+
+			await expect(
+				cancel.cancelBuildServerDeploymentById(deploymentId, h.control),
+			).rejects.toMatchObject({
+				code: "CONFLICT",
+				message: expect.stringContaining("already started"),
+			});
+			expect((await rowsOfService())[0]).toMatchObject({
+				status: "running",
+				externalBuildOnly: true,
+				errorMessage: null,
+			});
+
+			// The deploy goes on and takes its row over: one row, running, a normal deployment from here.
+			h.releaseDeploy();
+			await pause(300);
+			const rows = await rowsOfService();
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({
+				deploymentId,
+				status: "running",
+				externalBuildOnly: false,
+			});
+		});
+
+		it("uses the control the app installed when the caller passes none (what killProcess does)", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			await queueDeploy(h, deploymentId);
+			installQueuedDeployControl(h.queue);
+
+			expect(
+				await cancel.cancelBuildServerDeploymentById(deploymentId),
+			).toMatchObject({ status: "cancelled" });
+			expect(await h.queue.getJobs(["waiting"])).toHaveLength(0);
+			h.releaseBlocker();
+			await pause(300);
+			expect(h.started).toEqual(["blocker"]);
+			expect(await rowsOfService()).toHaveLength(1);
+		});
+
+		it("leaves a waiting job of another deployment of the same service in the queue", async () => {
+			const h = await harness();
+			const first = await register(42);
+			const second = await register(43);
+			await queueDeploy(h, first.deploymentId);
+			await queueDeploy(h, second.deploymentId);
+
+			await cancel.cancelBuildServerDeploymentById(
+				first.deploymentId,
+				h.control,
+			);
+
+			const waiting = await h.queue.getJobs(["waiting"]);
+			expect(
+				waiting.map(
+					(job) => (job.data as { deploymentId?: string }).deploymentId,
+				),
+			).toEqual([second.deploymentId]);
+			const byId = new Map(
+				(await rowsOfService()).map((row) => [row.deploymentId, row]),
+			);
+			expect(byId.get(first.deploymentId)?.status).toBe("cancelled");
+			expect(byId.get(second.deploymentId)?.status).toBe("running");
+		});
+
+		it("closes the row when the queue holds no job for it any more", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			await claimModule.requestLiveBuildDeploy(reference(deploymentId));
+
+			expect(
+				await cancel.cancelBuildServerDeploymentById(deploymentId, h.control),
+			).toMatchObject({ status: "cancelled" });
+			expect((await rowsOfService())[0]).toMatchObject({
+				status: "cancelled",
+				externalBuildOnly: true,
+			});
+		});
+
+		it("refuses to close a row with a queued deploy when the caller cannot reach the queue", async () => {
+			const h = await harness();
+			const { deploymentId } = await register();
+			await queueDeploy(h, deploymentId);
+
+			await expect(
+				cancel.cancelBuildServerDeploymentById(deploymentId),
+			).rejects.toMatchObject({ code: "CONFLICT" });
+			expect((await rowsOfService())[0]).toMatchObject({
+				status: "running",
+				externalBuildOnly: true,
+			});
+			expect(await h.queue.getJobs(["waiting"])).toHaveLength(1);
+		});
+
+		it("does not ask the queue for a row with no deploy on the way: the cancel is the same as before", async () => {
+			const removeDeployOf = vi.fn();
+			const { deploymentId } = await register();
+
+			const outcome = await cancel.cancelBuildServerDeploymentById(
+				deploymentId,
+				{
+					removeDeployOf,
+				},
+			);
+
+			expect(outcome).toMatchObject({ status: "cancelled" });
+			expect(removeDeployOf).not.toHaveBeenCalled();
+			const [row] = await rowsOfService();
+			expect(row).toMatchObject({
+				status: "cancelled",
+				externalBuildOnly: true,
+				buildRunStatus: "completed",
+			});
+			expect(row?.errorMessage).toBe(
+				"Cancelled by user. The GitHub Actions run itself is not stopped.",
+			);
+			expect(
+				await cancel.cancelBuildServerDeploymentById(deploymentId, {
+					removeDeployOf,
+				}),
+			).toEqual({ status: "not-running" });
+		});
+	},
+);
 
 describe.skipIf(!ready)(
 	"a run Dokploy cannot read, superseded by a later deployed run",

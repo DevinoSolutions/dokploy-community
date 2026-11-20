@@ -10,6 +10,10 @@ Upgrade notes: no database migration. Pull-only deploys get their own queue slot
 
 - Deploys that only pull a prebuilt image no longer wait behind builds (T-12497). The deploy queue now has a separate pull lane with its own cap (default 4 per server, `DOKPLOY_PULL_LANE_CONCURRENCY`; the build cap is unchanged and never shared). A deploy goes in the pull lane only when it provably builds nothing: a Docker-image application without a build server, a preview of one, a deploy-hook image deployed by digest, or a stored (raw) compose whose every service has an `image` and no `build` or `extends`, no `include` and no custom command, and no build server. Anything else, and any doubt (an unreadable file, a failed lookup), stays in the build lane, which is how every deploy ran before. The lane is read again just before a pull deploy starts, so a service edited while it waited goes back to the build lane. One service still runs one deploy at a time and oldest first across both lanes. Update Server and Reload Server still refuse while a pull deploy runs. The queue list marks pull deploys with a "pull" badge and `deployment.queueList` returns a `lane` field. The priority lane applies to the build lane only.
 
+**Fixed.**
+
+- Cancelling a GitHub Actions build row whose deploy is already queued now also removes that queued deploy (T-19913). Before, Cancel closed the row as cancelled while the deploy waiting in the queue still ran later and deployed the service anyway, writing a deployment of its own. If the deploy has already started, Cancel is refused with a message and the row is left untouched; cancel the deployment again once it is running. A row with no deploy asked for is cancelled exactly as before.
+
 ### New in v0.31.0-community.8
 
 Upgrade notes: no database migration and nothing to configure. An image-only rollback to v0.31.0-community.7 keeps working. This release includes everything in v0.31.0-community.7. Update Server and Reload Server now refuse while a deploy is running, so finish or cancel running deploys before using them.

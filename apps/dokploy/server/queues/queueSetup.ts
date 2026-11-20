@@ -34,6 +34,7 @@ import {
 	type RestoreResult,
 } from "./queue-journal";
 import type { DeploymentJob } from "./queue-types";
+import { installQueuedDeployControl } from "./queued-deploy-control";
 
 /**
  * Deployment queue.
@@ -287,6 +288,9 @@ if (!globalForQueue.__dokployDeploymentQueue) {
 }
 
 const myQueue: DeploymentQueue = globalForQueue.__dokployDeploymentQueue;
+
+// The user's cancel of a registered GitHub Actions row takes the deploy that waits for it out of this queue (T-19913).
+installQueuedDeployControl(myQueue);
 
 /** Start processing jobs. Called once on server startup (self-hosted). */
 export const startDeploymentWorker = () => myQueue.run();
