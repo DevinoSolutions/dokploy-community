@@ -14,9 +14,11 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { resolveBuildsConcurrency } from "./concurrency";
+import { classifyDeployJob, resolvePullConcurrency } from "./deploy-lane";
 import { processDeploymentJob } from "./deployments-queue";
 import {
 	type CoalesceWaitingOutcome,
+	getPartition,
 	type InMemoryJob,
 	InMemoryQueue,
 	type IntakeHold,
@@ -32,6 +34,7 @@ import {
 	type RestoreResult,
 } from "./queue-journal";
 import type { DeploymentJob } from "./queue-types";
+import { installQueuedDeployControl } from "./queued-deploy-control";
 
 /**
  * Deployment queue.
@@ -101,6 +104,11 @@ interface DeploymentQueue {
 	busy: () => QueueBusySnapshot;
 	/** Re-enqueue the jobs the previous process left unfinished. Never throws. */
 	restore: () => Promise<RestoreResult>;
+	/**
+	 * True once the boot restore is over (it ran, or it failed): until then the jobs the previous process left waiting
+	 * are in the journal and not in the queue yet.
+	 */
+	restoreSettled: () => boolean;
 	/** Stop taking jobs, give running ones `graceMs` to finish, flush the journal. */
 	shutdown: (graceMs: number, flushMs: number) => Promise<void>;
 }
@@ -125,6 +133,7 @@ const createNoopQueue = (): DeploymentQueue => ({
 	intakeClosed: () => false,
 	busy: () => ({ active: [], heldGroups: [] }),
 	restore: () => Promise.resolve({ restored: 0, interrupted: 0, dropped: 0 }),
+	restoreSettled: () => true,
 	shutdown: () => Promise.resolve(),
 });
 
@@ -171,6 +180,12 @@ const failDroppedJob = async (payload: Record<string, unknown>) => {
 	}
 };
 
+/**
+ * Longest the boot restore waits for the lane of the restored jobs before it
+ * opens the worker gate. The jobs it did not reach simply start as build jobs.
+ */
+export const RESTORE_LANE_CLASSIFY_MS = 5_000;
+
 const createInMemoryQueue = (): DeploymentQueue => {
 	const durable = createQueueJournal(dbJournalStore, {
 		onDropped: failDroppedJob,
@@ -180,6 +195,13 @@ const createInMemoryQueue = (): DeploymentQueue => {
 	});
 	const queue = new InMemoryQueue({
 		resolveConcurrency: resolveBuildsConcurrency,
+		// Pull-only deploys (a prebuilt image) get their own cap so they do not wait
+		// behind builds. `DOKPLOY_PULL_LANE_CONCURRENCY=0` turns the lane off.
+		resolvePullConcurrency,
+		classifyLane: (data) =>
+			resolvePullConcurrency(getPartition(data)) === 0
+				? "build"
+				: classifyDeployJob(data),
 		journal: durable.journal,
 		onWaitingDropped: (jobs) => {
 			for (const data of jobs)
@@ -199,6 +221,7 @@ const createInMemoryQueue = (): DeploymentQueue => {
 	queue.process(processDeploymentJob);
 
 	let shuttingDown: Promise<void> | null = null;
+	let restoreSettled = false;
 
 	return {
 		add: (_name, data) => queue.add(data),
@@ -228,11 +251,18 @@ const createInMemoryQueue = (): DeploymentQueue => {
 				// If the gate's timer already fired this is still safe: the pass is
 				// synchronous per unit and only ever removes waiting jobs.
 				if (result.restored > 0) await dedupeRestoredUnits(queue);
+				// Also before the gate opens: restored pull jobs start in their lane at
+				// once. Bounded, never throws; what it misses stays a build job.
+				await queue
+					.classifyWaiting(RESTORE_LANE_CLASSIFY_MS)
+					.catch(() => undefined);
 				return result;
 			} finally {
+				restoreSettled = true;
 				gate.open();
 			}
 		},
+		restoreSettled: () => restoreSettled,
 		shutdown: (graceMs, flushMs) => {
 			shuttingDown ??= (async () => {
 				// Nothing new starts; anything still running when the grace period
@@ -267,6 +297,13 @@ if (!globalForQueue.__dokployDeploymentQueue) {
 }
 
 const myQueue: DeploymentQueue = globalForQueue.__dokployDeploymentQueue;
+
+// The user's cancel of a registered GitHub Actions row takes the deploy that waits for it out of this queue (T-19913).
+installQueuedDeployControl({
+	getJobs: (states) => myQueue.getJobs(states),
+	removeWaitingJob: (id) => myQueue.removeWaitingJob(id),
+	restoreSettled: () => myQueue.restoreSettled(),
+});
 
 /** Start processing jobs. Called once on server startup (self-hosted). */
 export const startDeploymentWorker = () => myQueue.run();

@@ -5,7 +5,6 @@ import path from "node:path";
 import {
 	afterAll,
 	afterEach,
-	beforeAll,
 	beforeEach,
 	describe,
 	expect,
@@ -138,17 +137,22 @@ describe("confined Traefik config files", () => {
 	let outside: string;
 	let victim: string;
 
-	beforeAll(() => {
-		root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), "traefik-confine-")),
-		);
-	});
+	// A fresh root per test: whatever a test leaves behind (a swapper process
+	// that is still winding down, a link) cannot reach the next test's paths.
+	const roots: string[] = [];
+	const swappers: ChildProcess[] = [];
 
 	afterAll(() => {
-		fs.rmSync(root, { recursive: true, force: true });
+		for (const dir of roots) {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	beforeEach(() => {
+		root = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "traefik-confine-")),
+		);
+		roots.push(root);
 		main = path.join(root, "traefik");
 		dynamic = path.join(main, "dynamic");
 		outside = path.join(root, "outside");
@@ -163,8 +167,9 @@ describe("confined Traefik config files", () => {
 		host.env = {};
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
+		await Promise.all(swappers.splice(0).map(stopSwapper));
 	});
 
 	const plantLink = (name: string, target = victim, dir = dynamic) =>
@@ -176,7 +181,7 @@ describe("confined Traefik config files", () => {
 	// so its own `echo` can never write through a link another swapper made.
 	const startSwapper = (...linkTargets: string[]): ChildProcess => {
 		const t = path.join(dynamic, "app.yml");
-		return spawn(
+		const child = spawn(
 			"sh",
 			[
 				"-c",
@@ -185,9 +190,29 @@ describe("confined Traefik config files", () => {
 				t,
 				...linkTargets,
 			],
-			{ stdio: "ignore" },
+			// its own process group, so the whole group can be stopped at once
+			{ stdio: "ignore", detached: true },
 		);
+		swappers.push(child);
+		return child;
 	};
+
+	// Kills the swapper AND the rm/ln it may be running (a child outlives a
+	// plain kill of its parent and would still plant a link a moment later), and
+	// waits until it is gone.
+	const stopSwapper = (child: ChildProcess) =>
+		new Promise<void>((resolve) => {
+			if (child.exitCode !== null || child.signalCode !== null || !child.pid) {
+				resolve();
+				return;
+			}
+			child.once("exit", () => resolve());
+			try {
+				process.kill(-child.pid, "SIGKILL");
+			} catch {
+				child.kill("SIGKILL");
+			}
+		});
 
 	describe("a normal install", () => {
 		it("reads and writes an app config, the middlewares and the main config", () => {
@@ -326,7 +351,7 @@ describe("confined Traefik config files", () => {
 						).catch(() => undefined);
 					}
 				} finally {
-					swapper.kill("SIGKILL");
+					await stopSwapper(swapper);
 				}
 				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 			},
@@ -457,7 +482,7 @@ describe("confined Traefik config files", () => {
 
 			it.skipIf(onWindows)(
 				"survives a real concurrent swap of the file for a link",
-				() => {
+				async () => {
 					const swapper = startSwapper(victim);
 					try {
 						for (let i = 0; i < 300; i++) {
@@ -475,7 +500,7 @@ describe("confined Traefik config files", () => {
 							}
 						}
 					} finally {
-						swapper.kill("SIGKILL");
+						await stopSwapper(swapper);
 					}
 					expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 				},
@@ -510,6 +535,44 @@ describe("confined Traefik config files", () => {
 			);
 			expect(fs.readdirSync(real)).toEqual([]);
 			fs.rmSync(real, { recursive: true, force: true });
+		});
+
+		// The layout of a host whose /etc/dokploy (or any ancestor, like /var, /tmp
+		// or a runner workspace) is itself a link: the paths Dokploy uses go
+		// through the link, `dynamic` is a link inside the tree. Built explicitly,
+		// so it does not depend on where the runner's temp directory is.
+		it("accepts an in-tree dynamic link when an ancestor of the Traefik directory is a link", () => {
+			const parent = path.join(root, "parent");
+			const ancestorLink = path.join(root, "ancestor-link");
+			fs.mkdirSync(path.join(parent, "etc", "traefik"), { recursive: true });
+			fs.symlinkSync(parent, ancestorLink);
+			const viaLink = path.join(ancestorLink, "etc", "traefik");
+			const real = path.join(viaLink, "real-dynamic");
+			fs.mkdirSync(real);
+			fs.symlinkSync(real, path.join(viaLink, "dynamic"));
+			state.main = viaLink;
+			state.dynamic = path.join(viaLink, "dynamic");
+
+			writeConfig("app", "ok");
+			writeMainConfig("main");
+			expect(fs.readFileSync(path.join(real, "app.yml"), "utf8")).toBe("ok");
+			expect(readConfig("app")).toBe("ok");
+			expect(readMainConfig()).toBe("main");
+			expect(
+				fs.readFileSync(path.join(parent, "etc/traefik/traefik.yml"), "utf8"),
+			).toBe("main");
+			// ... and a link planted at the file is still refused on that layout
+			plantLink("planted.yml", victim, real);
+			expect(() => readConfig("planted")).toThrow(
+				expect.objectContaining(rejected),
+			);
+			// ... as is a dynamic link that leaves the tree
+			fs.rmSync(path.join(viaLink, "dynamic"), { force: true });
+			fs.symlinkSync(outside, path.join(viaLink, "dynamic"));
+			expect(() => writeConfig("app", "pwned")).toThrow(
+				expect.objectContaining(rejected),
+			);
+			expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 		});
 
 		it("works when the Traefik directory is reached through a link", () => {
@@ -642,6 +705,23 @@ describe("confined Traefik config files", () => {
 				expect(fs.existsSync(path.join(outside, "missing.txt"))).toBe(false);
 			});
 
+			it("accepts an in-tree dynamic link when an ancestor of the Traefik directory is a link", async () => {
+				const parent = path.join(root, "parent");
+				const ancestorLink = path.join(root, "ancestor-link");
+				fs.mkdirSync(path.join(parent, "etc", "traefik"), { recursive: true });
+				fs.symlinkSync(parent, ancestorLink);
+				const viaLink = path.join(ancestorLink, "etc", "traefik");
+				const real = path.join(viaLink, "real-dynamic");
+				fs.mkdirSync(real);
+				fs.symlinkSync(real, path.join(viaLink, "dynamic"));
+				state.main = viaLink;
+				state.dynamic = path.join(viaLink, "dynamic");
+
+				await writeConfigRemote(serverId, "app", "ok");
+				expect(fs.readFileSync(path.join(real, "app.yml"), "utf8")).toBe("ok");
+				expect(await readRemoteConfig(serverId, "app")).toBe("ok");
+			});
+
 			it("refuses a symlinked middlewares.yml and main config", async () => {
 				plantLink("middlewares.yml");
 				plantLink("traefik.yml", victim, main);
@@ -756,7 +836,7 @@ describe("confined Traefik config files", () => {
 						);
 					}
 				} finally {
-					swapper.kill("SIGKILL");
+					await stopSwapper(swapper);
 				}
 				expect(fs.readFileSync(victim, "utf8")).toBe("untouched");
 				expect(fs.readdirSync(outside)).toEqual(["victim.txt"]);

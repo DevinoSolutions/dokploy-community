@@ -123,7 +123,9 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 ## What's new in v0.31.0-community.9
 
-- Internal cleanup only: shared code for GitHub Actions deployment rows and for backups. Nothing changes for users.
+- Security: service transfer no longer overwrites data the target already holds without a confirmation, checks first, and follows the bind mount rules.
+- Pull-only deploys get their own queue lane (4 per server by default, `DOKPLOY_PULL_LANE_CONCURRENCY`, 0 turns it off). Cancelling a GitHub Actions build row also removes its queued deploy.
+- Internal cleanup and a flaky test fix, no user-visible change.
 - No database migration, and an image-only rollback to v0.31.0-community.8 keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.

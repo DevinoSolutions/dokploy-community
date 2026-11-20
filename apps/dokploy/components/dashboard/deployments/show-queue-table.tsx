@@ -143,7 +143,18 @@ export function ShowQueueTable(props: { embedded?: boolean }) {
 											<TableCell className="max-w-[200px] truncate">
 												{getJobLabel(row)}
 											</TableCell>
-											<TableCell>{appType ?? row.name ?? "—"}</TableCell>
+											<TableCell>
+												{appType ?? row.name ?? "—"}
+												{row.lane === "pull" && (
+													<Badge
+														variant="outline"
+														className="ml-2"
+														title="Pull-only deploy: it has its own queue slots and does not wait behind builds."
+													>
+														pull
+													</Badge>
+												)}
+											</TableCell>
 											<TableCell>
 												<Badge variant={stateVariants[row.state] ?? "outline"}>
 													{row.state}
