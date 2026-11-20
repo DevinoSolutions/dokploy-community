@@ -1,9 +1,4 @@
-import {
-	getPartition,
-	type InMemoryJob,
-	type JobState,
-	type Lane,
-} from "./in-memory-queue";
+import { getPartition, type InMemoryJob, type Lane } from "./in-memory-queue";
 
 /**
  * What `deployment.queueStatus` tells a caller about one service's deploy in the
@@ -19,12 +14,28 @@ import {
 export interface QueueStatus {
 	/** `queued`: waiting for a slot. `running`: a slot is held. `none`: not in the queue. */
 	state: "queued" | "running" | "none";
-	/** The cap the deploy counts against; null when `none`. */
+	/**
+	 * The cap the deploy counts against; null when `none`. Not final while
+	 * `queued`: a deploy is read again just before it starts and can move from
+	 * `pull` to `build` if its service changed.
+	 */
 	lane: Lane | null;
-	/** Place among the jobs waiting in its lane on its server (1 = next); null unless `queued`. */
+	/**
+	 * Place in the list of jobs waiting in its lane on its server (1 = first in the
+	 * list); null unless `queued`. A list order, not a forecast: a prioritized
+	 * deploy can start before it, and a job ahead whose service is busy can start
+	 * after it.
+	 */
 	position: number | null;
-	/** Jobs waiting before it in that lane; null unless `queued`. */
+	/** Jobs listed before it in that lane on its server; null unless `queued`. */
 	ahead: number | null;
+	/**
+	 * `running` only: how many deploys of the same service wait behind the running
+	 * one. Above 0, the running deploy is not necessarily the caller's (one service
+	 * never runs two deploys at once, so a newer deploy waits for the older one):
+	 * send the deploymentId to be exact. Null when not `running`.
+	 */
+	queuedBehind: number | null;
 	/**
 	 * How long the deploy waited: so far when `queued`, in total when `running`
 	 * (until it started); null when `none`.
@@ -41,10 +52,13 @@ export interface QueueStatus {
 	restoring: boolean;
 }
 
-/** One job of a queue snapshot, with the state it had when the snapshot was taken. */
+/**
+ * One job of a queue snapshot. Whether it runs is read from the snapshot itself (a
+ * job has `processedOn` once a slot took it), never from the live queue, so one
+ * job cannot be reported with a state and fields of two different moments.
+ */
 export interface QueueStatusJob {
 	job: InMemoryJob;
-	state: JobState;
 }
 
 export interface QueueStatusTarget {
@@ -69,6 +83,7 @@ const NONE = (restoring: boolean): QueueStatus => ({
 	startedAt: null,
 	heldReason: null,
 	restoring,
+	queuedBehind: null,
 });
 
 const laneOf = (job: InMemoryJob): Lane =>
@@ -97,11 +112,19 @@ const deploysService = (job: InMemoryJob, target: QueueStatusTarget) => {
 	return !target.deploymentId || data.deploymentId === target.deploymentId;
 };
 
+/** The same target without the registered row: every deploy of the service. */
+const serviceOnly = (target: QueueStatusTarget): QueueStatusTarget => ({
+	applicationId: target.applicationId,
+	composeId: target.composeId,
+});
+
 /**
  * The status of the target's deploy in a snapshot of the queue (waiting and
  * running jobs, in queue order per server). With a deployment id only the job that
- * carries that row answers; without one the service's current deploy does: a
- * running one, else the oldest waiting one.
+ * carries that row answers, whatever else the service has in the queue. Without
+ * one the service's current deploy does (a running one, else the oldest waiting
+ * one), and `queuedBehind` says when the caller's own deploy may be one of those
+ * waiting behind it.
  */
 export const describeQueueStatus = (
 	snapshot: QueueStatusJob[],
@@ -109,21 +132,26 @@ export const describeQueueStatus = (
 	context: QueueStatusContext,
 ): QueueStatus => {
 	const matching = snapshot.filter(({ job }) => deploysService(job, target));
-	const running = matching.find((entry) => entry.state === "active");
+	const hasStarted = (entry: QueueStatusJob) =>
+		entry.job.processedOn !== undefined;
+	const running = matching.find(hasStarted);
 	if (running) {
 		const { job } = running;
+		const startedAt = job.processedOn as number;
 		return {
 			...NONE(context.restoring),
 			state: "running",
 			lane: laneOf(job),
-			waitingSinceMs:
-				job.processedOn === undefined
-					? null
-					: Math.max(0, job.processedOn - job.timestamp),
-			startedAt: job.processedOn ?? null,
+			waitingSinceMs: Math.max(0, startedAt - job.timestamp),
+			startedAt,
+			// Waiting deploys of the same service (one service never runs two at once).
+			queuedBehind: snapshot.filter(
+				(entry) =>
+					!hasStarted(entry) && deploysService(entry.job, serviceOnly(target)),
+			).length,
 		};
 	}
-	const first = matching.find((entry) => entry.state === "waiting");
+	const first = matching.find((entry) => !hasStarted(entry));
 	if (!first) return NONE(context.restoring);
 
 	const { job } = first;
@@ -133,7 +161,7 @@ export const describeQueueStatus = (
 	for (const other of snapshot) {
 		if (other === first) break;
 		if (
-			other.state === "waiting" &&
+			!hasStarted(other) &&
 			laneOf(other.job) === lane &&
 			getPartition(other.job.data) === partition
 		) {

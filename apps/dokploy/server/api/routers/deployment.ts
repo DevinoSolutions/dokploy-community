@@ -61,7 +61,6 @@ import {
 	deployments,
 	server,
 } from "@/server/db/schema";
-import type { JobState } from "@/server/queues/in-memory-queue";
 import { describeQueueStatus } from "@/server/queues/queue-status";
 import { RESTORE_GRACE_MS } from "@/server/queues/queued-deploy-control";
 import { myQueue } from "@/server/queues/queueSetup";
@@ -363,7 +362,7 @@ export const deploymentRouter = createTRPCRouter({
 				method: "GET",
 				path: "/deployment.queueStatus",
 				description:
-					"Where the deploy of one application or compose is in the Dokploy deploy queue. Pass applicationId or composeId, and optionally the deploymentId of the GitHub Actions deployment you registered so that only the deploy that continues it answers. state: 'queued' (waiting for a slot; lane, position and ahead say where, waitingSinceMs how long), 'running' (startedAt is when it started), or 'none' (not in the queue: not started yet, finished, or removed; read the deployment itself for the outcome). lane 'pull' is a deploy of a prebuilt image, which has its own slots and does not wait behind builds. heldReason 'intake-closed-for-update' says Dokploy is updating and the deploy starts after the restart. restoring true means Dokploy just started and may not list its waiting deploys yet: poll again before treating 'none' as final. Give the queued wait its own long limit and start the run limit at startedAt.",
+					"Where the deploy of one application or compose is in the Dokploy deploy queue. Pass applicationId or composeId, and the deploymentId of the GitHub Actions deployment you registered so that the answer is always about the deploy that continues it. state: 'queued' (waiting for a slot; lane, position and ahead say where in the list of waiting jobs, waitingSinceMs how long; position is list order, not a start forecast), 'running' (startedAt is when it started; without a deploymentId, queuedBehind above 0 means newer deploys of the service wait behind it and the running one may not be yours), or 'none' (not in the queue: not started yet, finished, or removed; read the deployment itself for the outcome). lane 'pull' is a deploy of a prebuilt image, which has its own slots and does not wait behind builds. heldReason 'intake-closed-for-update' says Dokploy is updating and the deploy starts after the restart. restoring true means Dokploy just started and may not list its waiting deploys yet: poll again before treating 'none' as final. Give the queued wait its own long limit and start the run limit at startedAt.",
 			},
 		})
 		.input(
@@ -399,12 +398,11 @@ export const deploymentRouter = createTRPCRouter({
 					restoring: false,
 				});
 			}
+			// One snapshot, and nothing read from the live queue afterwards: whether a
+			// job runs comes from the snapshot itself (see QueueStatusJob).
 			const jobs = await myQueue.getJobs();
-			// Read in one synchronous step after the snapshot, so no job is counted twice
-			// or missed because it started in between.
-			const states = await Promise.all(jobs.map((job) => job.getState()));
 			return describeQueueStatus(
-				jobs.map((job, index) => ({ job, state: states[index] as JobState })),
+				jobs.map((job) => ({ job })),
 				input,
 				{
 					now: Date.now(),

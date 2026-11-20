@@ -320,6 +320,43 @@ describe("deployment.queueStatus", () => {
 		}
 	});
 
+	it("a job that starts after the snapshot is read is queued, never running with a null start", async () => {
+		// The slot frees between getJobs and any later read of the live state: the
+		// snapshot has no processedOn, the live state says active.
+		const getState = vi.fn(async () => "active");
+		mocks.getJobs.mockImplementation(async () => [
+			{
+				id: "j-race",
+				data: appJob("app-org1"),
+				timestamp: Date.now() - 30_000,
+				lane: "build",
+				getState,
+			},
+		]);
+		const status = await caller.queueStatus({ applicationId: "app-org1" });
+
+		expect(status).toMatchObject({ state: "queued", startedAt: null });
+		expect(getState).not.toHaveBeenCalled();
+	});
+
+	it("with the registered row, the caller's queued deploy is answered even while an older one runs", async () => {
+		mocks.jobs = [
+			job("j-old", appJob("app-org1", { deploymentId: "dep-old" }), {
+				state: "active",
+			}),
+			job("j-new", appJob("app-org1", { deploymentId: "dep-new" })),
+		];
+		await expect(
+			caller.queueStatus({
+				applicationId: "app-org1",
+				deploymentId: "dep-new",
+			}),
+		).resolves.toMatchObject({ state: "queued", startedAt: null });
+		await expect(
+			caller.queueStatus({ applicationId: "app-org1" }),
+		).resolves.toMatchObject({ state: "running", queuedBehind: 1 });
+	});
+
 	it("names no job id and none of another organization's data", async () => {
 		const serialized = JSON.stringify(
 			await caller.queueStatus({ applicationId: "app-org1" }),

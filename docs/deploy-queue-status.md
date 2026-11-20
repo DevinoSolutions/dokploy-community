@@ -19,7 +19,7 @@ action itself lives in its own repository and is changed there.
 | Input          | Meaning |
 | -------------- | ------- |
 | `applicationId` or `composeId` | Exactly one. The service whose deploy to describe. |
-| `deploymentId` | Optional. The deployment you registered with `deployment.registerExternalBuild`; only the deploy that continues that row answers. |
+| `deploymentId` | The deployment you registered with `deployment.registerExternalBuild`. Send it: then the answer is always about the deploy that continues that row, whatever else the service has in the queue. Without it the answer is about the service's current deploy, which may not be yours (see `queuedBehind`). |
 
 The caller needs `deployment:read` on the service (and the service on their
 access list), like reading its deployments. The answer describes that one
@@ -28,8 +28,9 @@ service only.
 | Field | Meaning |
 | ----- | ------- |
 | `state` | `queued` (waiting for a slot), `running` (holds a slot), `none` (not in the queue: not started yet, finished or removed). |
-| `lane` | `pull` for a deploy of a prebuilt image (own slots, does not wait behind builds), `build` otherwise; `null` when `none`. |
-| `position`, `ahead` | `queued` only. Place among the jobs waiting in the same lane on the same server (1 is next) and how many are before it. |
+| `lane` | `pull` for a deploy of a prebuilt image (own slots, does not wait behind builds), `build` otherwise; `null` when `none`. Not final while `queued`: a deploy is read again just before it starts and moves from `pull` to `build` if its service changed. |
+| `position`, `ahead` | `queued` only. The deploy's place in the list of jobs waiting in the same lane on the same server, and how many are listed before it. This is list order, not a forecast: a prioritized deploy can start before position 1, and a job ahead whose service is busy can start after you. |
+| `queuedBehind` | `running` only. How many deploys of the same service wait behind the running one. Above 0 the running deploy is not necessarily yours: one service never runs two deploys at once, so a newer deploy waits for the older one. |
 | `waitingSinceMs` | How long the deploy waited: so far when `queued`, in total when `running`. |
 | `startedAt` | Epoch milliseconds the deploy started; `running` only. |
 | `heldReason` | `intake-closed-for-update` while Dokploy is updating: the deploy starts after the restart. |
@@ -41,12 +42,17 @@ service only.
 ## What the action should do
 
 1. Register the deployment and send the deploy as today.
-2. Poll `deployment.queueStatus` for the service (with the `deploymentId`).
+2. Poll `deployment.queueStatus` for the service and pass the `deploymentId`.
+   Without it, a `running` answer with `queuedBehind` above 0 means "not
+   necessarily yours": keep waiting under the queued limit and do not start the
+   run clock on its `startedAt`.
 3. While `state` is `queued`, wait under a separate, long limit. Suggested: 6
    hours. Log the `position` and `lane` when they change. Warn (do not fail) when
    the lane is `pull` and the position has not moved for 15 minutes: a pull deploy
    should not wait long, so the pull slots are full or the queue is held.
-4. Start the run limit (the 7200 second clock) at `running`, or at `startedAt`.
+4. Start the run limit (the 7200 second clock) at `running`, or at `startedAt`,
+   only for an answer that is yours: one given for your `deploymentId`, or one
+   with `queuedBehind` of 0.
 5. Treat `none` as "the deploy left the queue" only when `restoring` is `false`
    and the deployment row has an outcome; otherwise poll again.
 6. While `heldReason` is set, keep waiting and say why; do not count it against
