@@ -62,7 +62,21 @@ export const TransferService = ({ id, type, serverId }: Props) => {
 	const [request, setRequest] = useState<{
 		targetServerId: string | null;
 		removeSourceData: boolean;
+		overwriteTargets: string[];
 	} | null>(null);
+	const [isChecking, setIsChecking] = useState(false);
+	// What the pre-flight found when the target already holds data or the
+	// transfer is refused: shown in the dialog before anything is started.
+	const [review, setReview] = useState<{
+		request: {
+			targetServerId: string | null;
+			removeSourceData: boolean;
+		};
+		needsOverwrite: string[];
+		blockers: string[];
+		composeHostBinds: { service: string; source: string }[];
+	} | null>(null);
+	const [confirmOverwrite, setConfirmOverwrite] = useState(false);
 
 	const targets = [
 		...(!isCloud && serverId
@@ -82,6 +96,7 @@ export const TransferService = ({ id, type, serverId }: Props) => {
 			serviceId: id,
 			targetServerId: request?.targetServerId ?? null,
 			removeSourceData: request?.removeSourceData ?? false,
+			overwriteTargets: request?.overwriteTargets ?? [],
 		},
 		{
 			enabled: isTransferring && request !== null,
@@ -104,21 +119,70 @@ export const TransferService = ({ id, type, serverId }: Props) => {
 		},
 	);
 
-	const onSubmit = (values: TransferForm) => {
-		setRequest({
-			targetServerId:
-				values.targetServerId === LOCAL_SERVER ? null : values.targetServerId,
-			removeSourceData: values.removeSourceData,
-		});
+	const startTransfer = (
+		target: { targetServerId: string | null; removeSourceData: boolean },
+		overwriteTargets: string[],
+	) => {
+		setRequest({ ...target, overwriteTargets });
 		setLogs([]);
+		setReview(null);
+		setConfirmOverwrite(false);
 		setIsDrawerOpen(true);
 		setIsTransferring(true);
 		setIsOpen(false);
 	};
 
+	// The pre-flight is read-only. A transfer that would write over data on the
+	// target, or that is refused, is shown here first; the volumes named in the
+	// confirm step are the only ones the transfer may write over.
+	const onSubmit = async (values: TransferForm) => {
+		const target = {
+			targetServerId:
+				values.targetServerId === LOCAL_SERVER ? null : values.targetServerId,
+			removeSourceData: values.removeSourceData,
+		};
+		setIsChecking(true);
+		try {
+			const preview = await utils.transfer.preflight.fetch({
+				serviceType: type,
+				serviceId: id,
+				targetServerId: target.targetServerId,
+			});
+			if (
+				preview.needsOverwrite.length === 0 &&
+				preview.blockers.length === 0
+			) {
+				startTransfer(target, []);
+				return;
+			}
+			setConfirmOverwrite(false);
+			setReview({
+				request: target,
+				needsOverwrite: preview.needsOverwrite,
+				blockers: preview.blockers,
+				composeHostBinds: preview.composeHostBinds,
+			});
+		} catch (error) {
+			toast.error(
+				error instanceof Error ? error.message : "Could not check the target",
+			);
+		} finally {
+			setIsChecking(false);
+		}
+	};
+
 	return (
 		<>
-			<Dialog open={isOpen} onOpenChange={setIsOpen}>
+			<Dialog
+				open={isOpen}
+				onOpenChange={(open) => {
+					setIsOpen(open);
+					if (!open) {
+						setReview(null);
+						setConfirmOverwrite(false);
+					}
+				}}
+			>
 				<DialogTrigger asChild>
 					<Button
 						variant="ghost"
@@ -137,7 +201,69 @@ export const TransferService = ({ id, type, serverId }: Props) => {
 							configuration to the selected server, then deploys it there.
 						</DialogDescription>
 					</DialogHeader>
-					{targets.length === 0 ? (
+					{review ? (
+						<div className="grid w-full gap-4">
+							{review.blockers.length > 0 ? (
+								<AlertBlock type="error">
+									<p>The transfer is refused, nothing was changed:</p>
+									<ul className="list-disc pl-4 space-y-1">
+										{review.blockers.map((blocker) => (
+											<li key={blocker}>{blocker}</li>
+										))}
+									</ul>
+								</AlertBlock>
+							) : (
+								<AlertBlock type="warning">
+									<p>
+										The target server already holds data under these names. The
+										transfer would write over it:
+									</p>
+									<ul className="list-disc pl-4 space-y-1">
+										{review.needsOverwrite.map((name) => (
+											<li key={name} className="font-mono break-all">
+												{name}
+											</li>
+										))}
+									</ul>
+								</AlertBlock>
+							)}
+							{review.composeHostBinds.length > 0 && (
+								<AlertBlock type="info">
+									<p>
+										These host paths of the compose file are not copied by the
+										transfer:
+									</p>
+									<ul className="list-disc pl-4 space-y-1">
+										{review.composeHostBinds.map((bind) => (
+											<li
+												key={`${bind.service}:${bind.source}`}
+												className="font-mono break-all"
+											>
+												{bind.service}: {bind.source}
+											</li>
+										))}
+									</ul>
+								</AlertBlock>
+							)}
+							{review.blockers.length === 0 && (
+								<div className="flex items-center">
+									<Checkbox
+										id="transfer-confirm-overwrite"
+										checked={confirmOverwrite}
+										onCheckedChange={(checked) =>
+											setConfirmOverwrite(checked === true)
+										}
+									/>
+									<label
+										htmlFor="transfer-confirm-overwrite"
+										className="ml-2 text-sm"
+									>
+										Write over the data listed above on the target server
+									</label>
+								</div>
+							)}
+						</div>
+					) : targets.length === 0 ? (
 						<AlertBlock type="info">
 							There are no other servers available to transfer this service to.
 						</AlertBlock>
@@ -223,9 +349,24 @@ export const TransferService = ({ id, type, serverId }: Props) => {
 						<Button variant="secondary" onClick={() => setIsOpen(false)}>
 							Cancel
 						</Button>
-						{targets.length > 0 && (
+						{review && review.blockers.length === 0 && (
 							<Button
-								isLoading={isTransferring}
+								disabled={!confirmOverwrite}
+								onClick={() =>
+									startTransfer(review.request, review.needsOverwrite)
+								}
+							>
+								Transfer and write over
+							</Button>
+						)}
+						{review && (
+							<Button variant="outline" onClick={() => setReview(null)}>
+								Back
+							</Button>
+						)}
+						{!review && targets.length > 0 && (
+							<Button
+								isLoading={isTransferring || isChecking}
 								form="hook-form-transfer-service"
 								type="submit"
 							>
