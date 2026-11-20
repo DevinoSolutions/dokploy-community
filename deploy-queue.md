@@ -64,7 +64,14 @@ When [remote builds are enforced](https://dokploy-community.devino.ca/build-poli
 - Queue ids reset when Dokploy restarts. If queue replay is enabled, the priority flag survives a restart.
 - Displacing other people's jobs is a social action. Look at the queue first and tell the team.
 
+## Pull deploys and the queue status call
+
+A deploy that only pulls a prebuilt image does not wait behind builds. It has its own slots on each server (4 by default, `DOKPLOY_PULL_LANE_CONCURRENCY`, `0` turns this off), so a Docker-image application, a deploy-hook image or a stored Compose file whose services all use an `image` starts without waiting for a build slot. The queue table marks these deploys with a `pull` badge. One service still runs one deploy at a time, oldest first.
+
+To see where one service's deploy is, call `deployment.queueStatus` (MCP `deployment-queueStatus`) with the application or compose id. It answers `queued`, `running` or `none`, with the lane, the place in line, how long the deploy waited and when it started. A CI step can give the wait its own long limit and start its run limit when the deploy starts.
+
 ## Source
 
 - [Deploy queue priority guide](https://github.com/DevinoSolutions/dokploy-community/blob/canary/docs/deploy-queue-priority.md) with the full answer format and runbook
 - [Design notes](https://github.com/DevinoSolutions/dokploy-community/blob/canary/docs/design/deploy-queue-priority.md)
+- [Queue status contract for the GitHub Actions deploy action](https://github.com/DevinoSolutions/dokploy-community/blob/canary/docs/deploy-queue-status.md)
