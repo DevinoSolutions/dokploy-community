@@ -469,8 +469,8 @@ export const getContainerLogs = async (
 
 	const sinceFlag = since === "all" ? "" : `--since ${since}`;
 	const logsCommand = isService
-		? "docker service logs --timestamps --raw"
-		: "docker container logs --timestamps";
+		? `docker service logs --timestamps --raw`
+		: `docker container logs --timestamps`;
 
 	// exec rejects with the output read so far when it exceeds maxBuffer;
 	// return that output instead of failing.

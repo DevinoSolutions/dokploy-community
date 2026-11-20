@@ -249,10 +249,7 @@ const setPendingJob = (jobKey: string, job: PendingJob) => {
 	}
 	// Room for the new record: the oldest starts are forgotten first.
 	all.sort((a, b) => a.job.startedAt - b.job.startedAt);
-	for (const old of all.slice(
-		0,
-		Math.max(0, all.length + 1 - MAX_PENDING_JOBS),
-	)) {
+	for (const old of all.slice(0, Math.max(0, all.length + 1 - MAX_PENDING_JOBS))) {
 		dropPendingJob(old.jobKey, old.job.composeId);
 	}
 	let jobs = pendingJobs.get(jobKey);
@@ -368,8 +365,7 @@ const plural = (count: number, one: string, many: string) =>
 /** "HTTP 202 x3, HTTP 500 x1" for the answers of a job, most frequent first. */
 const describeStatuses = (statuses: Iterable<number>) => {
 	const counts = new Map<number, number>();
-	for (const status of statuses)
-		counts.set(status, (counts.get(status) ?? 0) + 1);
+	for (const status of statuses) counts.set(status, (counts.get(status) ?? 0) + 1);
 	return [...counts]
 		.sort((a, b) => b[1] - a[1] || a[0] - b[0])
 		.map(([status, count]) =>
@@ -403,10 +399,7 @@ export const pruneComposeBuildRegistry = async ({
 	if (process.env.DOKPLOY_DISABLE_BUILD_REGISTRY_RETENTION === "true") return;
 	if (pruneInFlight.has(entity.composeId)) return;
 
-	const log = createDeploymentLogWriter(
-		entity.serverId ?? null,
-		deployment.logPath,
-	);
+	const log = createDeploymentLogWriter(entity.serverId ?? null, deployment.logPath);
 	let password: string | null | undefined;
 	let cancelled = false;
 	const activeSessions = new Set<RemoteInputSession>();
@@ -431,8 +424,7 @@ export const pruneComposeBuildRegistry = async ({
 
 		const deadline = Date.now() + budgetMs;
 		/** Reading stops here, so there is time left to start the job. */
-		const readDeadline =
-			deadline - Math.min(JOB_START_RESERVE_MS, budgetMs / 2);
+		const readDeadline = deadline - Math.min(JOB_START_RESERVE_MS, budgetMs / 2);
 		const outOfTime = () => cancelled || Date.now() >= readDeadline;
 		const assertTime = () => {
 			if (outOfTime()) {
@@ -441,10 +433,7 @@ export const pruneComposeBuildRegistry = async ({
 		};
 		const jobKey = getRegistryLockKey(registry, buildRegistryId);
 		const lockedOut = noFlockSince.get(buildServerId);
-		if (
-			lockedOut !== undefined &&
-			Date.now() - lockedOut < NO_FLOCK_RECHECK_MS
-		) {
+		if (lockedOut !== undefined && Date.now() - lockedOut < NO_FLOCK_RECHECK_MS) {
 			log.line(
 				"Build registry cleanup skipped: the build server has no flock, which the cleanup needs to make sure only one deletion job runs at a time.",
 			);
@@ -666,9 +655,7 @@ export const pruneComposeBuildRegistry = async ({
 					url: `${base}/v2/`,
 				})),
 			);
-			const reachable = bases.findIndex(
-				(_, id) => probe.get(id)?.status === 200,
-			);
+			const reachable = bases.findIndex((_, id) => probe.get(id)?.status === 200);
 			if (reachable === -1) {
 				assertTime();
 				for (const response of probe.values()) {
@@ -729,8 +716,7 @@ export const pruneComposeBuildRegistry = async ({
 					return;
 				}
 				dropPendingJob(jobKey, entity.composeId);
-				const answers =
-					status.token === earlier.token ? status.responses : null;
+				const answers = status.token === earlier.token ? status.responses : null;
 				const heads = await runAll(
 					earlier.entries.map((entry, id) => ({
 						id,
@@ -881,10 +867,7 @@ export const pruneComposeBuildRegistry = async ({
 				queue.push(entry);
 				queuedKeys.add(`${entry.repo}@${entry.digest}`);
 				queuedMs += cost;
-				if (
-					queue.length >= MAX_DELETIONS_PER_RUN ||
-					queuedMs >= DELETE_JOB_TARGET_MS
-				) {
+				if (queue.length >= MAX_DELETIONS_PER_RUN || queuedMs >= DELETE_JOB_TARGET_MS) {
 					full = true;
 				}
 				return true;
@@ -1090,10 +1073,7 @@ export const pruneComposeBuildRegistry = async ({
 				for (; position < ordered.length && !full; position++) {
 					const repo = ordered[position] as string;
 					assertTime();
-					const tags = await listTags(
-						repo,
-						firstPages.get(repos.indexOf(repo)),
-					);
+					const tags = await listTags(repo, firstPages.get(repos.indexOf(repo)));
 					if (!tags) continue;
 					const required = protectedByRepo.get(repo) ?? new Set<string>();
 					const plan = planRepoTags({
@@ -1127,25 +1107,19 @@ export const pruneComposeBuildRegistry = async ({
 			// with it again); from the front after a complete pass.
 			if (interrupted) {
 				const next = position === 0 ? 1 : position;
-				rotation.set(
-					entity.composeId,
-					ordered[next % ordered.length] as string,
-				);
+				rotation.set(entity.composeId, ordered[next % ordered.length] as string);
 			} else if (full) {
 				// A repository that got nothing in is the next one to start with.
 				rotation.set(
 					entity.composeId,
-					ordered[
-						(starved ? position - 1 : position) % ordered.length
-					] as string,
+					ordered[(starved ? position - 1 : position) % ordered.length] as string,
 				);
 			} else {
 				rotation.delete(entity.composeId);
 			}
 
 			if (queue.length === 0) {
-				if (interrupted)
-					throw new BudgetSpent("the time budget for cleanup ran out");
+				if (interrupted) throw new BudgetSpent("the time budget for cleanup ran out");
 				return;
 			}
 
@@ -1219,10 +1193,7 @@ export const pruneComposeBuildRegistry = async ({
 				);
 				return;
 			}
-			if (
-				started.kind === "failed" ||
-				(started.kind === "unknown" && !opened)
-			) {
+			if (started.kind === "failed" || (started.kind === "unknown" && !opened)) {
 				log.line(
 					`Build registry cleanup: ${
 						started.kind === "failed"

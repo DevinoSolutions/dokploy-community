@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreateUptimely,
@@ -8,7 +9,6 @@ import {
 	uptimelyIntegration,
 	uptimelyMonitorLink,
 } from "@dokploy/server/db/schema";
-import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { maskApiKey } from "@dokploy/server/utils/integrations/mask";
 import {
 	isSameUptimelyBaseUrl,
@@ -1165,15 +1165,15 @@ export const getUptimelyServiceStatus = async (params: {
 					monitorId: heartbeatLink.monitorId,
 				},
 			).then(
-				(detail) => ({ detail, error: null }),
-				(error: unknown) => ({
-					detail: null,
-					error:
-						error instanceof Error
-							? error.message
-							: "Could not read the monitor from Uptimely",
-				}),
-			)
+					(detail) => ({ detail, error: null }),
+					(error: unknown) => ({
+						detail: null,
+						error:
+							error instanceof Error
+								? error.message
+								: "Could not read the monitor from Uptimely",
+					}),
+				)
 		: null;
 	const results = await Promise.allSettled(
 		links.map((link) =>
@@ -1257,7 +1257,9 @@ export const getUptimelyServiceStatus = async (params: {
 	const quota = quotaHit
 		? {
 				exhausted: true as const,
-				retryAfter: new Date(backoffUntil ?? Date.now() + 60_000).toISOString(),
+				retryAfter: new Date(
+					backoffUntil ?? Date.now() + 60_000,
+				).toISOString(),
 			}
 		: null;
 

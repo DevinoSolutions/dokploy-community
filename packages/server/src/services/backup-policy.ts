@@ -72,9 +72,7 @@ export const computeServicePrefix = (
 	projectName: string,
 	serviceName: string,
 ): string => {
-	const base = trimTrailingSlashes(
-		(basePrefix ?? "").trim().replace(/^\/+/, ""),
-	);
+	const base = trimTrailingSlashes((basePrefix ?? "").trim().replace(/^\/+/, ""));
 	const segments = [
 		...base.split("/").map((s) => sanitizePrefixSegment(s)),
 		sanitizePrefixSegment(projectName),

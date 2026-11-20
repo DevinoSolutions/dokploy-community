@@ -106,7 +106,9 @@ export const resolveGeneratedDomainBase = async ({
 	projectId?: string | null;
 	serverId?: string | null;
 }): Promise<GeneratedDomainBase> => {
-	const project = projectId ? await findProjectWildcardConfig(projectId) : null;
+	const project = projectId
+		? await findProjectWildcardConfig(projectId)
+		: null;
 
 	if (project?.wildcardDomain) {
 		return { baseDomain: project.wildcardDomain, source: "project" };
@@ -119,10 +121,7 @@ export const resolveGeneratedDomainBase = async ({
 		}
 	}
 
-	if (
-		project?.useOrganizationWildcard &&
-		project.organization?.wildcardDomain
-	) {
+	if (project?.useOrganizationWildcard && project.organization?.wildcardDomain) {
 		return {
 			baseDomain: project.organization.wildcardDomain,
 			source: "organization",

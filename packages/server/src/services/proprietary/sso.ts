@@ -1,6 +1,6 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { db } from "@dokploy/server/db";
 import { organization } from "@dokploy/server/db/schema";
-import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { eq } from "drizzle-orm";
 
 export const getSSOProviders = async () => {

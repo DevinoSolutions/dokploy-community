@@ -12,10 +12,7 @@ import {
 	type PermissionCtx,
 } from "./permission";
 import { findPreviewDeploymentById } from "./preview-deployment";
-import {
-	assertHostScheduleAccess,
-	assertScheduleOrganization,
-} from "./schedule";
+import { assertHostScheduleAccess, assertScheduleOrganization } from "./schedule";
 import { findServerById } from "./server";
 import { findVolumeBackupById } from "./volume-backups";
 

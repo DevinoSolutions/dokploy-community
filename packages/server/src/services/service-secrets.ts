@@ -250,10 +250,9 @@ export const serviceStatusResult = <K extends string, S extends string>(
 	row: Record<K, string>,
 	idKey: K,
 	applicationStatus: S,
-) =>
-	({ [idKey]: row[idKey], applicationStatus }) as Record<K, string> & {
-		applicationStatus: S;
-	};
+) => ({ [idKey]: row[idKey], applicationStatus }) as Record<K, string> & {
+	applicationStatus: S;
+};
 
 /**
  * What a delete mutation answers: the id of the service and the project and

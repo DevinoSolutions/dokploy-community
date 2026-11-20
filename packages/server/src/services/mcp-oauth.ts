@@ -1,6 +1,6 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
-import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import {
 	and,
 	asc,
