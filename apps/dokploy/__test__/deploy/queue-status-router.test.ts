@@ -308,6 +308,18 @@ describe("deployment.queueStatus", () => {
 		});
 	});
 
+	it("stops saying the queue is restoring once the grace period has passed", async () => {
+		mocks.restoreSettled.mockReturnValue(false);
+		const uptime = vi.spyOn(process, "uptime").mockReturnValue(6 * 60);
+		try {
+			await expect(
+				caller.queueStatus({ applicationId: "app-org1" }),
+			).resolves.toMatchObject({ state: "queued", restoring: false });
+		} finally {
+			uptime.mockRestore();
+		}
+	});
+
 	it("names no job id and none of another organization's data", async () => {
 		const serialized = JSON.stringify(
 			await caller.queueStatus({ applicationId: "app-org1" }),

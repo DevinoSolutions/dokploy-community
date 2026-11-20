@@ -63,6 +63,7 @@ import {
 } from "@/server/db/schema";
 import type { JobState } from "@/server/queues/in-memory-queue";
 import { describeQueueStatus } from "@/server/queues/queue-status";
+import { RESTORE_GRACE_MS } from "@/server/queues/queued-deploy-control";
 import { myQueue } from "@/server/queues/queueSetup";
 import { fetchDeployApiJobs, type QueueJobRow } from "@/server/utils/deploy";
 import { resolveDeploymentAllByTypeAuthTarget } from "@/server/utils/deployment-all-by-type-target";
@@ -386,7 +387,10 @@ export const deploymentRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, serviceId, {
 				deployment: ["read"],
 			});
-			const restoring = !myQueue.restoreSettled();
+			// Bounded like the queued-deploy cancel: a restore that never reports back
+			// (the call is missing) must not leave clients polling for ever.
+			const restoring =
+				!myQueue.restoreSettled() && process.uptime() * 1000 < RESTORE_GRACE_MS;
 			if (IS_CLOUD) {
 				// Cloud deploys do not wait in a local queue.
 				return describeQueueStatus([], input, {
