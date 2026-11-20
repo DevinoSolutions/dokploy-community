@@ -15,6 +15,8 @@ Upgrade notes: no database migration. Pull-only deploys get their own queue slot
 - Service transfer checks again that the volumes belong to the service (the check the old transfer had, lost in the v0.31.0 sync): a volume name that is reserved or in use by another organization's service on either server refuses the transfer. A name that is not a valid Docker volume name (for example `/etc`, or one with a space, quote or `;`) is refused and never put in a command.
 - Service transfer follows the bind mount rules (T-8806): bind mounts are copied only for owners and admins, a bind mount on the Dokploy host only for the organization that owns the instance, and system directories (such as `/etc` or `/var/lib/docker`), SSH key directories, sockets and paths that are not in canonical form are never copied.
 
+- Dependency advisory: `effect` 3.20.0 to 3.22.1 (GHSA-7589-6fvf-x4pw, a slow regular expression in `Schema.TemplateLiteral`). It is an optional package pulled in through better-auth's Prisma tooling and is not loaded by Dokploy at run time; the bump clears the audit.
+
 **Added.**
 
 - `transfer.preflight` is a read-only query (same permissions as starting a transfer) that lists the volumes and bind mounts a transfer would move, which of them already hold data on the target, the host paths a compose file binds that will not be copied, and the reason the transfer would be refused. Starting a transfer logs the same warning about the compose host paths. Every check fails closed: a host that cannot answer, a docker error or an unreadable directory refuses the transfer instead of counting as empty, and the check is repeated right before each volume or directory is copied.
