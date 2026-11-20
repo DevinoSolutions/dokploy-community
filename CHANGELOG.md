@@ -4,7 +4,20 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+Upgrade notes: no database migration and nothing to configure. The transfer API gains an optional `overwriteTargets` list and a read-only `transfer.preflight` query; the Transfer dialog now checks first and, when the target already holds data, lists it and asks for a confirmation before writing over it.
+
 Upgrade notes: no database migration. Pull-only deploys get their own queue slots, 4 per server by default. Set `DOKPLOY_PULL_LANE_CONCURRENCY` (0 to 16) to change that; `0` switches the lane off and the queue behaves exactly as before. An image-only rollback to v0.31.0-community.8 keeps working.
+
+**Security.**
+
+- Service transfer (T-16187) no longer writes over data the target server already holds. Before, a transfer imported each volume into a volume of the same name on the target, merging into or overwriting whatever was there. Now it is refused, before the service is stopped or anything is copied, when the target has a non-empty volume of the same name, or a non-empty directory at the path of a bind mount, unless the caller lists that name in `overwriteTargets`. A volume that is empty or missing on the target is fine.
+- Service transfer is refused when the target is the Dokploy server and the instance is set to remote servers only, as creating a service there already was.
+- Service transfer checks again that the volumes belong to the service (the check the old transfer had, lost in the v0.31.0 sync): a volume name that is reserved or in use by another organization's service on either server refuses the transfer. A name that is not a valid Docker volume name (for example `/etc`, or one with a space, quote or `;`) is refused and never put in a command.
+- Service transfer follows the bind mount rules (T-8806): bind mounts are copied only for owners and admins, a bind mount on the Dokploy host only for the organization that owns the instance, and system directories (such as `/etc` or `/var/lib/docker`), SSH key directories, sockets and paths that are not in canonical form are never copied.
+
+**Added.**
+
+- `transfer.preflight` is a read-only query (same permissions as starting a transfer) that lists the volumes and bind mounts a transfer would move, which of them already hold data on the target, the host paths a compose file binds that will not be copied, and the reason the transfer would be refused. Starting a transfer logs the same warning about the compose host paths. Every check fails closed: a host that cannot answer, a docker error or an unreadable directory refuses the transfer instead of counting as empty, and the check is repeated right before each volume or directory is copied.
 
 **Changed.**
 

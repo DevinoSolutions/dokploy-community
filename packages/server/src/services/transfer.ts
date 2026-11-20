@@ -7,6 +7,10 @@ import {
 	network,
 	type ServiceType,
 } from "@dokploy/server/db/schema";
+import {
+	loadDockerCompose,
+	loadDockerComposeRemote,
+} from "@dokploy/server/utils/docker/domain";
 import { removeService } from "@dokploy/server/utils/docker/utils";
 import {
 	removeDirectoryCode,
@@ -61,9 +65,22 @@ import {
 } from "./postgres";
 import { deployRedis, findRedisById, updateRedisById } from "./redis";
 import { findServerById } from "./server";
+import {
+	assertTargetStillClear,
+	assertTransferPlanAllowed,
+	assertTransferTargetAllowed,
+	type ComposeHostBind,
+	inspectTransferPlan,
+	logComposeHostBinds,
+	scanComposeHostBinds,
+	type TransferCaller,
+	type TransferPlan,
+} from "./transfer-safety";
 
 export type TransferServiceInput = z.infer<typeof apiTransferService> & {
 	organizationId: string;
+	// What the caller may do on the hosts (the API layer works it out).
+	caller: TransferCaller;
 };
 
 type Logger = (line: string) => void;
@@ -160,6 +177,8 @@ const runOn = (serverId: string | null, command: string) =>
 
 const errorMessage = (error: unknown) =>
 	error instanceof Error ? error.message : String(error);
+
+const firstLine = (text: string) => text.split("\n")[0] ?? "";
 
 const directoryExists = async (serverId: string | null, directory: string) => {
 	const { stdout } = await runOn(
@@ -446,11 +465,17 @@ const deployOnTarget = async (
 	}
 };
 
-export const transferService = async (
-	input: TransferServiceInput,
-	log: Logger,
+// The service and the target server, checked: the service is the caller's
+// organization's, the target is another server of it that can take a
+// deployment, and the Dokploy server is a target only where services may run
+// on it.
+const loadTransfer = async (
+	input: Pick<
+		TransferServiceInput,
+		"serviceType" | "serviceId" | "targetServerId" | "organizationId"
+	>,
 ) => {
-	const { serviceType, serviceId, targetServerId, removeSourceData } = input;
+	const { serviceType, serviceId, targetServerId } = input;
 	const service = await findService(serviceType, serviceId);
 
 	if (service.environment.project.organizationId !== input.organizationId) {
@@ -487,6 +512,132 @@ export const transferService = async (
 		}
 	}
 
+	await assertTransferTargetAllowed(targetServerId);
+
+	return { service, sourceServerId, targetServer };
+};
+
+// What the transfer would copy and what it would write over on the target,
+// worked out without changing anything.
+const planTransfer = async (
+	service: TransferableService,
+	input: Pick<
+		TransferServiceInput,
+		"serviceType" | "serviceId" | "targetServerId" | "overwriteTargets"
+	> & { caller: TransferCaller },
+) => {
+	const volumes = await listVolumes(service);
+	const bindMounts = listBindMounts(service);
+	const plan = await inspectTransferPlan({
+		serviceType: input.serviceType,
+		serviceId: input.serviceId,
+		appName: service.appName,
+		volumes,
+		bindMounts,
+		isCompose: isCompose(service),
+		sourceServerId: service.serverId ?? null,
+		targetServerId: input.targetServerId,
+		overwriteTargets: input.overwriteTargets,
+		caller: input.caller,
+	});
+	return { plan, volumes, bindMounts };
+};
+
+// The host paths a compose file binds that the transfer leaves behind. A file
+// that cannot be read is not an error: the scan is a report.
+const scanComposeBinds = async (
+	service: TransferableService,
+	bindMounts: string[],
+): Promise<{
+	binds: ComposeHostBind[];
+	scanned: boolean;
+	note: string | null;
+}> => {
+	if (!isCompose(service)) {
+		return { binds: [], scanned: true, note: null };
+	}
+	try {
+		const spec = service.serverId
+			? await loadDockerComposeRemote(service)
+			: await loadDockerCompose(service);
+		if (!spec) {
+			return {
+				binds: [],
+				scanned: false,
+				note: "The compose file has not been deployed yet, so its bind mounts could not be read.",
+			};
+		}
+		return {
+			binds: scanComposeHostBinds(spec, bindMounts),
+			scanned: true,
+			note: null,
+		};
+	} catch (error) {
+		return {
+			binds: [],
+			scanned: false,
+			note: `The compose file could not be read: ${firstLine(errorMessage(error))}`,
+		};
+	}
+};
+
+export type TransferPreview = TransferPlan & {
+	sourceName: string;
+	targetName: string;
+	// The transfer would be refused as it stands, and why.
+	refused: string | null;
+};
+
+// The read-only pre-flight of a transfer: the volumes and bind mounts it would
+// copy, the ones that already hold data on the target, the host paths of a
+// compose file it would leave behind and whatever would refuse it. The
+// transfer itself works out the same plan again and refuses on it.
+export const previewTransfer = async (
+	input: Pick<
+		TransferServiceInput,
+		| "serviceType"
+		| "serviceId"
+		| "targetServerId"
+		| "organizationId"
+		| "overwriteTargets"
+		| "caller"
+	>,
+): Promise<TransferPreview> => {
+	const { service, targetServer } = await loadTransfer(input);
+	const { plan, bindMounts } = await planTransfer(service, input);
+	const scan = await scanComposeBinds(service, bindMounts);
+	const full: TransferPlan = {
+		...plan,
+		composeHostBinds: scan.binds,
+		composeBindScan: { scanned: scan.scanned, note: scan.note },
+	};
+	let refused: string | null = null;
+	try {
+		assertTransferPlanAllowed(full);
+	} catch (error) {
+		refused = error instanceof TRPCError ? error.message : errorMessage(error);
+	}
+	return {
+		...full,
+		sourceName: service.server?.name ?? "Dokploy Server",
+		targetName: targetServer?.name ?? "Dokploy Server",
+		refused,
+	};
+};
+
+export const transferService = async (
+	input: TransferServiceInput,
+	log: Logger,
+) => {
+	const { serviceType, serviceId, targetServerId, removeSourceData } = input;
+	const { service, sourceServerId, targetServer } = await loadTransfer(input);
+
+	// Nothing has been stopped or copied yet: a transfer that would write over
+	// the target's data, or copy a path it must not, ends here.
+	const { plan, volumes, bindMounts } = await planTransfer(service, input);
+	assertTransferPlanAllowed(plan);
+	logComposeHostBinds((await scanComposeBinds(service, bindMounts)).binds, log);
+
 	const sourceName = service.server?.name ?? "Dokploy Server";
 	const targetName = targetServer?.name ?? "Dokploy Server";
 	const originalNetworkIds =
@@ -499,12 +650,16 @@ export const transferService = async (
 		await stopOnSource(service, log);
 		await updateStatus(serviceType, serviceId, "running");
 
-		const volumes = await listVolumes(service);
-		const bindMounts = listBindMounts(service);
 		log(
 			`Found ${volumes.length} volume(s) and ${bindMounts.length} bind mount(s)`,
 		);
 		for (const volume of volumes) {
+			await assertTargetStillClear({
+				targetServerId,
+				kind: "volume",
+				name: volume,
+				overwriteTargets: input.overwriteTargets,
+			});
 			log(`Copying volume ${volume}`);
 			await copyStream(
 				volume,
@@ -518,6 +673,12 @@ export const transferService = async (
 				log(`Skipping bind mount ${hostPath}: not found on ${sourceName}`);
 				continue;
 			}
+			await assertTargetStillClear({
+				targetServerId,
+				kind: "directory",
+				name: hostPath,
+				overwriteTargets: input.overwriteTargets,
+			});
 			log(`Copying bind mount ${hostPath}`);
 			await copyStream(
 				hostPath,
