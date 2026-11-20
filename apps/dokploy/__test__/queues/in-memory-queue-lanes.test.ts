@@ -757,3 +757,239 @@ describe("two partitions", () => {
 		expect(h.live).toEqual({ build: 2, pull: 2 });
 	});
 });
+
+describe("removing a waiting job wakes the scheduler", () => {
+	/** build cap 1 held by `bx`; `s1` (build) then `s2` (pull) of one service wait behind it. */
+	const blockedPair = async () => {
+		const h = harness({ build: 1, pull: 4 });
+		h.plan.s2 = "pull";
+		await h.add(job("x", "bx"));
+		await h.add(job("S", "s1"), job("S", "s2"));
+		expect(h.started).toEqual(["bx"]);
+		expect(await h.waiting()).toEqual(["s1", "s2"]);
+		return h;
+	};
+	const idOfWaiting = async (h: Awaited<ReturnType<typeof blockedPair>>) =>
+		(await h.queue.getJobs(["waiting"])).find(
+			(queued) => labelOf(queued.data) === "s1",
+		)?.id as string;
+
+	it("removeWaitingJob of the older job starts the newer pull job of its service", async () => {
+		const h = await blockedPair();
+		expect(h.queue.removeWaitingJob(await idOfWaiting(h))).toBe(true);
+		await settle();
+		expect(h.started).toEqual(["bx", "s2"]);
+	});
+
+	it("remove(id) does the same", async () => {
+		const h = await blockedPair();
+		await h.queue.remove(await idOfWaiting(h));
+		await settle();
+		expect(h.started).toEqual(["bx", "s2"]);
+	});
+
+	it("removeWaiting(predicate) does the same", async () => {
+		const h = await blockedPair();
+		expect(h.queue.removeWaiting((data) => labelOf(data) === "s1")).toBe(1);
+		await settle();
+		expect(h.started).toEqual(["bx", "s2"]);
+	});
+
+	it("clearWaiting leaves nothing to start and does not throw", async () => {
+		const h = await blockedPair();
+		expect(h.queue.clearWaiting()).toBe(2);
+		await settle();
+		expect(h.started).toEqual(["bx"]);
+	});
+
+	it("coalesceWaiting dropping an older duplicate in another partition wakes the newer job", async () => {
+		const h = harness({ build: 1, pull: 4 });
+		const on = (label: string, extra: Record<string, unknown> = {}) =>
+			job("S", label, { serverId: "srv-2", ...extra });
+		h.plan.n = "pull";
+		await h.add(job("x", "bx", { serverId: "srv-2" }));
+		// d (deploy) waits for the build slot; n (redeploy, pull) waits behind its older sibling d.
+		await h.add(on("d"), on("n", { type: "redeploy" }));
+		expect(h.started).toEqual(["bx"]);
+		expect(await h.waiting()).toEqual(["d", "n"]);
+
+		// A newer deploy of the same service on ANOTHER server folds the duplicate away.
+		const incoming = job("S", "in", { serverId: "srv-1" });
+		const outcome = h.queue.coalesceWaiting(
+			incoming,
+			(data) => serviceOf(data) === "S",
+		);
+		expect(outcome.removed).toHaveLength(1);
+		await settle();
+		expect(h.started).toEqual(["bx", "n"]);
+	});
+
+	it("a removal while the intake is closed starts nothing, and the job starts when it reopens", async () => {
+		const h = await blockedPair();
+		const hold = h.queue.closeIntake(60_000);
+		h.queue.removeWaitingJob(await idOfWaiting(h));
+		await settle();
+		expect(h.started).toEqual(["bx"]);
+		hold.release();
+		await settle();
+		expect(h.started).toEqual(["bx", "s2"]);
+	});
+});
+
+describe("the priority lane and the lane caps (guards that must hold)", () => {
+	it("a pull start does not clear the build lane's cooldown after a jump", async () => {
+		const h = harness({ build: 1, pull: 1 });
+		h.plan.p = "pull";
+		await h.add(job("bx"));
+		await h.add(job("a"), job("b"));
+		await h.queue.add(job("c", "c", { priority: true, priorityBy: "u" }));
+		await h.queue.add(job("d", "d", { priority: true, priorityBy: "u" }));
+		await settle();
+
+		// c jumps a and b when the slot frees: the build lane is now in its cooldown.
+		await h.finish("bx");
+		expect(h.started).toEqual(["bx", "c"]);
+
+		// A pull job starts in its own lane meanwhile; it must not reset the cooldown.
+		await h.add(job("p"));
+		expect(h.started).toEqual(["bx", "c", "p"]);
+
+		await h.finish("c");
+		// Plain start (a), not a second jump (d).
+		expect(h.started.slice(3)).toEqual(["a"]);
+	});
+
+	it("the freed-slot prediction counts build slots only", async () => {
+		const h = harness({ build: 2, pull: 2 });
+		h.plan.p = "pull";
+		await h.add(job("bx1"), job("bx2"), job("p"));
+		await h.finish("bx2");
+		// One build slot is free and one pull job runs.
+		expect(h.live).toEqual({ build: 1, pull: 1 });
+
+		// Both adds happen before the queue drains: `a` is about to take the free
+		// build slot, so a flagged job behind it is not going ahead of anything.
+		const first = h.queue.add(job("a"));
+		const second = h.queue.add(
+			job("c", "c", { priority: true, priorityBy: "u" }),
+		);
+		await first;
+		const outcome = await second;
+		expect(outcome.priority).toMatchObject({
+			applied: false,
+			wentAheadOf: 0,
+			reason: "first-in-line",
+		});
+	});
+
+	it("a flagged job classified pull never starts through the build lane's jump", async () => {
+		const h = harness({ build: 1, pull: 1 });
+		h.plan.q = "pull";
+		h.plan.pf = "pull";
+		await h.add(job("bx"), job("q"));
+		expect(h.live).toEqual({ build: 1, pull: 1 });
+		await h.add(job("a"));
+		await h.queue.add(job("pf", "pf", { priority: true, priorityBy: "u" }));
+		await settle();
+		expect(await h.lanes()).toMatchObject({ pf: "pull", a: "build" });
+
+		// A build slot frees: `a` starts. The flagged pull job waits for a pull slot.
+		await h.finish("bx");
+		expect(h.started).toEqual(["bx", "q", "a"]);
+		expect(h.live).toEqual({ build: 1, pull: 1 });
+
+		await h.finish("q");
+		expect(h.started).toEqual(["bx", "q", "a", "pf"]);
+		expect(h.peak.pull).toBe(1);
+	});
+
+	it("the cooldown resets once no build job waits, even while a pull job does", async () => {
+		const h = harness({ build: 1, pull: 1 });
+		h.plan.q = "pull";
+		h.plan.pw = "pull";
+		await h.add(job("bx"), job("q"), job("pw"));
+		await h.add(job("a"));
+		await h.queue.add(job("c", "c", { priority: true, priorityBy: "u" }));
+		await settle();
+
+		// c jumps a: cooldown set. Then a is removed, leaving only the waiting pull job pw.
+		await h.finish("bx");
+		expect(h.started).toEqual(["bx", "q", "c"]);
+		const [first] = await h.queue.getJobs(["waiting"]);
+		const waitingLabels = await h.waiting();
+		expect(waitingLabels).toEqual(["pw", "a"]);
+		const aId = (await h.queue.getJobs(["waiting"])).find(
+			(queued) => labelOf(queued.data) === "a",
+		)?.id as string;
+		expect(first).toBeDefined();
+		h.queue.removeWaitingJob(aId);
+		await settle();
+
+		// New build jobs queue behind c; a flagged one may jump again.
+		await h.add(job("e"), job("f"));
+		await h.queue.add(job("g", "g", { priority: true, priorityBy: "u" }));
+		await settle();
+		await h.finish("c");
+		expect(h.started.slice(3)).toEqual(["g"]);
+	});
+});
+
+describe("caps are read again after the start-time re-check", () => {
+	it("a pull cap lowered to 0 while the re-check is out keeps the job out of the pull lane", async () => {
+		let pullCap = 2;
+		const h = harness({ build: 1, pull: () => pullCap });
+		const recheck = deferred<Lane>();
+		h.plan.p = (call) => (call === 1 ? "pull" : recheck.promise);
+		await h.add(job("bk"), job("p"));
+		// The drain is parked on p's re-check.
+		expect(h.calls.p).toBe(2);
+		expect(h.started).toEqual(["bk"]);
+
+		pullCap = 0;
+		recheck.resolve("pull");
+		await settle();
+		expect(h.started).toEqual(["bk"]);
+		expect((await h.lanes()).p).toBe("build");
+
+		await h.finish("bk");
+		expect(h.started).toEqual(["bk", "p"]);
+		expect(h.startedAs.get("p")).toBe("build");
+	});
+
+	it("a build cap lowered while the re-check is out is honoured by the next start", async () => {
+		let buildCap = 2;
+		const calls = { p: 0 };
+		const recheck = deferred<Lane>();
+		const started: string[] = [];
+		const queue = new InMemoryQueue({
+			resolveConcurrency: () => buildCap,
+			resolvePullConcurrency: () => 4,
+			classifyLane: async (data) => {
+				if (labelOf(data) !== "p") return "build";
+				calls.p++;
+				return calls.p === 1 ? "pull" : recheck.promise;
+			},
+		});
+		queue.process((queued: InMemoryJob) => {
+			started.push(labelOf(queued.data));
+			return new Promise<undefined>(() => {});
+		});
+		// Held back until both are classified, so p reaches the pull lane's re-check
+		// with one build slot (of 2) still free.
+		queue.pause();
+		await queue.add(job("b1"));
+		await queue.add(job("p"));
+		await queue.classifyWaiting(5_000);
+		expect(calls.p).toBe(1);
+		queue.resume();
+		await settle();
+		expect(calls.p).toBe(2);
+		expect(started).toEqual(["b1"]);
+
+		buildCap = 1;
+		recheck.resolve("build");
+		await settle();
+		// p is a build job now; one build job already runs and the cap is 1.
+		expect(started).toEqual(["b1"]);
+	});
+});

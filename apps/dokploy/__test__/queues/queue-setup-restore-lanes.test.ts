@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 
 /**
  * The boot restore and the pull lane (T-12497). Jobs read back from the journal
@@ -113,6 +121,12 @@ const lanesOf = async (
 		]),
 	);
 
+// The first import of queueSetup pulls in a large module graph; do it once up
+// front, with a generous limit, so no test pays for it under load.
+beforeAll(async () => {
+	await freshQueueSetup();
+}, 120_000);
+
 beforeEach(() => {
 	boot.events.length = 0;
 	boot.restoredJobs = [];
@@ -127,7 +141,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe("restoring jobs into the lanes", () => {
+describe("restoring jobs into the lanes", { timeout: 60_000 }, () => {
 	it("classifies the restored jobs before the gate opens, and they start in their lane", async () => {
 		const setup = await freshQueueSetup();
 		boot.restoredJobs = restoredRows("pullA", "buildB", "pullC");

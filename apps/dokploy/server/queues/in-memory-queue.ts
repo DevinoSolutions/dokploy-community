@@ -1000,6 +1000,9 @@ export class InMemoryQueue {
 		const lost = (data: DeploymentJob) =>
 			Boolean(registeredId(data)) && registeredId(data) !== keptId;
 		this.settle(dropped);
+		// Same wake-up as `discard`: a dropped duplicate may have held back a newer
+		// job of its service.
+		if (dropped.length > 0) this.schedule();
 		this.reportDropped(dropped.map((job) => job.data).filter(lost));
 		if (target) {
 			titles.unshift(...titleOf(target));
@@ -1035,6 +1038,9 @@ export class InMemoryQueue {
 	private discard(jobs: InternalJob[]) {
 		this.settle(jobs);
 		this.reportDropped(jobs.map((job) => job.data));
+		// A job that waited behind a removed one of its own service (the older-job
+		// rule holds it back in either lane) may be startable now.
+		if (jobs.length > 0) this.schedule();
 	}
 
 	private reportDropped(data: DeploymentJob[]) {
@@ -1280,31 +1286,30 @@ export class InMemoryQueue {
 		const partition = this.partitions.get(key);
 		if (!partition || !this.processor) return;
 
-		const concurrency = Math.max(1, await this.resolveConcurrency(key));
-		partition.concurrency = concurrency;
-		// Only read when a lane reader was given, so a queue without one takes
-		// exactly the steps it took before lanes existed.
-		const pullConcurrency = this.resolvePullConcurrency
-			? await this.readPullConcurrency(key)
-			: 0;
-		// Lane off (the kill switch, or a cap lowered to 0 while jobs waited): the
-		// waiting pull jobs are build jobs again, so none can be left without a lane
-		// to start in.
-		if (pullConcurrency === 0) {
-			for (const waiting of partition.waiting) {
-				if (waiting.lane === "pull") waiting.lane = "build";
-			}
-		}
-
-		// A shutdown can land while the concurrency was being resolved.
-		// The intake check is here, after the await above, so a drain that was
-		// already in flight when the intake closed cannot start one more job: from
-		// the moment `closeIntake` returns, the running count can only fall. The
-		// check is repeated at the head of every pass, so it also covers the await
-		// of a lane re-check below.
+		// A shutdown can land while the concurrency is being resolved. The intake
+		// check sits after the awaits below, so a drain that was already in flight
+		// when the intake closed cannot start one more job: from the moment
+		// `closeIntake` returns, the running count can only fall. A pass starts again
+		// after every lane re-check (which awaits), so the caps are read again there
+		// too: a cap lowered meanwhile is honoured by the next start.
 		let again = true;
 		while (again) {
 			again = false;
+			const concurrency = Math.max(1, await this.resolveConcurrency(key));
+			partition.concurrency = concurrency;
+			// Only read when a lane reader was given, so a queue without one takes
+			// exactly the steps it took before lanes existed.
+			const pullConcurrency = this.resolvePullConcurrency
+				? await this.readPullConcurrency(key)
+				: 0;
+			// Lane off (the kill switch, or a cap lowered to 0 while jobs waited): the
+			// waiting pull jobs are build jobs again, so none can be left without a
+			// lane to start in.
+			if (pullConcurrency === 0) {
+				for (const waiting of partition.waiting) {
+					if (waiting.lane === "pull") waiting.lane = "build";
+				}
+			}
 			for (const lane of LANES) {
 				const cap = lane === "build" ? concurrency : pullConcurrency;
 				while (
