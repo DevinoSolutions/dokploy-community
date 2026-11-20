@@ -14,9 +14,11 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { resolveBuildsConcurrency } from "./concurrency";
+import { classifyDeployJob, resolvePullConcurrency } from "./deploy-lane";
 import { processDeploymentJob } from "./deployments-queue";
 import {
 	type CoalesceWaitingOutcome,
+	getPartition,
 	type InMemoryJob,
 	InMemoryQueue,
 	type IntakeHold,
@@ -171,6 +173,12 @@ const failDroppedJob = async (payload: Record<string, unknown>) => {
 	}
 };
 
+/**
+ * Longest the boot restore waits for the lane of the restored jobs before it
+ * opens the worker gate. The jobs it did not reach simply start as build jobs.
+ */
+export const RESTORE_LANE_CLASSIFY_MS = 5_000;
+
 const createInMemoryQueue = (): DeploymentQueue => {
 	const durable = createQueueJournal(dbJournalStore, {
 		onDropped: failDroppedJob,
@@ -180,6 +188,13 @@ const createInMemoryQueue = (): DeploymentQueue => {
 	});
 	const queue = new InMemoryQueue({
 		resolveConcurrency: resolveBuildsConcurrency,
+		// Pull-only deploys (a prebuilt image) get their own cap so they do not wait
+		// behind builds. `DOKPLOY_PULL_LANE_CONCURRENCY=0` turns the lane off.
+		resolvePullConcurrency,
+		classifyLane: (data) =>
+			resolvePullConcurrency(getPartition(data)) === 0
+				? "build"
+				: classifyDeployJob(data),
 		journal: durable.journal,
 		onWaitingDropped: (jobs) => {
 			for (const data of jobs)
@@ -228,6 +243,11 @@ const createInMemoryQueue = (): DeploymentQueue => {
 				// If the gate's timer already fired this is still safe: the pass is
 				// synchronous per unit and only ever removes waiting jobs.
 				if (result.restored > 0) await dedupeRestoredUnits(queue);
+				// Also before the gate opens: restored pull jobs start in their lane at
+				// once. Bounded, never throws; what it misses stays a build job.
+				await queue
+					.classifyWaiting(RESTORE_LANE_CLASSIFY_MS)
+					.catch(() => undefined);
 				return result;
 			} finally {
 				gate.open();

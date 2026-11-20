@@ -65,6 +65,12 @@ export type QueueJobRow = {
 	 * intake is closed while Dokploy updates or reloads. It runs after the restart.
 	 */
 	heldReason?: "intake-closed-for-update";
+	/**
+	 * Which concurrency cap the job counts against: `pull` is a pull-only deploy
+	 * (a prebuilt image) that has its own cap and does not wait behind builds.
+	 * Absent on rows that come from a remote queue.
+	 */
+	lane?: "build" | "pull";
 };
 
 export const fetchDeployApiJobs = async (
