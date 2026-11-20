@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.31.0** | Fork version **v0.31.0-community.8**
+Based on **Dokploy v0.31.0** | Fork version **v0.31.0-community.9**
 
 Everything in upstream Dokploy **v0.31.0**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.8 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.9 \
   --with-registry-auth \
   dokploy
 ```
@@ -121,11 +121,13 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.31.0-community.8
+## What's new in v0.31.0-community.9
 
-- Security: basic-auth passwords are shown only to users who may edit the service, service move routes return ids instead of the whole row, and project export with secrets needs edit rights. Traefik config reads and writes stay inside the Traefik directory and never follow symbolic links; a Traefik config file that is a symlink is now refused in the editor.
-- Fixed: Update Server and Reload Server no longer interrupt a deploy: new deploys wait until after the restart, the update is refused while one runs, and builds orphaned on a build server by a restart are stopped at boot.
-- No database migration, and an image-only rollback to v0.31.0-community.7 keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Security: service transfer no longer overwrites data the target already holds without a confirmation, checks first, and follows the bind mount rules.
+- Pull-only deploys get their own queue lane (4 per server by default, `DOKPLOY_PULL_LANE_CONCURRENCY`, 0 turns it off). Cancelling a GitHub Actions build row also removes its queued deploy.
+- Dependency: `effect` 3.20.0 to 3.22.1 for GHSA-7589-6fvf-x4pw.
+- Internal cleanup and a flaky test fix, no user-visible change.
+- No database migration, and an image-only rollback to v0.31.0-community.8 keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -140,7 +142,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.31.0-community.8
+export DOKPLOY_VERSION=v0.31.0-community.9
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -153,7 +155,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.8      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.31.0-community.9      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -196,7 +198,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.31.0-community.8` is the 8th fork release on top of Dokploy v0.31.0.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.31.0-community.9` is the 9th fork release on top of Dokploy v0.31.0.
 
 ## Contributing
 
