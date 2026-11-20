@@ -125,6 +125,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 - Security: service transfer no longer overwrites data the target already holds without a confirmation, checks first, and follows the bind mount rules.
 - Pull-only deploys get their own queue lane (4 per server by default, `DOKPLOY_PULL_LANE_CONCURRENCY`, 0 turns it off). Cancelling a GitHub Actions build row also removes its queued deploy.
+- Dependency: `effect` 3.20.0 to 3.22.1 for GHSA-7589-6fvf-x4pw.
 - Internal cleanup and a flaky test fix, no user-visible change.
 - No database migration, and an image-only rollback to v0.31.0-community.8 keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
