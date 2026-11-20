@@ -34,6 +34,7 @@ import {
 	type RestoreResult,
 } from "./queue-journal";
 import type { DeploymentJob } from "./queue-types";
+import { installQueuedDeployControl } from "./queued-deploy-control";
 
 /**
  * Deployment queue.
@@ -103,6 +104,11 @@ interface DeploymentQueue {
 	busy: () => QueueBusySnapshot;
 	/** Re-enqueue the jobs the previous process left unfinished. Never throws. */
 	restore: () => Promise<RestoreResult>;
+	/**
+	 * True once the boot restore is over (it ran, or it failed): until then the jobs the previous process left waiting
+	 * are in the journal and not in the queue yet.
+	 */
+	restoreSettled: () => boolean;
 	/** Stop taking jobs, give running ones `graceMs` to finish, flush the journal. */
 	shutdown: (graceMs: number, flushMs: number) => Promise<void>;
 }
@@ -127,6 +133,7 @@ const createNoopQueue = (): DeploymentQueue => ({
 	intakeClosed: () => false,
 	busy: () => ({ active: [], heldGroups: [] }),
 	restore: () => Promise.resolve({ restored: 0, interrupted: 0, dropped: 0 }),
+	restoreSettled: () => true,
 	shutdown: () => Promise.resolve(),
 });
 
@@ -214,6 +221,7 @@ const createInMemoryQueue = (): DeploymentQueue => {
 	queue.process(processDeploymentJob);
 
 	let shuttingDown: Promise<void> | null = null;
+	let restoreSettled = false;
 
 	return {
 		add: (_name, data) => queue.add(data),
@@ -250,9 +258,11 @@ const createInMemoryQueue = (): DeploymentQueue => {
 					.catch(() => undefined);
 				return result;
 			} finally {
+				restoreSettled = true;
 				gate.open();
 			}
 		},
+		restoreSettled: () => restoreSettled,
 		shutdown: (graceMs, flushMs) => {
 			shuttingDown ??= (async () => {
 				// Nothing new starts; anything still running when the grace period
@@ -287,6 +297,13 @@ if (!globalForQueue.__dokployDeploymentQueue) {
 }
 
 const myQueue: DeploymentQueue = globalForQueue.__dokployDeploymentQueue;
+
+// The user's cancel of a registered GitHub Actions row takes the deploy that waits for it out of this queue (T-19913).
+installQueuedDeployControl({
+	getJobs: (states) => myQueue.getJobs(states),
+	removeWaitingJob: (id) => myQueue.removeWaitingJob(id),
+	restoreSettled: () => myQueue.restoreSettled(),
+});
 
 /** Start processing jobs. Called once on server startup (self-hosted). */
 export const startDeploymentWorker = () => myQueue.run();
