@@ -6,6 +6,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 Upgrade notes: no database migration and nothing to configure. The transfer API gains an optional `overwriteTargets` list and a read-only `transfer.preflight` query; the Transfer dialog now checks first and, when the target already holds data, lists it and asks for a confirmation before writing over it.
 
+Upgrade notes: no database migration. Pull-only deploys get their own queue slots, 4 per server by default. Set `DOKPLOY_PULL_LANE_CONCURRENCY` (0 to 16) to change that; `0` switches the lane off and the queue behaves exactly as before. An image-only rollback to v0.31.0-community.8 keeps working.
+
 **Security.**
 
 - Service transfer (T-16187) no longer writes over data the target server already holds. Before, a transfer imported each volume into a volume of the same name on the target, merging into or overwriting whatever was there. Now it is refused, before the service is stopped or anything is copied, when the target has a non-empty volume of the same name, or a non-empty directory at the path of a bind mount, unless the caller lists that name in `overwriteTargets`. A volume that is empty or missing on the target is fine.
@@ -16,6 +18,10 @@ Upgrade notes: no database migration and nothing to configure. The transfer API 
 **Added.**
 
 - `transfer.preflight` is a read-only query (same permissions as starting a transfer) that lists the volumes and bind mounts a transfer would move, which of them already hold data on the target, the host paths a compose file binds that will not be copied, and the reason the transfer would be refused. Starting a transfer logs the same warning about the compose host paths. Every check fails closed: a host that cannot answer, a docker error or an unreadable directory refuses the transfer instead of counting as empty, and the check is repeated right before each volume or directory is copied.
+
+**Changed.**
+
+- Deploys that only pull a prebuilt image no longer wait behind builds (T-12497). The deploy queue now has a separate pull lane with its own cap (default 4 per server, `DOKPLOY_PULL_LANE_CONCURRENCY`; the build cap is unchanged and never shared). A deploy goes in the pull lane only when it provably builds nothing: a Docker-image application without a build server, a preview of one, a deploy-hook image deployed by digest, or a stored (raw) compose whose every service has an `image` and no `build` or `extends`, no `include` and no custom command, and no build server. Anything else, and any doubt (an unreadable file, a failed lookup), stays in the build lane, which is how every deploy ran before. The lane is read again just before a pull deploy starts, so a service edited while it waited goes back to the build lane. One service still runs one deploy at a time and oldest first across both lanes. Update Server and Reload Server still refuse while a pull deploy runs. The queue list marks pull deploys with a "pull" badge and `deployment.queueList` returns a `lane` field. The priority lane applies to the build lane only.
 
 ### New in v0.31.0-community.8
 

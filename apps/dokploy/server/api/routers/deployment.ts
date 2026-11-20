@@ -295,6 +295,7 @@ export const deploymentRouter = createTRPCRouter({
 						...(intakeClosed && state === "waiting"
 							? { heldReason: "intake-closed-for-update" as const }
 							: {}),
+						...(job.lane ? { lane: job.lane } : {}),
 						id: String(job.id),
 						name: job.name ?? undefined,
 						data: job.data as Record<string, unknown>,

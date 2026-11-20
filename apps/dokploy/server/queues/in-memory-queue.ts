@@ -41,6 +41,19 @@ export const LOCAL_PARTITION = "__local__";
 
 export type JobState = "waiting" | "active";
 
+/**
+ * Which concurrency cap a job counts against. `build` is every job (today's
+ * behaviour); `pull` is a job that only pulls a prebuilt image (see
+ * deploy-lane.ts), which has its own, separate cap so it does not wait behind
+ * builds. Derived, never stored in the payload or the journal.
+ */
+export type Lane = "build" | "pull";
+
+const LANES: readonly Lane[] = ["build", "pull"];
+
+/** Longest a start-time re-check of a job's lane may take before it counts as `build`. */
+export const LANE_RECHECK_TIMEOUT_MS = 5_000;
+
 export interface InMemoryJob {
 	id: string;
 	/** Durable journal id (stable across restarts, unlike `id`). */
@@ -51,6 +64,11 @@ export interface InMemoryJob {
 	processedOn?: number;
 	finishedOn?: number;
 	failedReason?: string;
+	/**
+	 * The lane the job counts against (`build` until it is classified). Always set
+	 * by the queue; optional so a hand-built job (a test double) stays valid.
+	 */
+	lane?: Lane;
 	/** Waiting jobs this one was started ahead of (0 unless it jumped). */
 	wentAheadOf?: number;
 	getState: () => Promise<JobState>;
@@ -238,12 +256,30 @@ interface InternalJob {
 	 * coalescing, keep-oldest and priority until the write is confirmed.
 	 */
 	unconfirmed: boolean;
+	/**
+	 * The cap this job counts against, `build` until classified. Only changed
+	 * while the job waits: a running job keeps the lane it started in, which is
+	 * what keeps the per-lane active counts (derived from `partition.active`)
+	 * honest.
+	 */
+	lane: Lane;
+	/**
+	 * `lane` was re-read just before the start (a `pull` job is checked once more,
+	 * so a service edited while it waited cannot slip a build into the pull lane).
+	 * A later answer of the background classification is ignored once set.
+	 */
+	laneChecked: boolean;
+	/** The background classification, once started (never rejects). */
+	classification?: Promise<void>;
+	/** The start-time re-check, shared by every drain that wants this job. */
+	recheck?: Promise<void>;
 }
 
 interface Partition {
 	waiting: InternalJob[];
-	/** Groups currently running in this partition. */
+	/** Groups currently running in this partition (any lane). */
 	activeGroups: Set<string>;
+	/** Running jobs of every lane; a lane's count is derived from this list. */
 	active: InternalJob[];
 	/**
 	 * The last job started in this partition jumped the queue. Cleared by the
@@ -251,7 +287,7 @@ interface Partition {
 	 * cancelled or fails, so a priority job is never followed directly by another.
 	 */
 	jumpedLast: boolean;
-	/** The concurrency cap seen by the last scheduling tick (unset before). */
+	/** The build lane's cap seen by the last scheduling tick (unset before). */
 	concurrency?: number;
 }
 
@@ -307,6 +343,22 @@ export interface InMemoryQueueOptions {
 	 * by a newer deploy. A job that finishes or is released is not reported. Must not throw.
 	 */
 	onWaitingDropped?: (data: DeploymentJob[]) => void;
+	/**
+	 * Says which lane a payload belongs to (see deploy-lane.ts). Called in the
+	 * background after `add` has queued the job, and once more just before a
+	 * `pull` job starts. It must answer `build` on any doubt; a rejection, a
+	 * timeout or an unknown answer count as `build`. Absent = every job is
+	 * `build`, which is the queue's behaviour before lanes existed.
+	 */
+	classifyLane?: (data: DeploymentJob) => Promise<Lane> | Lane;
+	/**
+	 * The `pull` lane's cap for a partition, read on every scheduling tick like
+	 * `resolveConcurrency`. 0, a negative or missing value turns the lane off: a
+	 * waiting `pull` job then counts as `build`. Absent = lane off.
+	 */
+	resolvePullConcurrency?: (partition: string) => Promise<number> | number;
+	/** Bound on a start-time lane re-check; injectable for tests. */
+	laneRecheckTimeoutMs?: number;
 }
 
 export class InMemoryQueue {
@@ -332,12 +384,19 @@ export class InMemoryQueue {
 	private readonly now: () => number;
 	private readonly journal?: QueueJournal;
 	private readonly onWaitingDropped?: (data: DeploymentJob[]) => void;
+	private readonly classifyLane?: InMemoryQueueOptions["classifyLane"];
+	private readonly resolvePullConcurrency?: InMemoryQueueOptions["resolvePullConcurrency"];
+	private readonly laneRecheckTimeoutMs: number;
 
 	constructor(options: InMemoryQueueOptions) {
 		this.onWaitingDropped = options.onWaitingDropped;
 		this.resolveConcurrency = options.resolveConcurrency;
 		this.now = options.now ?? (() => Date.now());
 		this.journal = options.journal;
+		this.classifyLane = options.classifyLane;
+		this.resolvePullConcurrency = options.resolvePullConcurrency;
+		this.laneRecheckTimeoutMs =
+			options.laneRecheckTimeoutMs ?? LANE_RECHECK_TIMEOUT_MS;
 	}
 
 	private getPartitionState(key: string): Partition {
@@ -412,6 +471,9 @@ export class InMemoryQueue {
 		// still be dropped (see below), so nothing may fold another push into it.
 		job.unconfirmed = needsDurable && !!this.journal;
 		partition.waiting.push(job);
+		// Never awaited before the push above: the lane is learned afterwards, and
+		// until then the job counts as `build` (what every job did before lanes).
+		void this.classifyInBackground(job);
 		this.schedule();
 		const journal = this.journal;
 		if (journal) {
@@ -455,6 +517,16 @@ export class InMemoryQueue {
 			const job = partition.waiting[index] as InternalJob;
 			// Not recorded yet and may be dropped: report it as not waiting.
 			if (job.unconfirmed) return null;
+			// The priority lane belongs to the build lane. A pull job waits only for a
+			// pull slot, so there is nothing to jump and no flag is stored.
+			if (job.lane === "pull") {
+				return {
+					requested: true,
+					applied: false,
+					wentAheadOf: 0,
+					reason: "first-in-line",
+				};
+			}
 			const outcome = this.assessPriority(
 				partition,
 				index,
@@ -486,23 +558,38 @@ export class InMemoryQueue {
 		return partition.jumpedLast || partition.active.some((job) => job.jumped);
 	}
 
+	/** Running jobs in a lane: derived from the active list, never a stored counter. */
+	private activeIn(partition: Partition, lane: Lane): number {
+		let count = 0;
+		for (const job of partition.active) if (job.lane === lane) count++;
+		return count;
+	}
+
 	/**
 	 * Slots that waiting jobs are about to take anyway: free right now while the
 	 * queue is actually starting jobs. A job that would get one of these is not
-	 * going ahead of anything.
+	 * going ahead of anything. Build lane only: the priority lane belongs to it.
 	 */
 	private freeSlots(partition: Partition): number {
 		if (!this.running || this.paused || this.intakeClosed() || !this.processor)
 			return 0;
-		return Math.max(0, (partition.concurrency ?? 1) - partition.active.length);
+		return Math.max(
+			0,
+			(partition.concurrency ?? 1) - this.activeIn(partition, "build"),
+		);
 	}
 
-	/** Waiting jobs before `index` that could start now (their service is idle). */
+	/**
+	 * Waiting build-lane jobs before `index` that could start now (their service
+	 * is idle). A pull job never counts: it does not wait for the slots a jump
+	 * is about to take.
+	 */
 	private startableBefore(partition: Partition, index: number): number {
 		let count = 0;
 		for (let i = 0; i < index; i++) {
 			const job = partition.waiting[i] as InternalJob;
-			if (!partition.activeGroups.has(job.group)) count++;
+			if (job.lane === "build" && !partition.activeGroups.has(job.group))
+				count++;
 		}
 		return count;
 	}
@@ -602,6 +689,8 @@ export class InMemoryQueue {
 			released: false,
 			groupLockKept: false,
 			unconfirmed: false,
+			lane: "build",
+			laneChecked: false,
 		};
 	}
 
@@ -628,6 +717,7 @@ export class InMemoryQueue {
 			timestamp: job.timestamp,
 			processedOn: job.processedOn,
 			finishedOn: job.finishedOn,
+			lane: job.lane,
 			wentAheadOf: job.wentAheadOf,
 			getState: () => Promise.resolve(job.state),
 			remove: () => this.remove(job.id),
@@ -910,6 +1000,9 @@ export class InMemoryQueue {
 		const lost = (data: DeploymentJob) =>
 			Boolean(registeredId(data)) && registeredId(data) !== keptId;
 		this.settle(dropped);
+		// Same wake-up as `discard`: a dropped duplicate may have held back a newer
+		// job of its service.
+		if (dropped.length > 0) this.schedule();
 		this.reportDropped(dropped.map((job) => job.data).filter(lost));
 		if (target) {
 			titles.unshift(...titleOf(target));
@@ -945,6 +1038,9 @@ export class InMemoryQueue {
 	private discard(jobs: InternalJob[]) {
 		this.settle(jobs);
 		this.reportDropped(jobs.map((job) => job.data));
+		// A job that waited behind a removed one of its own service (the older-job
+		// rule holds it back in either lane) may be startable now.
+		if (jobs.length > 0) this.schedule();
 	}
 
 	private reportDropped(data: DeploymentJob[]) {
@@ -1083,68 +1179,228 @@ export class InMemoryQueue {
 		}
 	}
 
+	/**
+	 * The pull lane's cap for a partition; 0 when the lane is off or its reader
+	 * fails (anything else than a positive whole number turns it off).
+	 */
+	private async readPullConcurrency(key: string): Promise<number> {
+		if (!this.resolvePullConcurrency) return 0;
+		try {
+			const cap = Math.floor(Number(await this.resolvePullConcurrency(key)));
+			return Number.isFinite(cap) && cap > 0 ? cap : 0;
+		} catch {
+			return 0;
+		}
+	}
+
+	/**
+	 * Ask the classifier, bounded by `timeoutMs`. Everything but a clean `pull`
+	 * answer is `build`: a throw, a rejection, a timeout, an unknown value.
+	 */
+	private async askLane(data: DeploymentJob, timeoutMs: number): Promise<Lane> {
+		const classify = this.classifyLane;
+		if (!classify) return "build";
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const answer = await Promise.race([
+				Promise.resolve().then(() => classify(data)),
+				new Promise<Lane>((resolve) => {
+					timer = setTimeout(() => resolve("build"), timeoutMs);
+					timer.unref?.();
+				}),
+			]);
+			return answer === "pull" ? "pull" : "build";
+		} catch {
+			return "build";
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	/**
+	 * Learn a job's lane after it was queued (one run per job, never rejects). It
+	 * only matters for a job that still waits and has not been re-checked for the
+	 * start; the answer of a job that already runs, or that the start-time check
+	 * already settled, is dropped.
+	 */
+	private classifyInBackground(job: InternalJob): Promise<void> {
+		if (!this.classifyLane) return Promise.resolve();
+		job.classification ??= (async () => {
+			const lane = await this.askLane(job.data, this.laneRecheckTimeoutMs);
+			if (job.state !== "waiting" || job.laneChecked || job.lane === lane) {
+				return;
+			}
+			job.lane = lane;
+			// A job that turned out `pull` may start in its own lane now.
+			this.schedule();
+		})();
+		return job.classification;
+	}
+
+	/**
+	 * Read a `pull` job's lane again right before it would start, so a service
+	 * edited while the job waited (docker to git, a build section added) goes
+	 * back to the build lane. Shared by every drain that wants the job; it always
+	 * ends with `laneChecked` set, and any trouble leaves the job in `build`.
+	 */
+	private recheckLane(job: InternalJob): Promise<void> {
+		job.recheck ??= (async () => {
+			const lane = await this.askLane(job.data, this.laneRecheckTimeoutMs);
+			if (job.state === "waiting") job.lane = lane;
+			job.laneChecked = true;
+		})();
+		return job.recheck;
+	}
+
+	/**
+	 * Classify every waiting job that has not been yet and wait for the answers,
+	 * at most `timeoutMs`. The boot restore calls this before the worker gate
+	 * opens, so jobs restored from the journal start in their lane at once. A
+	 * classification that is still running when the time is up carries on in the
+	 * background; the jobs it did not reach simply count as `build`.
+	 */
+	async classifyWaiting(timeoutMs: number): Promise<void> {
+		if (!this.classifyLane) return;
+		const pending: Promise<void>[] = [];
+		for (const partition of this.partitions.values()) {
+			for (const job of partition.waiting) {
+				pending.push(this.classifyInBackground(job));
+			}
+		}
+		if (pending.length === 0) return;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			await Promise.race([
+				Promise.all(pending),
+				new Promise<void>((resolve) => {
+					timer = setTimeout(resolve, timeoutMs);
+					timer.unref?.();
+				}),
+			]);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
 	private async drainPartition(key: string) {
 		const partition = this.partitions.get(key);
 		if (!partition || !this.processor) return;
 
-		const concurrency = Math.max(1, await this.resolveConcurrency(key));
-		partition.concurrency = concurrency;
-
-		// A shutdown can land while the concurrency was being resolved.
-		// The intake check is here, after the await above, so a drain that was
-		// already in flight when the intake closed cannot start one more job: from
-		// the moment `closeIntake` returns, the running count can only fall.
-		while (
-			this.running &&
-			!this.paused &&
-			!this.intakeClosed() &&
-			partition.active.length < concurrency
-		) {
-			const pick = this.pickNext(partition);
-			if (!pick) break;
-
-			const wentAheadOf = pick.jumped
-				? this.startableBefore(partition, pick.index)
+		// A shutdown can land while the concurrency is being resolved. The intake
+		// check sits after the awaits below, so a drain that was already in flight
+		// when the intake closed cannot start one more job: from the moment
+		// `closeIntake` returns, the running count can only fall. A pass starts again
+		// after every lane re-check (which awaits), so the caps are read again there
+		// too: a cap lowered meanwhile is honoured by the next start.
+		let again = true;
+		while (again) {
+			again = false;
+			const concurrency = Math.max(1, await this.resolveConcurrency(key));
+			partition.concurrency = concurrency;
+			// Only read when a lane reader was given, so a queue without one takes
+			// exactly the steps it took before lanes existed.
+			const pullConcurrency = this.resolvePullConcurrency
+				? await this.readPullConcurrency(key)
 				: 0;
-			const job = partition.waiting.splice(pick.index, 1)[0];
-			if (!job) break;
-			job.jumped = pick.jumped;
-			job.wentAheadOf = wentAheadOf;
-			partition.jumpedLast = pick.jumped;
-			job.state = "active";
-			job.processedOn = this.now();
-			partition.activeGroups.add(job.group);
-			partition.active.push(job);
+			// Lane off (the kill switch, or a cap lowered to 0 while jobs waited): the
+			// waiting pull jobs are build jobs again, so none can be left without a
+			// lane to start in.
+			if (pullConcurrency === 0) {
+				for (const waiting of partition.waiting) {
+					if (waiting.lane === "pull") waiting.lane = "build";
+				}
+			}
+			for (const lane of LANES) {
+				const cap = lane === "build" ? concurrency : pullConcurrency;
+				while (
+					this.running &&
+					!this.paused &&
+					!this.intakeClosed() &&
+					this.activeIn(partition, lane) < cap
+				) {
+					const pick = this.pickNext(partition, lane);
+					if (!pick) break;
 
-			const journal = this.journal;
-			if (journal) this.notify(() => journal.started(job.journalId));
-			void this.runJob(job);
+					const candidate = partition.waiting[pick.index] as InternalJob;
+					if (lane === "pull" && !candidate.laneChecked && this.classifyLane) {
+						// The one lane question asked on the start path. Pick again after it:
+						// the job may be a build job now, and the queue moved meanwhile.
+						await this.recheckLane(candidate);
+						again = true;
+						break;
+					}
+
+					const wentAheadOf = pick.jumped
+						? this.startableBefore(partition, pick.index)
+						: 0;
+					const job = partition.waiting.splice(pick.index, 1)[0];
+					if (!job) break;
+					job.jumped = pick.jumped;
+					job.wentAheadOf = wentAheadOf;
+					// The priority cooldown is the build lane's own.
+					if (lane === "build") partition.jumpedLast = pick.jumped;
+					job.state = "active";
+					job.processedOn = this.now();
+					partition.activeGroups.add(job.group);
+					partition.active.push(job);
+
+					const journal = this.journal;
+					if (journal) this.notify(() => journal.started(job.journalId));
+					void this.runJob(job);
+				}
+			}
+		}
+		// A pull job that was re-checked but did not start (a concurrent drain took
+		// the slot) has to be checked again when its turn comes: the re-check only
+		// counts when the start follows it in the same synchronous step.
+		for (const waiting of partition.waiting) {
+			if (waiting.lane === "pull" && waiting.laneChecked) {
+				waiting.laneChecked = false;
+				waiting.recheck = undefined;
+			}
 		}
 		// A drained lane has nothing left to be fair to.
-		if (partition.waiting.length === 0) partition.jumpedLast = false;
+		if (!partition.waiting.some((waiting) => waiting.lane === "build")) {
+			partition.jumpedLast = false;
+		}
 	}
 
 	/**
-	 * Which waiting job takes a free slot: the first one whose group is not
-	 * already running, unless a priority-flagged job further down may jump it. A
-	 * flagged job that is first in line anyway is a plain start, not a jump. A
-	 * flagged job never jumps while an older job of its own service waits: that
-	 * older work (a pinned image, a fresh-volumes redeploy) has to run first.
+	 * Which waiting job of `lane` takes a free slot: the first one whose group is
+	 * not already running and has no older job waiting in either lane, unless (build
+	 * lane only) a priority-flagged job further down may jump it. A flagged job that
+	 * is first in line anyway is a plain start, not a jump. A flagged job never
+	 * jumps while an older job of its own service waits: that older work (a pinned
+	 * image, a fresh-volumes redeploy) has to run first.
+	 *
+	 * The older-job rule is what keeps one service in order across lanes: a job
+	 * whose lane has no free slot still blocks the newer jobs of its service.
 	 */
 	private pickNext(
 		partition: Partition,
+		lane: Lane,
 	): { index: number; jumped: boolean } | null {
 		const isFree = (job: InternalJob) => !partition.activeGroups.has(job.group);
-		const first = partition.waiting.findIndex(isFree);
+		const seen = new Set<string>();
+		let first = -1;
+		for (let index = 0; index < partition.waiting.length; index++) {
+			const job = partition.waiting[index] as InternalJob;
+			if (job.lane === lane && isFree(job) && !seen.has(job.group)) {
+				first = index;
+				break;
+			}
+			seen.add(job.group);
+		}
 		if (first === -1) return null;
-		if (!this.jumpBlocked(partition)) {
+		if (lane === "build" && !this.jumpBlocked(partition)) {
 			// The oldest eligible flagged job wins; if that is the first one anyway,
 			// nothing is jumped.
-			const seen = new Set<string>();
+			seen.clear();
 			for (let index = 0; index < partition.waiting.length; index++) {
 				const job = partition.waiting[index] as InternalJob;
 				if (
 					index >= first &&
+					job.lane === "build" &&
 					job.data.priority === true &&
 					isFree(job) &&
 					!seen.has(job.group)
