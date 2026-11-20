@@ -43,6 +43,7 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 }));
 
 const {
+	assertTargetStillClear,
 	assertTransferPlanAllowed,
 	assertTransferTargetAllowed,
 	describeTransferRefusal,
@@ -191,6 +192,8 @@ describe("what the target already holds", () => {
 		expect(mocks.execAsyncRemote).toHaveBeenCalledWith(
 			"server-target",
 			volumeStateCommand("pgdata"),
+			undefined,
+			{ signal: expect.any(AbortSignal) },
 		);
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalledWith(
 			"server-source",
@@ -203,7 +206,9 @@ describe("what the target already holds", () => {
 		const plan = await inspectTransferPlan(
 			input({ volumes: ["pgdata"], targetServerId: null }),
 		);
-		expect(mocks.execAsync).toHaveBeenCalledWith(volumeStateCommand("pgdata"));
+		expect(mocks.execAsync).toHaveBeenCalledWith(volumeStateCommand("pgdata"), {
+			timeout: 60_000,
+		});
 		expect(plan.needsOverwrite).toEqual(["pgdata"]);
 	});
 
@@ -345,7 +350,11 @@ describe("whose volumes they are", () => {
 	it("refuses when the check cannot be made", async () => {
 		mocks.findRefusedVolumeMounts.mockRejectedValue(new Error("db down"));
 		const plan = await inspectTransferPlan(input({ volumes: ["pgdata"] }));
-		expect(plan.blockers.join(" ")).toContain("db down");
+		expect(plan.blockers.join(" ")).toContain(
+			"Could not check who the volumes belong to",
+		);
+		// The error text stays in the server log, not in the answer.
+		expect(plan.blockers.join(" ")).not.toContain("db down");
 		expect(plan.volumes).toEqual([]);
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 	});
@@ -505,5 +514,226 @@ describe("host paths a compose file binds", () => {
 		expect(scanComposeHostBinds({ services: { a: { volumes: "x" } } })).toEqual(
 			[],
 		);
+	});
+});
+
+describe("a check that fails is a refusal, never a pass", () => {
+	const fails = (server: string) => async (id: string | null) => {
+		if (id === server) {
+			throw new Error("ssh: connection reset");
+		}
+		return { stdout: "non-empty\n", stderr: "" };
+	};
+
+	it("a source that cannot be read refuses, and does not skip the target", async () => {
+		mocks.execAsyncRemote.mockImplementation(fails("server-source"));
+		const plan = await inspectTransferPlan(
+			input({ bindMounts: ["/srv/shared/uploads"] }),
+		);
+		expect(plan.blockers.join(" ")).toContain(
+			"on the source server (ssh: connection reset), so the transfer is refused",
+		);
+		expect(plan.bindMounts).toEqual([]);
+		expect(() => assertTransferPlanAllowed(plan)).toThrow(
+			expect.objectContaining({ code: "BAD_REQUEST" }),
+		);
+	});
+
+	it("a source that answers nonsense refuses", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		const plan = await inspectTransferPlan(
+			input({ bindMounts: ["/srv/shared/uploads"] }),
+		);
+		expect(plan.blockers.join(" ")).toContain("unexpected answer");
+	});
+
+	it("a target that cannot be read refuses a bind mount", async () => {
+		mocks.execAsyncRemote.mockImplementation(fails("server-target"));
+		const plan = await inspectTransferPlan(
+			input({ bindMounts: ["/srv/shared/uploads"] }),
+		);
+		expect(plan.blockers.join(" ")).toContain("on the target server");
+	});
+
+	it("does not show a long or multi-line host error whole", async () => {
+		mocks.execAsyncRemote.mockRejectedValue(
+			new Error(`${"x".repeat(500)}\nsecond line`),
+		);
+		const plan = await inspectTransferPlan(input({ volumes: ["pgdata"] }));
+		const text = plan.blockers.join(" ");
+		expect(text).not.toContain("second line");
+		expect(text.length).toBeLessThan(400);
+	});
+
+	it("every check is bounded in time", async () => {
+		targetHolds({ pgdata: "empty" });
+		await inspectTransferPlan(
+			input({ volumes: ["pgdata"], targetServerId: null }),
+		);
+		expect(mocks.execAsync).toHaveBeenCalledWith(expect.any(String), {
+			timeout: 60_000,
+		});
+	});
+});
+
+// The state commands are real shell: run them against stub `docker`, `stat`
+// and `find` programs that fail the way a host fails, and see what they print.
+describe.skipIf(process.platform === "win32")(
+	"what the state commands say when the host fails",
+	() => {
+		const run = async (
+			command: string,
+			stubs: Record<string, string>,
+		): Promise<{ code: number; stdout: string }> => {
+			const { spawnSync } = await import("node:child_process");
+			const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+			const { tmpdir } = await import("node:os");
+			const { join } = await import("node:path");
+			const dir = await mkdtemp(join(tmpdir(), "transfer-state-"));
+			try {
+				for (const [name, body] of Object.entries(stubs)) {
+					await writeFile(join(dir, name), `#!/bin/sh\n${body}\n`, {
+						mode: 0o755,
+					});
+				}
+				const result = spawnSync("/bin/sh", ["-c", command], {
+					env: { ...process.env, PATH: `${dir}:/usr/bin:/bin` },
+					timeout: 10_000,
+					encoding: "utf8",
+				});
+				return { code: result.status ?? 1, stdout: result.stdout.trim() };
+			} finally {
+				await rm(dir, { recursive: true, force: true });
+			}
+		};
+
+		it("a volume the daemon says does not exist is missing", async () => {
+			expect(
+				await run(volumeStateCommand("v"), {
+					docker: 'echo "Error: No such volume: v" >&2; exit 1',
+				}),
+			).toEqual({ code: 0, stdout: "missing" });
+		});
+
+		it.each([
+			"Cannot connect to the Docker daemon",
+			"permission denied while trying to connect to the Docker daemon socket",
+		])("a failing docker (%s) is an error, not missing", async (message) => {
+			const result = await run(volumeStateCommand("v"), {
+				docker: `echo "${message}" >&2; exit 1`,
+			});
+			expect(result.code).not.toBe(0);
+			expect(result.stdout).not.toBe("missing");
+		});
+
+		it("a volume whose listing fails is an error, not empty", async () => {
+			const result = await run(volumeStateCommand("v"), {
+				docker:
+					'case "$1" in volume) exit 0;; run) echo "find: /data: Permission denied" >&2; exit 1;; esac',
+			});
+			expect(result.code).not.toBe(0);
+			expect(result.stdout).not.toBe("empty");
+		});
+
+		it("a volume that lists files is non-empty", async () => {
+			expect(
+				await run(volumeStateCommand("v"), {
+					docker: 'case "$1" in volume) exit 0;; run) echo non-empty;; esac',
+				}),
+			).toEqual({ code: 0, stdout: "non-empty" });
+		});
+
+		it("a directory that does not exist is missing", async () => {
+			expect(
+				await run(directoryStateCommand("/nowhere/at/all/x"), {
+					stat: 'echo "stat: cannot statx: No such file or directory" >&2; exit 1',
+				}),
+			).toEqual({ code: 0, stdout: "missing" });
+		});
+
+		it("a directory that cannot be listed is an error, not empty", async () => {
+			const result = await run(directoryStateCommand("/srv/x"), {
+				stat: "echo directory",
+				find: 'echo "find: /srv/x: Permission denied" >&2; exit 1',
+			});
+			expect(result.code).not.toBe(0);
+			expect(result.stdout).not.toBe("empty");
+		});
+
+		it("a stat that fails for another reason is an error, not missing", async () => {
+			const result = await run(directoryStateCommand("/srv/x"), {
+				stat: 'echo "stat: cannot statx: Permission denied" >&2; exit 1',
+			});
+			expect(result.code).not.toBe(0);
+			expect(result.stdout).not.toBe("missing");
+		});
+
+		it("a path that is a file is an error", async () => {
+			const result = await run(directoryStateCommand("/srv/x"), {
+				stat: 'echo "regular file"',
+			});
+			expect(result.code).not.toBe(0);
+		});
+
+		it("an empty directory is empty, a full one is non-empty", async () => {
+			expect(
+				await run(directoryStateCommand("/srv/x"), {
+					stat: "echo directory",
+					find: "exit 0",
+				}),
+			).toEqual({ code: 0, stdout: "empty" });
+			expect(
+				await run(directoryStateCommand("/srv/x"), {
+					stat: "echo directory",
+					find: "echo /srv/x/a",
+				}),
+			).toEqual({ code: 0, stdout: "non-empty" });
+		});
+	},
+);
+
+describe("assertTargetStillClear", () => {
+	const args = (overrides: Record<string, unknown> = {}) =>
+		({
+			targetServerId: "server-target",
+			kind: "volume",
+			name: "pgdata",
+			overwriteTargets: [],
+			...overrides,
+		}) as Parameters<typeof assertTargetStillClear>[0];
+
+	it("refuses a volume filled since the scan", async () => {
+		targetHolds({ pgdata: "non-empty" });
+		await expect(assertTargetStillClear(args())).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+	});
+
+	it("refuses a directory filled since the scan", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: "non-empty\n",
+			stderr: "",
+		});
+		await expect(
+			assertTargetStillClear(
+				args({ kind: "directory", name: "/srv/shared/uploads" }),
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+	});
+
+	it("refuses when it cannot look", async () => {
+		mocks.execAsyncRemote.mockRejectedValue(new Error("ssh: connection reset"));
+		await expect(assertTargetStillClear(args())).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+		});
+	});
+
+	it("passes an empty or missing target and a named one", async () => {
+		targetHolds({ pgdata: "empty" });
+		await expect(assertTargetStillClear(args())).resolves.toBeUndefined();
+		targetHolds({ pgdata: "non-empty" });
+		await expect(
+			assertTargetStillClear(args({ overwriteTargets: ["pgdata"] })),
+		).resolves.toBeUndefined();
 	});
 });

@@ -310,39 +310,36 @@ export const loadVolumeBindingFacts = async ({
 		namespaceOrganizations,
 		composeDeclarationRows,
 	] = await Promise.all([
-			db.query.mounts.findMany({
-				where: and(
-					eq(mounts.type, "volume"),
-					eq(mounts.volumeName, volumeName),
-				),
-				with: everyServiceWithOrganization,
-			}),
-			db.query.volumeBackups.findMany({
-				where: eq(volumeBackups.volumeName, volumeName),
-				with: everyServiceWithOrganization,
-			}),
-			findOrganizationsClaimingNamespace(volumeName),
-			includeComposeDeclarations
-				? db.query.compose.findMany({
-						where: and(
-							serverId === null
-								? isNull(compose.serverId)
-								: eq(compose.serverId, serverId),
-							serviceType === "compose"
-								? ne(compose.composeId, serviceId)
-								: undefined,
-							sql`strpos(${compose.composeFile}, ${volumeName}::text) > 0`,
-						),
-						columns: {
-							composeId: true,
-							appName: true,
-							serverId: true,
-							composeFile: true,
-						},
-						with: { environment: environmentOrganization },
-					})
-				: Promise.resolve([]),
-		]);
+		db.query.mounts.findMany({
+			where: and(eq(mounts.type, "volume"), eq(mounts.volumeName, volumeName)),
+			with: everyServiceWithOrganization,
+		}),
+		db.query.volumeBackups.findMany({
+			where: eq(volumeBackups.volumeName, volumeName),
+			with: everyServiceWithOrganization,
+		}),
+		findOrganizationsClaimingNamespace(volumeName),
+		includeComposeDeclarations
+			? db.query.compose.findMany({
+					where: and(
+						serverId === null
+							? isNull(compose.serverId)
+							: eq(compose.serverId, serverId),
+						serviceType === "compose"
+							? ne(compose.composeId, serviceId)
+							: undefined,
+						sql`strpos(${compose.composeFile}, ${volumeName}::text) > 0`,
+					),
+					columns: {
+						composeId: true,
+						appName: true,
+						serverId: true,
+						composeFile: true,
+					},
+					with: { environment: environmentOrganization },
+				})
+			: Promise.resolve([]),
+	]);
 
 	const idKey = SERVICE_ID_KEYS[serviceType];
 	let recordedOnOwnMount = false;

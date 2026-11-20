@@ -66,6 +66,7 @@ import {
 import { deployRedis, findRedisById, updateRedisById } from "./redis";
 import { findServerById } from "./server";
 import {
+	assertTargetStillClear,
 	assertTransferPlanAllowed,
 	assertTransferTargetAllowed,
 	type ComposeHostBind,
@@ -653,6 +654,12 @@ export const transferService = async (
 			`Found ${volumes.length} volume(s) and ${bindMounts.length} bind mount(s)`,
 		);
 		for (const volume of volumes) {
+			await assertTargetStillClear({
+				targetServerId,
+				kind: "volume",
+				name: volume,
+				overwriteTargets: input.overwriteTargets,
+			});
 			log(`Copying volume ${volume}`);
 			await copyStream(
 				volume,
@@ -666,6 +673,12 @@ export const transferService = async (
 				log(`Skipping bind mount ${hostPath}: not found on ${sourceName}`);
 				continue;
 			}
+			await assertTargetStillClear({
+				targetServerId,
+				kind: "directory",
+				name: hostPath,
+				overwriteTargets: input.overwriteTargets,
+			});
 			log(`Copying bind mount ${hostPath}`);
 			await copyStream(
 				hostPath,

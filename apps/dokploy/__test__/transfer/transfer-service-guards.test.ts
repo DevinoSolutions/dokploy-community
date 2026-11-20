@@ -183,7 +183,7 @@ const hosts = (target: { volume?: string; directory?: string } = {}) => {
 		if (command.includes("docker volume inspect")) {
 			return { stdout: `${target.volume ?? "missing"}\n`, stderr: "" };
 		}
-		if (command.startsWith("if [ ! -d")) {
+		if (command.startsWith("kind=$(stat")) {
 			return { stdout: `${target.directory ?? "missing"}\n`, stderr: "" };
 		}
 		if (command.startsWith("[ -d")) {
@@ -551,5 +551,37 @@ describe("the commands a transfer sends to a host quote what they are given", ()
 				expect(JSON.stringify(token)).not.toContain("touch");
 			}
 		}
+	});
+});
+
+describe("a volume filled between the scan and the copy", () => {
+	it("is refused at the copy, and the source is restored", async () => {
+		let inspected = 0;
+		const ask = (command: string) => {
+			if (command.includes("docker volume ls")) {
+				return { stdout: "", stderr: "" };
+			}
+			if (command.includes("docker volume inspect")) {
+				inspected += 1;
+				return {
+					stdout: inspected === 1 ? "empty\n" : "non-empty\n",
+					stderr: "",
+				};
+			}
+			return { stdout: "", stderr: "" };
+		};
+		mocks.execAsync.mockImplementation(async (command: string) => ask(command));
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => ask(command),
+		);
+		const log = vi.fn();
+		await expect(transferService(request(), log)).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+		expect(mocks.pipeBetweenServers).not.toHaveBeenCalled();
+		expect(mocks.deployPostgres).not.toHaveBeenCalled();
+		expect(log).toHaveBeenCalledWith(
+			expect.stringContaining("Restoring service"),
+		);
 	});
 });

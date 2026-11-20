@@ -1,5 +1,6 @@
 import { IS_CLOUD } from "@dokploy/server/constants";
 import type { ServiceType } from "@dokploy/server/db/schema";
+import { logger } from "@dokploy/server/lib/logger";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import {
 	evaluateBindMountHostPath,
@@ -29,8 +30,21 @@ type Logger = (line: string) => void;
 
 const q = (value: string) => quote([value]);
 
+// A check that cannot answer in this time refuses the transfer: a stalled
+// image pull or ssh link must not hang the request.
+export const CHECK_TIMEOUT_MS = 60_000;
+
 const runOn = (serverId: string | null, command: string) =>
-	serverId ? execAsyncRemote(serverId, command) : execAsync(command);
+	serverId
+		? execAsyncRemote(serverId, command, undefined, {
+				signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+			})
+		: execAsync(command, { timeout: CHECK_TIMEOUT_MS });
+
+// The first line of what a host said, cut short: it is shown to the caller.
+const detail = (error: unknown) =>
+	(error instanceof Error ? error.message.split("\n")[0] : "")?.slice(0, 160) ||
+	"unknown error";
 
 // Docker's own rule for the name of a volume. A name outside it is never a
 // named volume: Docker reads one that starts with `/` as a host path (a bind
@@ -80,13 +94,16 @@ export const assertTransferTargetAllowed = async (
 
 type VolumeState = "missing" | "empty" | "non-empty";
 
-// `docker volume inspect` first, because `docker run -v name:` would create a
-// volume that does not exist. The volume is only read (`:ro`).
+// Only an explicit "no such volume" / "no such file" is missing. Any other
+// failure (docker daemon down, permission denied, a listing that errors) exits
+// non-zero, which the caller reads as "could not check" and refuses.
+// `docker volume inspect` goes first because `docker run -v name:` would create
+// a volume that does not exist; the volume is only read (`:ro`).
 export const volumeStateCommand = (volume: string) =>
-	`if docker volume inspect ${q(volume)} >/dev/null 2>&1; then docker run --rm -v ${q(volume)}:/data:ro alpine sh -c 'if [ -n "$(ls -A /data 2>/dev/null)" ]; then echo non-empty; else echo empty; fi'; else echo missing; fi`;
+	`err=$(docker volume inspect ${q(volume)} 2>&1 >/dev/null); rc=$?; if [ $rc -eq 0 ]; then docker run --rm -v ${q(volume)}:/data:ro alpine sh -c 'if ! out=$(find /data -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; fi; if [ -n "$out" ]; then echo non-empty; else echo empty; fi'; elif printf %s "$err" | grep -qi 'no such volume'; then echo missing; else echo "$err" >&2; exit 1; fi`;
 
 export const directoryStateCommand = (directory: string) =>
-	`if [ ! -d ${q(directory)} ]; then echo missing; elif [ -n "$(ls -A ${q(directory)} 2>/dev/null)" ]; then echo non-empty; else echo empty; fi`;
+	`kind=$(stat -c %F -- ${q(directory)} 2>&1); rc=$?; if [ $rc -ne 0 ]; then case "$kind" in *'No such file or directory'*) echo missing;; *) echo "$kind" >&2; exit 1;; esac; elif [ "$kind" != directory ]; then echo "not a directory" >&2; exit 1; elif ! out=$(find ${q(directory)} -mindepth 1 -maxdepth 1 -print -quit 2>&1); then echo "$out" >&2; exit 1; elif [ -n "$out" ]; then echo non-empty; else echo empty; fi`;
 
 const readState = async (
 	serverId: string | null,
@@ -110,9 +127,9 @@ const stateOrBlocker = async (
 	} catch (error) {
 		return {
 			state: null,
-			blocker: `Could not check ${label} on the target server (${
-				error instanceof Error ? error.message.split("\n")[0] : "unknown error"
-			}), so the transfer is refused.`,
+			blocker: `Could not check ${label} on the target server (${detail(
+				error,
+			)}), so the transfer is refused.`,
 		};
 	}
 };
@@ -211,10 +228,12 @@ export const inspectTransferPlan = async (
 			blockers.push(`Transfer refused: ${entry.message}`);
 		}
 	} catch (error) {
+		logger.error(
+			{ err: error, serviceId: input.serviceId },
+			"[Transfer] The volume ownership check failed",
+		);
 		blockers.push(
-			`Could not check who the volumes belong to (${
-				error instanceof Error ? error.message.split("\n")[0] : "unknown error"
-			}), so the transfer is refused.`,
+			"Could not check who the volumes belong to, so the transfer is refused. The error is in the server log.",
 		);
 		refusedNames = new Set(wellNamed);
 	}
@@ -262,6 +281,8 @@ export const inspectTransferPlan = async (
 			);
 			continue;
 		}
+		// Only "missing" on the source skips the target: the transfer copies
+		// nothing then. A source that cannot be read refuses.
 		let existsOnSource = false;
 		try {
 			existsOnSource =
@@ -269,9 +290,11 @@ export const inspectTransferPlan = async (
 					input.sourceServerId,
 					directoryStateCommand(hostPath),
 				)) !== "missing";
-		} catch {
-			// Not found on the source is how the transfer treats it as well: it
-			// copies nothing then.
+		} catch (error) {
+			blockers.push(
+				`Could not check bind mount ${show(hostPath)} on the source server (${detail(error)}), so the transfer is refused.`,
+			);
+			continue;
 		}
 		const { state, blocker } = existsOnSource
 			? await stateOrBlocker(
@@ -413,4 +436,43 @@ export const logComposeHostBinds = (binds: ComposeHostBind[], log: Logger) => {
 			.map(describeComposeHostBind)
 			.join("; ")}`,
 	);
+};
+
+// The same check at the moment the data lands: the plan was made before the
+// service was stopped, and a volume or directory can have been filled since.
+// Throws unless the target is empty, missing, or named in overwriteTargets.
+export const assertTargetStillClear = async ({
+	targetServerId,
+	kind,
+	name,
+	overwriteTargets,
+}: {
+	targetServerId: string | null;
+	kind: "volume" | "directory";
+	name: string;
+	overwriteTargets: string[];
+}) => {
+	if (overwriteTargets.includes(name)) {
+		return;
+	}
+	let state: VolumeState;
+	try {
+		state = await readState(
+			targetServerId,
+			kind === "volume"
+				? volumeStateCommand(name)
+				: directoryStateCommand(name),
+		);
+	} catch (error) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Transfer refused: could not check ${kind} ${show(name)} on the target server (${detail(error)}).`,
+		});
+	}
+	if (state === "non-empty") {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message: `Transfer refused: the target server now holds data under ${show(name)}, and it is not listed in overwriteTargets.`,
+		});
+	}
 };

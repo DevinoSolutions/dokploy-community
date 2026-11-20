@@ -41,8 +41,7 @@ export const SCIM_ALL_SCOPES: readonly SCIMScope[] = [
 ];
 
 /** Ban reason that marks a ban as owned by SCIM lifecycle reconciliation. */
-export const SCIM_DEPROVISIONED_BAN_REASON =
-	"Deactivated by SCIM provisioning";
+export const SCIM_DEPROVISIONED_BAN_REASON = "Deactivated by SCIM provisioning";
 
 /**
  * HMAC key for the plugin's stored credential digests. An explicit
@@ -65,7 +64,10 @@ export const getScimCredentialHashSecret = (
  * existing membership keeps its role.
  */
 export const reconcileScimMembership = async (
-	state: Pick<SCIMProjectedUserState, "provisioningDomainId" | "userId" | "active">,
+	state: Pick<
+		SCIMProjectedUserState,
+		"provisioningDomainId" | "userId" | "active"
+	>,
 	{ database }: SCIMTransactionContext,
 ) => {
 	if (!state.active) return;

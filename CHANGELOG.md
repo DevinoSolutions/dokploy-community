@@ -4,7 +4,7 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
-Upgrade notes: no database migration and nothing to configure. The transfer API gains an optional `overwriteTargets` list and a read-only `transfer.preflight` query; the Transfer dialog is unchanged.
+Upgrade notes: no database migration and nothing to configure. The transfer API gains an optional `overwriteTargets` list and a read-only `transfer.preflight` query; the Transfer dialog now checks first and, when the target already holds data, lists it and asks for a confirmation before writing over it.
 
 **Security.**
 
@@ -15,7 +15,7 @@ Upgrade notes: no database migration and nothing to configure. The transfer API 
 
 **Added.**
 
-- `transfer.preflight` is a read-only query (same permissions as starting a transfer) that lists the volumes and bind mounts a transfer would move, which of them already hold data on the target, the host paths a compose file binds that will not be copied, and the reason the transfer would be refused. Starting a transfer logs the same warning about the compose host paths.
+- `transfer.preflight` is a read-only query (same permissions as starting a transfer) that lists the volumes and bind mounts a transfer would move, which of them already hold data on the target, the host paths a compose file binds that will not be copied, and the reason the transfer would be refused. Starting a transfer logs the same warning about the compose host paths. Every check fails closed: a host that cannot answer, a docker error or an unreadable directory refuses the transfer instead of counting as empty, and the check is repeated right before each volume or directory is copied.
 
 ### New in v0.31.0-community.8
 

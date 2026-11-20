@@ -91,10 +91,7 @@ const normalizeDir = (value: string | null | undefined): string | null => {
 	const trimmed = value.trim();
 	if (!trimmed) return null;
 	const cleaned = trimTrailingSlashes(
-		trimmed
-			.replace(/\\/g, "/")
-			.replace(/^\.\//, "")
-			.replace(/^\/+/, ""),
+		trimmed.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, ""),
 	);
 	if (cleaned === "" || cleaned === ".") return "";
 	return cleaned;

@@ -68,8 +68,8 @@ import { quote } from "shell-quote";
 import { assertComposeVolumesBound } from "./compose-volume-binding";
 import {
 	assertDeploymentNotCancelled,
-	isDeploymentCancelledError,
 	getDeploymentWallLimitMinutes,
+	isDeploymentCancelledError,
 	isDeploymentStillRunning,
 	toCancelledErrorIfCancelled,
 } from "./deployment-cancel";
